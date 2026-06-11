@@ -819,29 +819,30 @@ Simulates the `continue`/`break`/retry-limit logic from `conversation_loop.py` w
 ### Step-by-Step
 
 ```bash
-# 1. Create SOUL.md
+# 1. Fork this repo on GitHub
+#    Go to https://github.com/obelisk-complex/hermes-agent and click Fork
+#    (or use: gh repo fork obelisk-complex/hermes-agent --clone)
+
+# 2. Set remotes
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+git pull origin main                    # gets all custom commits
+
+# 3. Create SOUL.md
 cat > ~/.hermes/SOUL.md << 'EOF'
 ## Self-checking harness
 **Pre-flight:** load self-checking-harness skill before each task. Info complete? rollback path? tools+access OK? known-good state before change? can outcome be proven?
 **Post-action:** actual state matches config? previously-working still works? new errors? docs updated? temps cleaned?
 EOF
 
-# 2. Create plugin directory + files
+# 4. Create plugin directory + files
 mkdir -p ~/.hermes/plugins/self-check-enforcer
+# Write plugin.yaml and __init__.py (from Layer 3 section in this doc)
 
-# Write plugin.yaml (see Layer 3 section)
-# Write __init__.py (see Layer 3 source code)
-
-# 3. Verify
-# Restart Hermes and confirm hooks are registered:
-# - hermes update auto-rebases all changes (on the fork)
-# - Plugin auto-loads on session start
-# - delegate_task returning FAIL sets gate violation
-# - send_message("ALL CLEAR") blocked when violation open
-# - Direct text claiming success blocked by on_output hook
-
-# 4. Run test suite
-cd <hermes_root> && python3 ~/.hermes/scripts/test-on-output-hook.py
+# 5. Verify
+# Restart Hermes — the fork's source already has all on_output hooks
+# and NO-OP guard committed. The plugin auto-loads harness on session start.
+# delegate_task returning FAIL sets gate violation.
+# send_message("ALL CLEAR") blocked when violation open.
 ```
 
 ### Verification Checklist
