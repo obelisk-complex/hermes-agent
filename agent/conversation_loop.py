@@ -446,6 +446,7 @@ def run_conversation(
 
     # Per-turn retry counters
     agent._on_output_blocks = 0
+    _blocked = False  # Set True by on_output plugin when output is blocked
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
@@ -4192,17 +4193,23 @@ def run_conversation(
                             agent._empty_content_retries = 0
                             agent._post_tool_empty_retried = False
                             agent._on_output_blocks += 1
-                            if agent._on_output_blocks > 4:
-                                final_response = (
-                                    "⚠️ Output blocked after 5 attempts. "
-                                    "The task could not be completed due to "
-                                    "repeated policy violations."
-                                )
-                                agent._on_output_blocks = 0
-                                break
-                            continue
+                            _blocked = True
+                            break
+                    if _blocked:
+                        if agent._on_output_blocks > 4:
+                            final_response = (
+                                "⚠️ Output blocked after 5 attempts. "
+                                "The task could not be completed due to "
+                                "repeated policy violations."
+                            )
+                            agent._on_output_blocks = 0
+                        else:
+                            continue  # Retry: continue outer while loop
 
-                _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+                if _blocked:
+                    _turn_exit_reason = "text_response(blocked_by_policy)"
+                else:
+                    _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
                     agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
                 break
@@ -4267,7 +4274,9 @@ def run_conversation(
     # ── Post-loop: on_output for budget-exhaustion / non-standard exits ──
     # Fires when the LLM finished with a summary due to budget exhaustion
     # or other non-standard exit.  No retry here — the loop has exited.
-    if final_response and not interrupted:
+    # `_blocked` is False by default (from in-loop hook) so normal text
+    # completions that already fired the hook skip this second invocation.
+    if final_response and not interrupted and not _blocked:
         from hermes_cli.plugins import invoke_hook as _budget_invoke
         _budget_results = _budget_invoke(
             "on_output",

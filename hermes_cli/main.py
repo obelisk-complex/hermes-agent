@@ -6401,6 +6401,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
         print()
         print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
         print(f"→ Upstream has {upstream_ahead} new commit(s). Rebasing...")
+        # Stash uncommitted changes before rebase (if any) so working tree is clean
         try:
             subprocess.run(
                 git_cmd + ["rebase", "upstream/main"],
@@ -6408,7 +6409,16 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
                 check=True,
             )
             print("  ✓ Rebased custom commits onto upstream/main")
-            subprocess.run(
+        except subprocess.CalledProcessError:
+            print("  ✗ Rebase failed. Resolve conflicts manually:")
+            print("    git rebase --continue")
+            print("    git rebase --abort  # to cancel")
+            sys.exit(1)
+
+        # Push is separate from rebase — if the lease fails we need an
+        # accurate message (not "rebase failed").
+        try:
+            push_result = subprocess.run(
                 git_cmd + ["push", "--force-with-lease", "origin", "main"],
                 cwd=cwd,
                 capture_output=True,
@@ -6416,12 +6426,16 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
                 check=True,
             )
             print("  ✓ Pushed rebased changes to origin/main")
-            return True
-        except subprocess.CalledProcessError:
-            print("  ✗ Rebase failed. Resolve conflicts manually:")
-            print("    git rebase --continue")
+        except subprocess.CalledProcessError as _push_err:
+            print("  ✗ Failed to push rebased changes to origin/main.")
+            if _push_err.stderr:
+                print(f"    {_push_err.stderr.strip().splitlines()[0]}")
+            print()
+            print("  Your local repo has been rebased but the fork on GitHub")
+            print("  could not be updated. Push manually with:")
             print("    git push --force-with-lease origin main")
             sys.exit(1)
+        return True
 
     # If upstream is not ahead, fork is up to date
     if upstream_ahead == 0:
@@ -8446,7 +8460,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # Even if origin is up to date, the fork may be behind upstream
             _did_sync = False
             if is_fork and branch == "main":
-                _did_sync = _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+                try:
+                    _did_sync = _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+                except SystemExit:
+                    # Rebase/push failure — restore stash before exiting so
+                    # uncommitted changes aren't left orphaned in a stash.
+                    if auto_stash_ref is not None:
+                        _restore_stashed_changes(
+                            git_cmd,
+                            PROJECT_ROOT,
+                            auto_stash_ref,
+                            prompt_user=False,
+                            input_fn=gw_input_fn,
+                        )
+                    raise
 
             # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
@@ -8612,8 +8639,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
+        # Fork upstream sync logic (only for main branch on forks).
+        # Skip if rebase already handled this in the commit_count == 0 path.
+        if is_fork and branch == "main" and not _rebase_sync_done:
             _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
