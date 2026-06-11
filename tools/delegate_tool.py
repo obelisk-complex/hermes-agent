@@ -640,7 +640,7 @@ def _build_child_system_prompt(
     )
     parts.append(
         "\n\n═══ VERIFIES_TASK INSTRUCTION ═══\n"
-        "If the task's GOAL or CONTEXT contains `verifies_task=<id>`,\n"
+        "If the task's goal or description contains `verifies_task=<id>`,\n"
         "include `VERIFIES_TASK: <id>` at the very beginning of your\n"
         "summary. This allows the parent to correlate your result with\n"
         "the original failure being re-verified.\n"
