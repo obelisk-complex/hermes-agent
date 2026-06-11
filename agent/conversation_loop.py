@@ -444,6 +444,9 @@ def run_conversation(
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
+    # Per-turn retry counters
+    agent._on_output_blocks = 0
+
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
     # all run inside Codex). Default Hermes path is bypassed entirely.
@@ -4164,7 +4167,41 @@ def run_conversation(
                     messages.pop()
 
                 messages.append(final_msg)
-                
+
+                # ── Plugin hook: on_output ──────────────────────────────────
+                # Fires when the LLM produces final text with no tool calls.
+                # Plugin returns {"action": "block", "message": "..."} to
+                # reject the output and force the model to retry.  Return None
+                # or a dict without "block" action → allow output through.
+                if final_response and not interrupted:
+                    from hermes_cli.plugins import invoke_hook as _on_invoke
+                    _on_results = _on_invoke(
+                        "on_output",
+                        response_text=final_response,
+                        session_id=agent.session_id or "",
+                        model=agent.model,
+                        platform=getattr(agent, "platform", None) or "",
+                    )
+                    for _ores in _on_results:
+                        if isinstance(_ores, dict) and _ores.get("action") == "block":
+                            _msg = _ores.get(
+                                "message",
+                                "Output rejected by policy. Please revise and retry.",
+                            )
+                            messages.append({"role": "user", "content": _msg})
+                            agent._empty_content_retries = 0
+                            agent._post_tool_empty_retried = False
+                            agent._on_output_blocks += 1
+                            if agent._on_output_blocks > 4:
+                                final_response = (
+                                    "⚠️ Output blocked after 5 attempts. "
+                                    "The task could not be completed due to "
+                                    "repeated policy violations."
+                                )
+                                agent._on_output_blocks = 0
+                                break
+                            continue
+
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
                     agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
@@ -4226,7 +4263,28 @@ def run_conversation(
                 # session resume (avoids consecutive user messages).
                 messages.append({"role": "assistant", "content": final_response})
                 break
-    
+
+    # ── Post-loop: on_output for budget-exhaustion / non-standard exits ──
+    # Fires when the LLM finished with a summary due to budget exhaustion
+    # or other non-standard exit.  No retry here — the loop has exited.
+    if final_response and not interrupted:
+        from hermes_cli.plugins import invoke_hook as _budget_invoke
+        _budget_results = _budget_invoke(
+            "on_output",
+            response_text=final_response,
+            session_id=agent.session_id or "",
+            model=agent.model,
+            platform=getattr(agent, "platform", None) or "",
+        )
+        for _bres in _budget_results:
+            if isinstance(_bres, dict) and _bres.get("action") == "block":
+                _msg = _bres.get(
+                    "message",
+                    "Output rejected by policy during budget-exhaustion summary.",
+                )
+                final_response = _msg
+                break
+
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.
