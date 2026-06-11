@@ -1,0 +1,47 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily at 06:00 UTC
+  workflow_dispatch:       # also triggerable manually
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # full history needed for rebase
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream main --quiet
+
+      - name: Check if upstream has new commits
+        id: check
+        run: |
+          UPSTREAM_AHEAD=$(git rev-list --count origin/main..upstream/main 2>/dev/null || echo "0")
+          CUSTOM_AHEAD=$(git rev-list --count upstream/main..origin/main 2>/dev/null || echo "0")
+          echo "upstream_ahead=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
+          echo "custom_ahead=$CUSTOM_AHEAD" >> $GITHUB_OUTPUT
+          echo "Upstream ahead by $UPSTREAM_AHEAD commits"
+          echo "Fork ahead by $CUSTOM_AHEAD commits (custom)"
+
+      - name: Rebase and push
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          UPSTREAM_AHEAD="${{ steps.check.outputs.upstream_ahead }}"
+          CUSTOM_AHEAD="${{ steps.check.outputs.custom_ahead }}"
+          echo "⚜️ Rebasing $CUSTOM_AHEAD custom commit(s) on $UPSTREAM_AHEAD new upstream commit(s)..."
+          git config user.email "obelisk@users.noreply.github.com"
+          git config user.name "obelisk-complex"
+          git rebase upstream/main
+          git push --force-with-lease origin main
+          echo "✓ Fork synced — $CUSTOM_AHEAD commit(s) rebased, pushed to origin/main"
