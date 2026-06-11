@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.4** with FAIL regex negative lookahead for false-positive suppression, opus QA fixes, and read-only tool exemptions.
+A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5** with auto-sync via GitHub Actions, CI test fixes, and a complete setup guide for fresh agents.
 
 ## Architecture (3 Layers)
 
@@ -157,11 +157,12 @@ TOOLSETS: [terminal, file, web, ...]
 
 ```yaml
 name: self-check-enforcer
-version: "3.4.0"
+version: "3.5.0"
 description: "Auto-loads the self-checking-harness skill and enforces gate
-  compliance. v3.4: FAIL regex negative lookahead + opus QA fixes,
-  read-only tool exemptions in post_tool_call."
-author: hermes
+  compliance. v3.5: GH Actions auto-sync, CI test fixes; v3.4: FAIL regex
+  negative lookahead, on_output retry fix, read-only tool exemption;
+  v3.3: subagent_stop detection, verifies_task auto-clear,
+  [GATE:ACCEPTING:] allowlist token, citation checker."
 kind: standalone
 hooks:
   - pre_tool_call
@@ -179,7 +180,7 @@ hooks:
 **File:** `~/.hermes/plugins/self-check-enforcer/__init__.py`
 
 ```python
-"""Self-check enforcer plugin — v3.4: FAIL regex negative lookahead + opus QA fixes.
+"""Self-check enforcer plugin — v3.5: GH Actions auto-sync + CI test fixes.
 
 v1: auto-loads harness on session start
 v2: gate-violation detection + per-turn enforcement
@@ -195,6 +196,10 @@ v3.4: FAIL regex uses (?!.*(?i:\bfixed\b)) negative lookahead to suppress
       on_post_tool_call exempts read-only content tools (read_file, search_files,
       web_extract) from FAIL scanning — they return content verbatim, so "FAIL"
       in output is descriptive text, not a tool-operation failure
+v3.5: Layer 4 (patch persistence) removed — changes committed on the fork;
+      GitHub Actions daily sync workflow rebases custom commits on upstream/main;
+      VERIFIES_TASK instruction uses "goal or description" not "GOAL or CONTEXT"
+      to pass CI CONTEXT-not-in-prompt assertions
 """
 
 from __future__ import annotations
@@ -838,7 +843,12 @@ EOF
 mkdir -p ~/.hermes/plugins/self-check-enforcer
 # Write plugin.yaml and __init__.py (from Layer 3 section in this doc)
 
-# 5. Verify
+# 5. Auto-sync
+#    The fork's .github/workflows/sync-upstream.yml runs daily at 04:00 Pacific,
+#    fetching upstream/main, rebasing custom commits, and pushing to origin.
+#    No local machine needed — runs on GitHub's infrastructure.
+
+# 6. Verify
 # Restart Hermes — the fork's source already has all on_output hooks
 # and NO-OP guard committed. The plugin auto-loads harness on session start.
 # delegate_task returning FAIL sets gate violation.
@@ -919,6 +929,28 @@ After install, confirm:
 
 ---
 
+22. **v3.4 FAIL regex false-positive filter (round 8 gate fix):** `_FAIL_PATTERN` changed from `\bFAIL\b` to `\bFAIL\b(?!.*(?i:\bfixed\b))`. When a subagent summary contains "FAIL #1 — FIXED" throughout section headers, the gate scanner previously saw FAIL and flagged it as a violation — even though every FAIL was followed by FIXED describing a remediated issue. The negative lookahead suppresses matches when FIXED appears after FAIL on the same line, case-insensitively. FAIL itself remains case-sensitive.
+
+23. **v3.4 on_output retry loop scope fix (round 7 QA):** The in-loop on_output's `continue` and `break` targeted the inner `for _ores` loop, not the outer `while` loop. Fixed by introducing a `_blocked` flag: for loop sets `_blocked = True` and breaks; afterwards, if blocked and retry limit not exceeded, `continue` targets the while loop triggering a real LLM retry. `_blocked` initialized at function scope so the post-loop guard can reference it.
+
+24. **v3.4 post-loop double-fire guard (round 7 QA):** Post-loop hook guarded with `and not _blocked` so normal text completions that already fired the in-loop hook skip the second invocation. Budget-exhaustion and error exits bypass the in-loop handler, so `_blocked` stays False and the post-loop hook fires correctly for non-standard exits.
+
+25. **v3.4 Source patches idempotent (round 8):** All 4 patch files in `~/.hermes/patches/` updated to match the committed-on-fork source code. `003-on-output-update-hook.patch` no longer contains `import subprocess, os` (removed the redundant local import that caused `UnboundLocalError`). `002-on-output-conversation-loop.patch` updated to reflect the `_blocked`-flag fixed version. The `apply-on-output-patches.sh` script's existing idempotency logic now reports `✓ Already applied` for all 4 patches instead of `⚠ Cannot apply (conflict)`.
+
+26. **v3.4 FAIL_PATTERN_SHORT kept in sync:** Updated identically to FAIL_PATTERN for consistency.
+
+27. **v3.4 on_post_tool_call read-only tool exemption (round 9):** `on_post_tool_call` exempts `read_file`, `search_files`, and `web_extract` from FAIL scanning. These tools return content verbatim, so "FAIL" in their output is always descriptive text — not a tool-operation failure.
+
+28. **v3.4 Layer 4 removed — patch persistence system gutted (round 10):** All 6 patch files, `apply-on-output-patches.sh`, the post-update hook in `main.py`, the session-start trigger in `__init__.py`, and the daily cron job removed. Changes are now committed on the fork and auto-rebased.
+
+29. **v3.5 GitHub Actions daily sync (round 11):** `.github/workflows/sync-upstream.yml` runs daily at 04:00 Pacific (11:00 UTC). Fetches upstream/main, rebases custom commits, force-pushes to origin. Silent when up-to-date. Also triggerable from the Actions tab. Runs on GitHub infrastructure — no local machine needed.
+
+30. **v3.5 CI test fixes (round 11):** Two upstream tests fixed:
+    - `test_empty_context_ignored` / `test_goal_only`: Our VERIFIES_TASK instruction contained literal `CONTEXT`. Changed to `"goal or description"`.
+    - `test_update_on_fork_checks_upstream_when_origin_up_to_date`: Mock needed `return_value=None` because the function now returns bool (MagicMock default is truthy).
+
+---
+
 ## Git Diff Summary (All Changes)
 
 ```
@@ -926,10 +958,11 @@ After install, confirm:
  agent/conversation_loop.py        | 63 +++++++++++++++++++++++++++++---
  hermes_cli/main.py                | 91 ++++++++++++++++++++++++++++++++
  tools/delegate_tool.py            | 16 +++++++++
+ .github/workflows/sync-upstream.yml | 47 ++++++++++++++++++++++
  ~/.hermes/plugins/self-check-enforcer/__init__.py | 2 regex lines changed
                                                      (v3.4)
  ~/.hermes/plugins/self-check-enforcer/plugin.yaml | +2 hooks declared
- 6 files changed, ~185 insertions
+ 7 files changed, ~232 insertions
 ```
 
 ---
