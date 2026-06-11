@@ -802,7 +802,11 @@ def register(ctx) -> None:
 
 ---
 
-## Layer 4 — Source Modifications (on_output Hook + NO-OP Guard)
+## Layer 4 — Source Modifications (on_output Hook + NO-OP Guard) — REMOVED v3.4
+
+> **⚠️ Removed in v3.4.** Layer 4 previously carried 4 patch files + an apply script to re-apply source changes after `git pull upstream main` would overwrite them. Now that all changes are committed history on the obelisk-complex/hermes-agent fork and auto-rebased on every `hermes update`, the patch persistence system is vestigial. The 4 `.patch` files, `apply-on-output-patches.sh`, `verify-on-output-patches.py`, the post-update hook in `main.py`, the session-start trigger in `__init__.py`, and the daily cron job have all been removed.
+
+The changes described in this section are still in effect — they're committed directly in the repo source rather than applied as patches.
 
 ### Why It's Needed
 
@@ -1627,6 +1631,8 @@ Then verify: `python3 ~/.hermes/patches/verify-on-output-patches.py`
  26. **v3.4 FAIL_PATTERN_SHORT kept in sync:** Updated identically to FAIL_PATTERN for consistency.
 
  27. **v3.4 on_post_tool_call read-only tool exemption (round 9):** `on_post_tool_call` exempts `read_file`, `search_files`, and `web_extract` from FAIL scanning. These tools return content verbatim (file contents, search results, web page text), so "FAIL" appearing in their output is always descriptive text from the source being read — not a signal that the tool operation itself failed. Previously, reading a README that said "Subagents return FAIL if a task needs no work" would trigger a gate violation. The exemption removes this noise without affecting any real detection capability: the primary FAIL detection chain (`on_subagent_stop` → `on_output` → `pre_tool_call`) is untouched. Threat model reviewed: no meaningful escape routes created (see analysis in conversation).
+
+ 28. **v3.4 Layer 4 removed — patch persistence system gutted (round 10):** The 4 `.patch` files, `apply-on-output-patches.sh`, `verify-on-output-patches.py`, the post-update hook in `main.py`, the session-start trigger in `__init__.py`, and the daily cron job have all been removed. Layer 4 existed to re-apply source changes after `git pull upstream main` would overwrite them — but all changes are now committed history on `obelisk-complex/hermes-agent` and auto-rebased on every `hermes update`. The patch files were reporting `Already applied` every run anyway. The session-start `threading.Thread` daemon that ran the apply script is gone. The `import subprocess` in `__init__.py` is also removed (was only needed by the session-start trigger). The implementation details of the on_output hook and NO-OP guard remain accurate in the doc for reference.
 
 ---
 
