@@ -97,10 +97,18 @@ _GIT_TIMEOUT = 2.5
 
 
 # Per-model edit-format steering. Matching the edit tool format to how a model
-# was trained reduces mistakes and wasted reasoning (OpenAI/Codex handle
-# patch-style diffs best; Anthropic models — and most open-weight coding
-# models, whose RL scaffolds use str_replace-style editors — do best with
-# string-replacement). Our `patch` tool exposes both: mode="patch" (V4A
+# was trained reduces mistakes and wasted reasoning. Documented sources:
+# - GPT/Codex → V4A patch: OpenAI's GPT-4.1 prompting guide ships apply_patch
+#   with the V4A diff format as the recommended editing tool, and Codex CLI
+#   uses apply_patch natively.
+#   https://developers.openai.com/cookbook/examples/gpt4-1_prompting_guide
+# - Claude → str_replace: Anthropic ships `str_replace_based_edit_tool` as a
+#   schema-less tool whose schema is *built into the model* (trained-in).
+#   https://platform.claude.com/docs/en/agents-and-tools/tool-use/text-editor-tool
+# - Open-weight coding models → str_replace: the dominant open RL/agentic
+#   scaffolds (SWE-agent, OpenHands ACI) use str_replace-style editors, and
+#   Qwen Code / Gemini CLI ship old_string/new_string `replace` tools.
+# Our `patch` tool exposes both: mode="patch" (V4A
 # multi-file) and mode="replace" (find-and-swap). We nudge each family toward
 # its native format. Unknown families get nothing (the brief's neutral wording
 # stands). Substrings match the model id; aligned with TOOL_USE_ENFORCEMENT_MODELS.
@@ -228,7 +236,7 @@ class ContextProfile:
 
 
 # Skill categories that are clearly not part of a coding workflow. Hidden from
-# the prompt's skill index in the coding posture (deny-list — anything not
+# the prompt's skill index only under the opt-in ``focus`` mode (deny-list — anything not
 # listed here, incl. custom user categories, stays visible). Coding-adjacent
 # categories (devops, github, mcp, data-science, diagramming, research,
 # security, …) are intentionally absent.
@@ -433,7 +441,15 @@ class RuntimeMode:
         return blocks
 
     def hidden_skill_categories(self) -> frozenset[str]:
-        """Skill categories to prune from the prompt's skill index (may be empty)."""
+        """Skill categories to prune from the prompt's skill index (may be empty).
+
+        Gated on the opt-in ``focus`` mode, like the toolset collapse: the
+        default posture must never silently hide skills from users who didn't
+        ask for a lean prompt — a hidden skill is effectively never loaded
+        proactively, footer note or not.
+        """
+        if self.config_mode != "focus":
+            return frozenset()
         return frozenset(self.profile.hidden_skill_categories)
 
 
@@ -642,9 +658,9 @@ def _project_facts(root: Path) -> list[str]:
         deduped = list(dict.fromkeys(verify))[:_MAX_VERIFY_COMMANDS]
         facts.append(f"- Verify: {'; '.join(deduped)}")
 
-    context_files = [c for c in _CONTEXT_FILES if (root / c).is_file()]
-    if context_files:
-        facts.append(f"- Context files: {', '.join(context_files)}")
+    # Note: context files (AGENTS.md / CLAUDE.md / .cursorrules) are NOT listed
+    # here — their full contents are already injected into the system prompt as
+    # the Project Context block, so naming them again is redundant.
 
     return facts
 

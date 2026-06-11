@@ -152,11 +152,14 @@ class TestProjectFacts:
         assert "make test" in block
         assert "make deploy" not in block
 
-    def test_context_files_listed(self, tmp_path):
+    def test_context_files_not_listed(self, tmp_path):
+        # Context files (AGENTS.md etc.) are injected into the system prompt
+        # in full as the Project Context block — naming them in the snapshot
+        # would be redundant.
         _git_init(tmp_path)
         (tmp_path / "AGENTS.md").write_text("# rules")
         block = cc.build_coding_workspace_block(tmp_path)
-        assert "Context files: AGENTS.md" in block
+        assert "Context files:" not in block
 
     def test_marker_only_project_gets_snapshot_without_git(self, tmp_path):
         # A non-git project (manifest only) still gets a workspace snapshot —
@@ -368,12 +371,18 @@ class TestProfiles:
         assert cc.GENERAL_PROFILE.toolset is None
         assert cc.GENERAL_PROFILE.guidance == ""
 
-    def test_skill_pruning_scoped_to_coding_posture(self, tmp_path):
-        # Coding posture hides clearly-non-coding categories; coding-adjacent
-        # ones stay visible (deny-list semantics).
+    def test_skill_pruning_gated_on_focus(self, tmp_path):
+        # Skill-index pruning is opt-in via focus mode — the default (auto)
+        # coding posture must never silently hide skills. Deny-list semantics
+        # still apply under focus: coding-adjacent categories stay visible.
         _git_init(tmp_path)
-        coding = cc.resolve_runtime_mode(platform="cli", cwd=tmp_path, config={})
-        hidden = coding.hidden_skill_categories()
+        auto = cc.resolve_runtime_mode(platform="cli", cwd=tmp_path, config={})
+        assert auto.hidden_skill_categories() == frozenset()
+        focus = cc.resolve_runtime_mode(
+            platform="cli", cwd=tmp_path,
+            config={"agent": {"coding_context": "focus"}},
+        )
+        hidden = focus.hidden_skill_categories()
         assert "social-media" in hidden and "smart-home" in hidden
         for kept in ("github", "devops", "software-development", "data-science"):
             assert kept not in hidden
