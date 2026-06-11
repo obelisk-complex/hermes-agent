@@ -206,7 +206,10 @@ v3.3: verifies_task mechanical clear path, [GATE:ACCEPTING:] allowlist token,
 v3.4: FAIL regex uses (?!.*(?i:\bfixed\b)) negative lookahead to suppress
       false positives from "FAIL #1 — FIXED" patterns; on_output retry loop
       fixed (continue targets while-loop via _blocked flag, not inner for-loop);
-      post-loop hook guarded with not _blocked to prevent double-fire
+      post-loop hook guarded with not _blocked to prevent double-fire;
+      on_post_tool_call exempts read-only content tools (read_file, search_files,
+      web_extract) from FAIL scanning — they return content verbatim, so "FAIL"
+      in output is descriptive text, not a tool-operation failure
 """
 
 from __future__ import annotations
@@ -456,7 +459,7 @@ def on_post_tool_call(
     result: object = None,
     **kwargs: object,
 ) -> None:
-    if tool_name == "delegate_task":
+    if tool_name in ("delegate_task", "read_file", "search_files", "web_extract"):
         return
     if not result or not isinstance(result, str):
         return
@@ -795,6 +798,7 @@ def register(ctx) -> None:
 | Agent uses non-standard completion language | Regex denylist v3: (still evadable but false positives fixed) | ⚠️ Advisory — pattern boundary |
 | Agent ignores pre_llm_call reminder | Not sufficient alone — but on_output catches text | ✅ (chained) |
 | Agent writes completion without [GATE:ACCEPTING:] token | `_has_clearance_token()` requires explicit token per open violation | ✅ (v3.3) Structural — bounded allowlist |
+| Agent reads file containing "FAIL" in descriptive text | `on_post_tool_call` exempts read-only tools (v3.4) — content-retrieval tools return content verbatim, "FAIL" in content ≠ tool failure | ✅ Exempt — false-positive eliminated, primary chain intact |
 
 ---
 
@@ -1622,6 +1626,8 @@ Then verify: `python3 ~/.hermes/patches/verify-on-output-patches.py`
  25. **v3.4 Source patches idempotent (round 8):** All 4 patch files in `~/.hermes/patches/` updated to match the committed-on-fork source code. `003-on-output-update-hook.patch` no longer contains `import subprocess, os` (removed the redundant local import that caused `UnboundLocalError`). `002-on-output-conversation-loop.patch` updated to reflect the `_blocked`-flag fixed version. The `apply-on-output-patches.sh` script's existing idempotency logic now reports `✓ Already applied` for all 4 patches instead of `⚠ Cannot apply (conflict)`.
 
  26. **v3.4 FAIL_PATTERN_SHORT kept in sync:** Updated identically to FAIL_PATTERN for consistency.
+
+ 27. **v3.4 on_post_tool_call read-only tool exemption (round 9):** `on_post_tool_call` exempts `read_file`, `search_files`, and `web_extract` from FAIL scanning. These tools return content verbatim (file contents, search results, web page text), so "FAIL" appearing in their output is always descriptive text from the source being read — not a signal that the tool operation itself failed. Previously, reading a README that said "Subagents return FAIL if a task needs no work" would trigger a gate violation. The exemption removes this noise without affecting any real detection capability: the primary FAIL detection chain (`on_subagent_stop` → `on_output` → `pre_tool_call`) is untouched. Threat model reviewed: no meaningful escape routes created (see analysis in conversation).
 
 ---
 
