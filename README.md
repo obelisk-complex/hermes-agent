@@ -1,3 +1,19 @@
+## ⚜️ Obelisk Complex Fork — Customizations
+
+This is a personal fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with the following additions:
+
+| | Feature | Description |
+|---|---------|-------------|
+| 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
+| 🛡️ | **Self-check enforcer system** | 3-layer gate enforcement (SOUL.md → protocol skill → plugin hooks) — see [full spec](self-check-enforcement-system-v14.md) |
+| 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work |
+| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning (content tools return verbatim text, not tool failures) |
+| 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs |
+
+All changes carried as committed history and auto-rebased onto upstream/main.
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
@@ -28,22 +44,6 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 <tr><td><b>Runs anywhere, not just your laptop</b></td><td>Six terminal backends — local, Docker, SSH, Singularity, Modal, and Daytona. Daytona and Modal offer serverless persistence — your agent's environment hibernates when idle and wakes on demand, costing nearly nothing between sessions. Run it on a $5 VPS or a GPU cluster.</td></tr>
 <tr><td><b>Research-ready</b></td><td>Batch trajectory generation, trajectory compression for training the next generation of tool-calling models.</td></tr>
 </table>
-
----
-
-## ⚜️ Obelisk Complex Fork — Customizations
-
-This is a personal fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with the following additions:
-
-| | Feature | Description |
-|---|---------|-------------|
-| 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
-| 🛡️ | **Self-check enforcer system** | 4-layer gate enforcement — see [full spec](self-check-enforcement-system-v14.md) |
-| 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work |
-| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning (content tools return verbatim text, not tool failures) |
-| 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs |
-
-All changes carried as committed history and auto-rebased onto upstream/main.
 
 ---
 
