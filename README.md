@@ -33,15 +33,14 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 
 ## ⚜️ Obelisk Complex Fork — Customizations
 
-This is a private fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with the following additions:
+This is a personal fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with the following additions:
 
 | | Feature | Description |
 |---|---------|-------------|
 | 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
-| ✅ | **UnboundLocalError fix** | Removed redundant `import subprocess, os` from inside `_cmd_update_impl` that shadowed global `subprocess`/`os` imports |
 | 🛡️ | **Self-check enforcer system** | 4-layer gate enforcement — see [full spec](self-check-enforcement-system-v14.md) |
 | 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work |
-| 🔍 | **FAIL false-positive filter** | Gate regex excludes `FAIL #1 — FIXED` patterns |
+| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning (content tools return verbatim text, not tool failures) |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs |
 
 All changes carried as committed history and auto-rebased onto upstream/main.
