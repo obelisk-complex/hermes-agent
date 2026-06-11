@@ -631,6 +631,22 @@ def _build_child_system_prompt(
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
     parts.append(
+        "\n\n═══ MANDATORY INSTRUCTION ═══\n"
+        "If this task requires no real work, or the work has already\n"
+        "been completed by a prior subagent, return FAIL with reason\n"
+        "'NO-OP REJECTION: <explanation>'. Do NOT fabricate results.\n"
+        "A FAIL return is preferred over a fake-clean result.\n"
+        "═══ END MANDATORY INSTRUCTION ═══"
+    )
+    parts.append(
+        "\n\n═══ VERIFIES_TASK INSTRUCTION ═══\n"
+        "If the task's GOAL or CONTEXT contains `verifies_task=<id>`,\n"
+        "include `VERIFIES_TASK: <id>` at the very beginning of your\n"
+        "summary. This allows the parent to correlate your result with\n"
+        "the original failure being re-verified.\n"
+        "═══ END VERIFIES_TASK INSTRUCTION ═══"
+    )
+    parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
         "- What you did\n"
