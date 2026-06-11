@@ -173,9 +173,9 @@ TOOLSETS: [terminal, file, web, ...]
 name: self-check-enforcer
 version: "3.4.0"
 description: "Auto-loads the self-checking-harness skill and enforces gate
-  compliance. v3.3: subagent_stop-based delegate_task detection,
-  verifies_task mechanical auto-clear, [GATE:ACCEPTING:] allowlist token,
-  citation checker."
+  compliance. v3.4: FAIL regex negative lookahead, on_output retry fix,
+  read-only tool exemption; v3.3: subagent_stop detection, verifies_task
+  auto-clear, [GATE:ACCEPTING:] allowlist token, citation checker."
 author: hermes
 kind: standalone
 hooks:
@@ -732,7 +732,7 @@ def register(ctx) -> None:
     ctx.register_hook("on_output", on_output)
     ctx.register_hook("on_session_end", on_session_end)
 ```
-|### Detection Flow (Complete Cycle)
+### Detection Flow (Complete Cycle)
 
 ```
 0. Parent calls delegate_task with verifies_task=<original_violation_id> in context
@@ -772,10 +772,10 @@ def register(ctx) -> None:
      → _log_acceptances(): log to audit trail, remove acknowledged violations
    → 5 successive blocks? Deliver abort message
 
-7. on_session_end fires:
+6. on_session_end fires:
    → Clean up session state from _session_states dict
 
-8. Flag persists until:
+7. Flag persists until:
    (a) verifies_task re-dispatch succeeds → auto-clears matching violation
    (b) agent explicitly acknowledges each FAIL with [GATE:ACCEPTING:<id>]
    (c) session ends → auto-cleaned
@@ -1062,7 +1062,6 @@ Fires after every successful `git pull` (first step of `hermes update`). Runs BE
 ```python
         # Re-apply custom on-output patches after update overwrites source
         try:
-            import subprocess, os
             _apply_script = os.path.expanduser(
                 "~/.hermes/patches/apply-on-output-patches.sh"
             )
@@ -1164,7 +1163,7 @@ sys.exit(0)
 ### Patch Files (Git Diffs)
 
 **Live files on disk:** `~/.hermes/patches/` (4 `.patch` files)
-**Note:** The diff snapshots below show the patches as originally authored. The on-disk versions reflect the latest fixes (e.g., `_blocked` flag retry loop, removed redundant `import os`). Run `apply-on-output-patches.sh` to verify current state.
+**Note:** The diff snapshots below are representative — they show the structure of each patch but may lag behind the on-disk versions (e.g., `002-on-output-conversation-loop.patch` on disk has the `_blocked` flag fix; `003-on-output-update-hook.patch` on disk has `import subprocess, os` removed). Run `apply-on-output-patches.sh` to verify current state against source.
 
 **Location:** `~/.hermes/patches/`
 
@@ -1656,7 +1655,7 @@ Then verify: `python3 ~/.hermes/patches/verify-on-output-patches.py`
 | `pre_tool_call(tool_name, kwargs)` | Before any tool executes | `dict` to block; `None` to allow | Capture `verifies_task` from delegate_task context (v3.3); block `send_message` claiming ALL CLEAR while violation open; check `[GATE:ACCEPTING:]` clearance token (v3.3) |
 | `post_tool_call(tool_name, kwargs, result)` | After any tool returns | Ignored | Detect FAIL in non-delegate tool results (delegate_task handled by subagent_stop) |
 | `pre_llm_call(messages)` | Once per turn, before LLM loop | `{"context": "..."}` to inject | Inject gate-violation reminder + citation warnings into every turn |
-|| `post_llm_call(messages, response)` | Once per turn, after LLM | Ignored | (Not used — citation verification runs single-pass in `on_output`) |
+| `post_llm_call(messages, response)` | Once per turn, after LLM | Ignored | (Not used — citation verification runs single-pass in `on_output`) |
 | `transform_llm_output(response_text, ...)` | After loop exit, before delivery | First non-None string replaces `final_response` | (Not used) |
 | `transform_tool_result(tool_name, result)` | After tool returns, before model sees | Modified result string | Annotate FAIL results with [GATE CHECK] marker |
 | `on_session_start()` | New session created | Ignored | Auto-load harness; trigger background patch apply if marker missing |
