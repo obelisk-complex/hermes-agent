@@ -8743,16 +8743,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print()
         print("✓ Code updated!")
 
-        # Re-apply custom on-output patches after update overwrites source
-        try:
-            _apply_script = os.path.expanduser(
-                "~/.hermes/patches/apply-on-output-patches.sh"
-            )
-            if os.access(_apply_script, os.X_OK):
-                subprocess.run([_apply_script], check=False)
-        except Exception:
-            pass  # Non-fatal — patches can be applied manually
-
         # Seed the model-catalog disk cache from the freshly-pulled checkout.
         # The repo ships the canonical catalog at
         # website/static/api/model-catalog.json, and `git pull` just made it
