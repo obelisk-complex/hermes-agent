@@ -1,6 +1,26 @@
 ## ⚜️ Obelisk Complex Fork — Customizations
 
-**What this is:** This fork adds a **self-check enforcement system** to the Hermes agent — a set of mechanical guards that prevent the agent from reporting tasks as complete when subagent validation gates have actually failed. The agent is instructed (via SOUL.md), bound by protocol (via a harness skill), and mechanically blocked (via plugin hooks) from emitting "ALL CLEAR" while unresolved FAIL results exist.
+**What this is:** This fork adds a **self-check enforcement system** to the Hermes agent — three layers that together prevent the agent from claiming success when subagent validation gates have actually failed:
+
+1. **SOUL.md** (`~/.hermes/SOUL.md`) — always-injected identity that tells the agent to load the harness before every task. Written by the user per the spec.
+2. **Self-checking-harness skill** — a 5-gate protocol the agent follows: *Pre-flight* (info complete? rollback path? tools+access OK? known-good state? provable outcome?) and *Post-action* (actual state matches config? previously-working still works? new errors? docs updated?). Loaded as a skill.
+3. **Self-check-enforcer plugin + committed source hooks** — mechanically enforces compliance. Blocks `send_message("ALL CLEAR")` while unresolved FAIL exist. Detects FAIL in subagent summaries. Injects violation reminders every turn. Auto-clears violations on re-verified dispatches. Intercepts text output mid-turn.
+
+Layers 1 and 2 are advisory — they rely on the agent's compliance. Layer 3 is mechanical and cannot be bypassed by any tool call or text output.
+
+**What's in the fork vs what you write locally:**
+
+| Component | In fork source? | User creates? |
+|-----------|----------------|---------------|
+| `on_output` hook + retry logic | ✅ `agent/conversation_loop.py` | — |
+| `"on_output"` in valid hooks | ✅ `hermes_cli/plugins.py` | — |
+| NO-OP rejection guard + VERIFIES_TASK | ✅ `tools/delegate_tool.py` | — |
+| Daily upstream sync workflow | ✅ `.github/workflows/sync-upstream.yml` | — |
+| SOUL.md | ❌ personal config | ✅ per v15 spec |
+| Self-checking-harness skill | ❌ skill config | ✅ per v15 spec |
+| Plugin `__init__.py` + `plugin.yaml` | ❌ plugin config | ✅ per v15 spec |
+
+The full setup guide is in [self-check-enforcement-system-v15.md](self-check-enforcement-system-v15.md).
 
 **Files touched in the fork source:**
 
