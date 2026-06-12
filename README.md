@@ -1,16 +1,28 @@
 ## ⚜️ Obelisk Complex Fork — Customizations
 
-This is a personal fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with the following additions:
+**What this is:** This fork adds a **self-check enforcement system** to the Hermes agent — a set of mechanical guards that prevent the agent from reporting tasks as complete when subagent validation gates have actually failed. The agent is instructed (via SOUL.md), bound by protocol (via a harness skill), and mechanically blocked (via plugin hooks) from emitting "ALL CLEAR" while unresolved FAIL results exist.
+
+**Files touched in the fork source:**
+
+| File | Change |
+|------|--------|
+| `hermes_cli/plugins.py` | Added `"on_output"` to `VALID_HOOKS` — enables text-output interception |
+| `agent/conversation_loop.py` | Added `on_output` hook call sites + retry logic — blocks ALL CLEAR text mid-turn |
+| `hermes_cli/main.py` | Auto-rebase logic: `hermes update` detects fork, fetches upstream, rebases custom commits |
+| `tools/delegate_tool.py` | NO-OP rejection guard + VERIFIES_TASK instruction — subagents return FAIL on no-op work |
+| `.github/workflows/sync-upstream.yml` | Daily sync at 0400 Pacific — fetches upstream, rebases, pushes to origin (server-side, no local machine needed) |
+
+**Feature summary:**
 
 | | Feature | Description |
 |---|---------|-------------|
 | 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
 | 🛡️ | **Self-check enforcer system** | 3-layer gate enforcement (SOUL.md → protocol skill → plugin hooks) — see [full spec](self-check-enforcement-system-v15.md) |
-| 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work |
-| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning (content tools return verbatim text, not tool failures) |
-| 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs |
+| 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work — prevents flag-clearing via fake dispatches |
+| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning |
+| 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
-All changes carried as committed history and auto-rebased onto upstream/main.
+All changes carried as committed history on `main` and auto-rebased onto upstream/main on every `hermes update` and daily via GitHub Actions.
 
 ---
 
