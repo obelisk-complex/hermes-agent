@@ -889,7 +889,7 @@ After install, confirm:
 3. **Why 5 retries (not 3):**
    Opus audit found 3 too tight for real scenarios where the model needs a couple of attempts to correct.
 
-4. **Why changes are committed, not patched (v3.4):** On the `obelisk-complex/hermes-agent` fork, all source modifications are committed history and auto-rebased on every `hermes update`. No patches, no apply scripts, no post-merge hooks needed.
+4. **Why changes are committed, not patched (v3.4 → v3.5.1):** On the `obelisk-complex/hermes-agent` fork, all source modifications are committed history. The GitHub Actions `Sync Upstream` workflow (daily at 0400 Pacific) merges upstream changes into the fork server-side. Local `hermes update` only pulls from `origin` — no fetching upstream, no rebasing, no force-pushing from local machines. No patches, no apply scripts, no post-merge hooks needed.
 
 5. **Editable install (not reinstall needed):**
    `pip install -e .` means patches to tracked files take effect on next Hermes restart — no reinstall necessary.
