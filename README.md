@@ -22,7 +22,7 @@
 | 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract`/`patch` exempt from FAIL scanning |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
-All changes carried as committed history on `main` and auto-rebased onto upstream/main on every `hermes update` and daily via GitHub Actions.
+All changes carried as committed history on `main`. On every `hermes update` the local checkout fetches upstream, rebases, and pushes to `origin` (needs your git credentials). The included GitHub Actions workflow does the same daily at 0400 Pacific using the run's auto‑provisioned `GITHUB_TOKEN`, so the remote fork stays synced even when no local machine is running — works for any fork of this repo.
 
 ---
 
