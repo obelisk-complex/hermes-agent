@@ -19,7 +19,7 @@
 | 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
 | 🛡️ | **Self-check enforcer system** | 3-layer gate enforcement (SOUL.md → protocol skill → plugin hooks) — see [full spec](self-check-enforcement-system-v15.md) |
 | 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work — prevents flag-clearing via fake dispatches |
-| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract` exempt from FAIL scanning |
+| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract`/`patch` exempt from FAIL scanning |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
 All changes carried as committed history on `main` and auto-rebased onto upstream/main on every `hermes update` and daily via GitHub Actions.
