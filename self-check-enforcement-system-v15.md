@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5** with auto-sync via GitHub Actions, CI test fixes, and a complete setup guide for fresh agents.
+A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5.1** with self-contained fork (no local auto-rebase), CI test fixes, and complete setup guide.
 
 ## Architecture (3 Layers)
 
@@ -157,7 +157,7 @@ TOOLSETS: [terminal, file, web, ...]
 
 ```yaml
 name: self-check-enforcer
-version: "3.5.0"
+version: "3.5.1"
 description: "Auto-loads the self-checking-harness skill and enforces gate
   compliance. v3.5: GH Actions auto-sync, CI test fixes; v3.4: FAIL regex
   negative lookahead, on_output retry fix, read-only tool exemption;
@@ -843,10 +843,11 @@ EOF
 mkdir -p ~/.hermes/plugins/self-check-enforcer
 # Write plugin.yaml and __init__.py (from Layer 3 section in this doc)
 
-# 5. Auto-sync
-#    The fork's .github/workflows/sync-upstream.yml runs daily at 04:00 Pacific,
+# 5. Auto-sync (server-side)
+#    The fork's .github/workflows/sync-upstream.yml runs daily at 0400 Pacific,
 #    fetching upstream/main, rebasing custom commits, and pushing to origin.
 #    No local machine needed — runs on GitHub's infrastructure.
+#    Local `hermes update` only pulls from origin — no accidental force-pushes.
 
 # 6. Verify
 # Restart Hermes — the fork's source already has all on_output hooks
@@ -950,6 +951,8 @@ After install, confirm:
 31. **v3.5 CI test fixes (round 11):** Two upstream tests fixed:
     - `test_empty_context_ignored` / `test_goal_only`: Our VERIFIES_TASK instruction contained literal `CONTEXT`. Changed to `"goal or description"`.
     - `test_update_on_fork_checks_upstream_when_origin_up_to_date`: Mock needed `return_value=None` because the function now returns bool (MagicMock default is truthy).
+
+32. **v3.5.1 Local auto-rebase removed (round 12):** The `_sync_with_upstream_if_needed` call in `hermes update` is removed. `hermes update` now only pulls from `origin` — no fetching upstream, no rebasing, no force-pushing from local machines. The `Sync Upstream` GitHub Actions workflow (daily at 0400 Pacific) is the sole mechanism for merging upstream changes. Anyone who clones this fork gets the code without their `git push` touching an unintended repo. The GH Actions `GITHUB_TOKEN` is ephemeral and single-repo-scoped — safe by design. Two tests updated to reflect the removed local sync.
 
 ---
 
