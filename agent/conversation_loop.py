@@ -447,6 +447,7 @@ def run_conversation(
     # Per-turn retry counters
     agent._on_output_blocks = 0
     _blocked = False  # Set True by on_output plugin when output is blocked
+    agent._on_output_fired = False  # Set True once on_output hook has run (in-loop)
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
@@ -4183,6 +4184,7 @@ def run_conversation(
                         model=agent.model,
                         platform=getattr(agent, "platform", None) or "",
                     )
+                    agent._on_output_fired = True
                     for _ores in _on_results:
                         if isinstance(_ores, dict) and _ores.get("action") == "block":
                             _msg = _ores.get(
@@ -4274,9 +4276,9 @@ def run_conversation(
     # ── Post-loop: on_output for budget-exhaustion / non-standard exits ──
     # Fires when the LLM finished with a summary due to budget exhaustion
     # or other non-standard exit.  No retry here — the loop has exited.
-    # `_blocked` is False by default (from in-loop hook) so normal text
-    # completions that already fired the hook skip this second invocation.
-    if final_response and not interrupted and not _blocked:
+    # `_on_output_fired` is True if the in-loop hook already ran, so normal
+    # text completions that already fired the hook skip this second invocation.
+    if final_response and not interrupted and not agent._on_output_fired:
         from hermes_cli.plugins import invoke_hook as _budget_invoke
         _budget_results = _budget_invoke(
             "on_output",
