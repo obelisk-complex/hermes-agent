@@ -42,7 +42,7 @@ The full setup guide is in [self-check-enforcement-system-v15.md](self-check-enf
 | 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract`/`patch` exempt from FAIL scanning |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
-All changes carried as committed history on `main`. On every `hermes update` the local checkout fetches upstream, rebases, and pushes to `origin` (needs your git credentials). The included GitHub Actions workflow does the same daily at 0400 Pacific using the run's auto‑provisioned `GITHUB_TOKEN`, so the remote fork stays synced even when no local machine is running — works for any fork of this repo.
+All changes carried as committed history on `main`. The GitHub Actions `Sync Upstream` workflow merges upstream changes into the fork daily at 0400 Pacific using an ephemeral, single-repo-scoped `GITHUB_TOKEN` — no local machine needed. Local `hermes update` only pulls from `origin`; there is no accidental force-push from any local clone.
 
 ---
 
