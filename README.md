@@ -1,8 +1,8 @@
 ## ⚜️ Obelisk Complex Fork — Customizations
 
-[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-3.svg)](https://github.com/qainsights/Quillx)
+[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx)
 
-**Human involvement:** This fork was designed and directed by a human operator who defined the architecture (3-layer self-check enforcement), reviewed every pull request, caught security issues (auto-rebase push risk, ephemeral token scope), and made all key design decisions. AI generated the implementation code under human supervision and was instructed to fix or rework anything the operator flagged. Every change was tested, reviewed, and approved before landing.
+**Human involvement:** Ghostwritten. AI generated all code in this fork. A human operator briefed, reviewed, and signed off on every change - catching security issues, challenging design decisions, and directing rework where needed. No code was written directly by human hands.
 
 **What this is:** This fork adds a **self-check enforcement system** to the Hermes agent — three layers that together prevent the agent from claiming success when subagent validation gates have actually failed:
 
