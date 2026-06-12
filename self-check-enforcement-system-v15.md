@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5.1** with self-contained fork (no local auto-rebase), CI test fixes, and complete setup guide.
+A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5.2** with double-fire fix for on_output hook, CI test fixes, and complete setup guide.
 
 ## Architecture (3 Layers)
 
@@ -157,7 +157,7 @@ TOOLSETS: [terminal, file, web, ...]
 
 ```yaml
 name: self-check-enforcer
-version: "3.5.1"
+version: "3.5.2"
 description: "Auto-loads the self-checking-harness skill and enforces gate
   compliance. v3.5: GH Actions auto-sync, CI test fixes; v3.4: FAIL regex
   negative lookahead, on_output retry fix, read-only tool exemption;
@@ -180,7 +180,7 @@ hooks:
 **File:** `~/.hermes/plugins/self-check-enforcer/__init__.py`
 
 ```python
-"""Self-check enforcer plugin — v3.5: GH Actions auto-sync + CI test fixes.
+"""Self-check enforcer plugin — v3.5.2: on_output double-fire fix.
 
 v1: auto-loads harness on session start
 v2: gate-violation detection + per-turn enforcement
@@ -200,6 +200,10 @@ v3.5: Layer 4 (patch persistence) removed — changes committed on the fork;
       GitHub Actions daily sync workflow rebases custom commits on upstream/main;
       VERIFIES_TASK instruction uses "goal or description" not "GOAL or CONTEXT"
       to pass CI CONTEXT-not-in-prompt assertions
+v3.5.2: on_output post-loop guard changed from `not _blocked` to
+      `not agent._on_output_fired` — a separate flag set unconditionally
+      after the in-loop hook runs, fixing the double-fire on normal
+      allowed completions. 3 lines changed in conversation_loop.py.
 """
 
 from __future__ import annotations
@@ -953,6 +957,8 @@ After install, confirm:
     - `test_update_on_fork_checks_upstream_when_origin_up_to_date`: Mock needed `return_value=None` because the function now returns bool (MagicMock default is truthy).
 
 32. **v3.5.1 Local auto-rebase removed (round 12):** The `_sync_with_upstream_if_needed` call in `hermes update` is removed. `hermes update` now only pulls from `origin` — no fetching upstream, no rebasing, no force-pushing from local machines. The `Sync Upstream` GitHub Actions workflow (daily at 0400 Pacific) is the sole mechanism for merging upstream changes. Anyone who clones this fork gets the code without their `git push` touching an unintended repo. The GH Actions `GITHUB_TOKEN` is ephemeral and single-repo-scoped — safe by design. Two tests updated to reflect the removed local sync.
+
+33. **v3.5.2 on_output double-fire fix (round 13):** The post-loop guard in `conversation_loop.py` was changed from `not _blocked` to `not agent._on_output_fired`. Previously, the `not _blocked` guard only suppressed the post-loop invocation on the blocked path — for normal allowed completions, `_blocked` stayed False and the hook fired twice per turn. A separate `_on_output_fired` flag is now set unconditionally after the in-loop hook runs (line 4180), regardless of whether the hook returned a block or allow. The post-loop guard checks this flag instead, firing only when the in-loop hook never ran (budget exhaustion exits). The 5-block exhaustion warning is preserved — the flag is set during the final iteration, so the post-loop guard correctly skips rather than clobbering the warning.
 
 ---
 
