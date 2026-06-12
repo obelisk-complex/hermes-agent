@@ -8,7 +8,7 @@
 |------|--------|
 | `hermes_cli/plugins.py` | Added `"on_output"` to `VALID_HOOKS` — enables text-output interception |
 | `agent/conversation_loop.py` | Added `on_output` hook call sites + retry logic — blocks ALL CLEAR text mid-turn |
-| `hermes_cli/main.py` | Auto-rebase logic: `hermes update` detects fork, fetches upstream, rebases custom commits |
+| `hermes_cli/main.py` | Git pull from `origin` only — auto-rebase removed (GH Actions handles upstream sync server-side) |
 | `tools/delegate_tool.py` | NO-OP rejection guard + VERIFIES_TASK instruction — subagents return FAIL on no-op work |
 | `.github/workflows/sync-upstream.yml` | Daily sync at 0400 Pacific — fetches upstream, rebases, pushes to origin (server-side, no local machine needed) |
 
@@ -16,7 +16,7 @@
 
 | | Feature | Description |
 |---|---------|-------------|
-| 🔄 | **Auto-rebase on upstream updates** | `hermes update` auto-detects the fork, fetches from upstream, rebases custom commits onto upstream/main, and force-pushes to origin |
+| 🔄 | **Daily GH Actions sync (no local push)** | A `Sync Upstream` workflow at `.github/workflows/sync-upstream.yml` runs daily at 0400 Pacific — fetches upstream, rebases custom commits, pushes to fork. Local `hermes update` only pulls from `origin`. No accidental force-pushes from local machines. |
 | 🛡️ | **Self-check enforcer system** | 3-layer gate enforcement (SOUL.md → protocol skill → plugin hooks) — see [full spec](self-check-enforcement-system-v15.md) |
 | 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work — prevents flag-clearing via fake dispatches |
 | 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract`/`patch` exempt from FAIL scanning |

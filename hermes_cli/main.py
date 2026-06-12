@@ -8457,23 +8457,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if commit_count == 0:
             _invalidate_update_cache()
 
-            # Even if origin is up to date, the fork may be behind upstream
-            _did_sync = False
-            if is_fork and branch == "main":
-                try:
-                    _did_sync = _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
-                except SystemExit:
-                    # Rebase/push failure — restore stash before exiting so
-                    # uncommitted changes aren't left orphaned in a stash.
-                    if auto_stash_ref is not None:
-                        _restore_stashed_changes(
-                            git_cmd,
-                            PROJECT_ROOT,
-                            auto_stash_ref,
-                            prompt_user=False,
-                            input_fn=gw_input_fn,
-                        )
-                    raise
+            # The GitHub Actions Sync Upstream workflow (run daily at 0400
+            # Pacific) is the sole mechanism for merging upstream changes
+            # into the fork. Local `hermes update` does NOT fetch upstream
+            # or force-push — it only pulls from origin.
 
             # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
@@ -8494,13 +8481,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     check=False,
                 )
 
-            if not _did_sync:
-                print("✓ Already up to date!")
-                return
-
-            # Rebase happened — fall through to dependency updates.
-            # Set flags to skip the git-pull section below.
-            _rebase_sync_done = True
+            print("✓ Already up to date!")
+            return
 
         pre_update_snapshot_id = None
 
@@ -8639,10 +8621,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks).
-        # Skip if rebase already handled this in the commit_count == 0 path.
-        if is_fork and branch == "main" and not _rebase_sync_done:
-            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+        # Fork upstream sync is handled solely by the GitHub Actions
+        # Sync Upstream workflow (daily at 0400 Pacific). Local
+        # hermes update only pulls from origin.
+        pass
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras
