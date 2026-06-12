@@ -436,7 +436,7 @@ def on_post_tool_call(
     result: object = None,
     **kwargs: object,
 ) -> None:
-    if tool_name in ("delegate_task", "read_file", "search_files", "web_extract"):
+    if tool_name in ("delegate_task", "read_file", "search_files", "web_extract", "patch"):
         return
     if not result or not isinstance(result, str):
         return
