@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5.2** with double-fire fix for on_output hook, CI test fixes, and complete setup guide.
+A multi-layer enforcement system that **mechanically prevents** the Hermes agent from reporting tasks as complete when subagent validation gates have actually failed. Built through 3 major versions (v1→v3), now at **v3.5.3** with goal context in violations, tighter FAIL false-positive filter, split patterns per site, and skill_view exemption.
 
 ## Architecture (3 Layers)
 
@@ -157,7 +157,7 @@ TOOLSETS: [terminal, file, web, ...]
 
 ```yaml
 name: self-check-enforcer
-version: "3.5.2"
+version: "3.5.3"
 description: "Auto-loads the self-checking-harness skill and enforces gate
   compliance. v3.5: GH Actions auto-sync, CI test fixes; v3.4: FAIL regex
   negative lookahead, on_output retry fix, read-only tool exemption;
@@ -204,6 +204,10 @@ v3.5.2: on_output post-loop guard changed from `not _blocked` to
       `not agent._on_output_fired` — a separate flag set unconditionally
       after the in-loop hook runs, fixing the double-fire on normal
       allowed completions. 3 lines changed in conversation_loop.py.
+v3.5.3: Violation detail now includes child_session_id key;
+      FAIL_PATTERN_SHORT tightened to exclude English conjugations;
+      post_tool_call uses SHORT pattern; skill_view added to
+      read-only exemption.
 """
 
 from __future__ import annotations
@@ -959,6 +963,12 @@ After install, confirm:
 32. **v3.5.1 Local auto-rebase removed (round 12):** The `_sync_with_upstream_if_needed` call in `hermes update` is removed. `hermes update` now only pulls from `origin` — no fetching upstream, no rebasing, no force-pushing from local machines. The `Sync Upstream` GitHub Actions workflow (daily at 0400 Pacific) is the sole mechanism for merging upstream changes. Anyone who clones this fork gets the code without their `git push` touching an unintended repo. The GH Actions `GITHUB_TOKEN` is ephemeral and single-repo-scoped — safe by design. Two tests updated to reflect the removed local sync.
 
 33. **v3.5.2 on_output double-fire fix (round 13):** The post-loop guard in `conversation_loop.py` was changed from `not _blocked` to `not agent._on_output_fired`. Previously, the `not _blocked` guard only suppressed the post-loop invocation on the blocked path — for normal allowed completions, `_blocked` stayed False and the hook fired twice per turn. A separate `_on_output_fired` flag is now set unconditionally after the in-loop hook runs (line 4180), regardless of whether the hook returned a block or allow. The post-loop guard checks this flag instead, firing only when the in-loop hook never ran (budget exhaustion exits). The 5-block exhaustion warning is preserved — the flag is set during the final iteration, so the post-loop guard correctly skips rather than clobbering the warning.
+
+34. **v3.5.3 Goal context + tighter FAIL filter (round 14):** Three fixes for agent confusion:
+    - **Key in violation detail**: subagent failure detent now prefixes each violation with `[{child_session_id}]` or `[tool:{name}]`, so the agent can read which ID to use for `[GATE:ACCEPTING:<id>]`. The `pre_llm_call` reminder already referenced "the child_session_id is shown in the violation detail below" — now it actually is.
+    - **Tighter `_FAIL_PATTERN_SHORT`**: excludes English conjugations (`FAILED`, `FAILING`, `FAILURE`, `FAILOVER`, `FAILS`, `FAIL TO`) via negative lookahead, reducing false positives in natural-language tool output and agent responses. `subagent_stop` still uses the full `_FAIL_PATTERN` (`\bFAIL\b` with fixed negative lookahead) since subagents output structured `FAIL:` markers.
+    - **Post_tool_call switched to SHORT pattern**: uses `_FAIL_PATTERN_SHORT` instead of `_FAIL_PATTERN`, reducing false positives from tools that return text containing conjugated "fail" words.
+    - **`skill_view` exemption**: added to the read-only tool exemption list alongside `read_file`, `search_files`, `web_extract`, `patch`. The tool returns skill document content, which may contain "FAIL" as descriptive text.
 
 ---
 

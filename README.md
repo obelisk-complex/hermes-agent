@@ -43,7 +43,7 @@ The full setup guide is in [self-check-enforcement-system-v15.md](self-check-enf
 | 🔄 | **Daily GH Actions sync (no local push)** | A `Sync Upstream` workflow at `.github/workflows/sync-upstream.yml` runs daily at 0400 Pacific — fetches upstream, rebases custom commits, pushes to fork. Local `hermes update` only pulls from `origin`. No accidental force-pushes from local machines. |
 | 🛡️ | **Self-check enforcer system** | 3-layer gate enforcement (SOUL.md → protocol skill → plugin hooks) — see [full spec](self-check-enforcement-system-v15.md) |
 | 🔇 | **NO-OP rejection guard** | Subagents return `FAIL` if a task needs no work — prevents flag-clearing via fake dispatches |
-| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns; `read_file`/`search_files`/`web_extract`/`patch` exempt from FAIL scanning |
+| 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns and English conjugations (`FAILED`, `FAILING`, `FAILURE`, `FAILS`, `FAIL TO`); `read_file`/`search_files`/`web_extract`/`patch`/`skill_view` exempt from FAIL scanning |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
 All changes carried as committed history on `main`. The GitHub Actions `Sync Upstream` workflow merges upstream changes into the fork daily at 0400 Pacific using an ephemeral, single-repo-scoped `GITHUB_TOKEN` — no local machine needed. Local `hermes update` only pulls from `origin`; there is no accidental force-push from any local clone.
