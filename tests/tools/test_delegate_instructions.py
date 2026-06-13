@@ -37,6 +37,17 @@ def test_acceptance_scenarios_instruction_present():
         "acceptance-scenarios instruction must require reporting command + exit code"
 
 
+def test_verdict_mandate_instruction_present():
+    """v3.7.1: the child must emit an explicit verdict (READY/NEEDS_WORK/BLOCKED)
+    in the delegate prompt itself, not only via the skill -- so verdict emission
+    (and the NEEDS_WORK gate that depends on it) does not hinge on the child
+    having loaded self-checking-harness."""
+    s = _src()
+    assert "VERDICT INSTRUCTION" in s, "verdict mandate instruction missing"
+    assert "NEEDS_WORK" in s and "BLOCKED" in s and "READY" in s, \
+        "verdict instruction must enumerate READY/NEEDS_WORK/BLOCKED"
+
+
 if __name__ == "__main__":
     import sys
     _tests = [v for k, v in sorted(globals().items())

@@ -6425,7 +6425,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
         # Push is separate from rebase — if the lease fails we need an
         # accurate message (not "rebase failed").
         try:
-            push_result = subprocess.run(
+            subprocess.run(
                 git_cmd + ["push", "--force-with-lease", "origin", "main"],
                 cwd=cwd,
                 capture_output=True,

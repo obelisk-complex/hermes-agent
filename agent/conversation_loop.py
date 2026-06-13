@@ -4205,14 +4205,15 @@ def run_conversation(
                             _blocked = True
                             break
                     if _blocked:
-                        if agent._on_output_blocks > 4:
-                            final_response = (
-                                "⚠️ BLOCKED — escalating to a human. The "
-                                "self-check gate blocked this output 5 times "
-                                "(unresolved FAIL / verification). The task is "
-                                "NOT complete and needs human attention; it is "
-                                "not being silently marked done."
-                            )
+                        # Delegate the block/escalation decision to the pure
+                        # helper so the threshold + message are unit-tested
+                        # directly (agent/_on_output_gate.decide_after_block).
+                        from agent._on_output_gate import decide_after_block
+                        _decision, _esc_msg = decide_after_block(
+                            agent._on_output_blocks
+                        )
+                        if _decision == "escalate":
+                            final_response = _esc_msg
                             agent._on_output_blocks = 0
                         else:
                             continue  # Retry: continue outer while loop

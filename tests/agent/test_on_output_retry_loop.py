@@ -23,6 +23,11 @@ Runnable two ways:
 import os
 import re
 
+from agent._on_output_gate import (
+    BLOCKED_ESCALATION_MESSAGE,
+    decide_after_block,
+)
+
 _SRC_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "agent", "conversation_loop.py"
 )
@@ -51,8 +56,10 @@ def _simulate_turn(on_output_results, max_iter=20):
             on_output_blocks += 1
             _blocked = True
         if _blocked:
-            if on_output_blocks > 4:
-                final_response = "EXHAUSTION"
+            # Exercise the REAL extracted decision, not a re-implementation.
+            _decision, _esc_msg = decide_after_block(on_output_blocks)
+            if _decision == "escalate":
+                final_response = _esc_msg
                 on_output_blocks = 0
                 exit_reason = "blocked_by_policy"
                 break
@@ -86,7 +93,7 @@ def test_block_then_comply_breaks_promptly():
 def test_five_blocks_abort():
     r = _simulate_turn(["block"] * 6, max_iter=20)
     assert r["exit_reason"] == "blocked_by_policy"
-    assert r["final_response"] == "EXHAUSTION"
+    assert r["final_response"] == BLOCKED_ESCALATION_MESSAGE
     assert r["iterations"] == 5
 
 
@@ -161,15 +168,28 @@ def test_exactly_two_on_output_call_sites():
     assert n == 2, f"expected exactly 2 on_output invoke sites, found {n}"
 
 
-def test_exhaustion_message_is_blocked_escalation():
-    """#1 (v3.7.0): the 5-block exhaustion exit is an explicit BLOCKED/escalation
-    (needs a human), not a vague 'could not be completed' warning."""
+def test_decide_after_block_retries_under_limit():
+    """v3.7.1: the extracted pure decision retries for blocks 1..LIMIT."""
+    from agent._on_output_gate import decide_after_block, ON_OUTPUT_BLOCK_LIMIT
+    for n in range(1, ON_OUTPUT_BLOCK_LIMIT + 1):
+        assert decide_after_block(n) == ("retry", None), f"block {n} should retry"
+
+
+def test_decide_after_block_escalates_on_fifth():
+    """v3.7.1: the (LIMIT+1)th block escalates with an explicit BLOCKED message."""
+    from agent._on_output_gate import decide_after_block, ON_OUTPUT_BLOCK_LIMIT
+    decision, msg = decide_after_block(ON_OUTPUT_BLOCK_LIMIT + 1)
+    assert decision == "escalate"
+    assert msg and "BLOCKED" in msg and "escalat" in msg.lower(), \
+        "escalation message must be an explicit BLOCKED/escalation to a human"
+
+
+def test_loop_delegates_escalation_to_helper():
+    """v3.7.1: conversation_loop must DELEGATE the block/escalation decision to
+    agent/_on_output_gate (so the real logic is unit-tested, not re-implemented)."""
     src = "\n".join(_source_lines())
-    i = src.find("_on_output_blocks > 4")
-    assert i != -1, "exhaustion branch not found"
-    region = src[i:i + 500]
-    assert "BLOCKED" in region and "escalat" in region.lower(), \
-        "exhaustion message should be an explicit BLOCKED/escalation to a human"
+    assert "decide_after_block" in src, \
+        "in-loop escalation no longer delegates to _on_output_gate.decide_after_block"
 
 
 if __name__ == "__main__":

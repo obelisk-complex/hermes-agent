@@ -677,6 +677,18 @@ def _build_child_system_prompt(
         "═══ END ACCEPTANCE SCENARIOS INSTRUCTION ═══"
     )
     parts.append(
+        "\n\n═══ VERDICT INSTRUCTION ═══\n"
+        "End your summary with an explicit verdict line: `verdict: READY`,\n"
+        "`verdict: NEEDS_WORK`, or `verdict: BLOCKED`.\n"
+        "  - READY: every gate passed and every acceptance scenario ran and passed.\n"
+        "  - NEEDS_WORK: any verification or test failed. This is a re-runnable\n"
+        "    FAIL: the parent re-dispatches or acknowledges it; do NOT claim done.\n"
+        "  - BLOCKED: the work needs a human (missing credential, outage, or\n"
+        "    ambiguous requirement); also set an `escalation_reason`.\n"
+        "Emitting the verdict is mandatory and does not depend on loading any skill.\n"
+        "═══ END VERDICT INSTRUCTION ═══"
+    )
+    parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
         "- What you did\n"
