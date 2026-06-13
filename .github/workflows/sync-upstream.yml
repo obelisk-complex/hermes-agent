@@ -49,7 +49,10 @@ jobs:
       - name: Rebase custom commits onto upstream
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
-          git config user.email "obelisk@users.noreply.github.com"
+          # Committer identity for the rebase replay. MUST be obelisk-complex's
+          # real noreply id, not the old `obelisk@…` (which is an unrelated user
+          # and re-stamps every custom commit's committer with the wrong author).
+          git config user.email "265670482+obelisk-complex@users.noreply.github.com"
           git config user.name "obelisk-complex"
           echo "⚜️ Rebasing ${{ steps.check.outputs.custom_ahead }} custom commit(s) onto ${{ steps.check.outputs.upstream_ahead }} new upstream commit(s)..."
           if ! git rebase upstream/main; then
