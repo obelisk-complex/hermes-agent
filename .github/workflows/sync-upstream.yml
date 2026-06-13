@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork main
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0         # full history needed for rebase
           ref: main
@@ -77,6 +77,8 @@ jobs:
           # origin/main (which every `hermes update` consumer hard-resets to).
           python3 tests/agent/test_on_output_retry_loop.py
           python3 tests/hermes_cli/test_update_safety.py
+          python3 tests/agent/test_hook_contract.py
+          python3 tests/tools/test_delegate_instructions.py
 
       - name: Push validated rebase
         # Explicit success() (already implicit) makes the gate unmistakable: the
