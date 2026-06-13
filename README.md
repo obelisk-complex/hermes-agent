@@ -46,6 +46,8 @@ The full setup guide is in [self-check-enforcement-system-v15.md](self-check-enf
 | 🔍 | **FAIL false-positive filter + read-only exemption** | Gate regex excludes `FAIL #1 — FIXED` patterns and English conjugations (`FAILED`, `FAILING`, `FAILURE`, `FAILS`, `FAIL TO`); `read_file`/`search_files`/`web_extract`/`patch`/`skill_view` exempt from FAIL scanning |
 | 🔗 | **VERIFIES_TASK correlation** | Re-dispatched subagents echo verification IDs — enables mechanical auto-clear of resolved violations |
 
+- **Self-check enforcement** — a reference design for the `on_output` plugin hook (stops the agent claiming completion while a subagent gate is open). See [`plugins/self-check-enforcer/README.md`](plugins/self-check-enforcer/README.md).
+
 All changes carried as committed history on `main`. The GitHub Actions `Sync Upstream` workflow merges upstream changes into the fork daily at 0400 Pacific using an ephemeral, single-repo-scoped `GITHUB_TOKEN` — no local machine needed. Local `hermes update` only pulls from `origin`; there is no accidental force-push from any local clone.
 
 ---
