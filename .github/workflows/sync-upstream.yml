@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# Never let two daily syncs (or a manual dispatch + the schedule) race the
+# force-push to main.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -34,14 +40,44 @@ jobs:
           echo "Upstream ahead by $UPSTREAM_AHEAD commits"
           echo "Fork ahead by $CUSTOM_AHEAD commits (custom)"
 
-      - name: Rebase and push
+      - name: Rebase custom commits onto upstream
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
-          UPSTREAM_AHEAD="${{ steps.check.outputs.upstream_ahead }}"
-          CUSTOM_AHEAD="${{ steps.check.outputs.custom_ahead }}"
-          echo "⚜️ Rebasing $CUSTOM_AHEAD custom commit(s) on $UPSTREAM_AHEAD new upstream commit(s)..."
           git config user.email "obelisk@users.noreply.github.com"
           git config user.name "obelisk-complex"
-          git rebase upstream/main
+          echo "⚜️ Rebasing ${{ steps.check.outputs.custom_ahead }} custom commit(s) onto ${{ steps.check.outputs.upstream_ahead }} new upstream commit(s)..."
+          if ! git rebase upstream/main; then
+            git rebase --abort || true
+            echo "::error::Upstream rebase hit a conflict — custom commits need a manual rebase onto upstream/main. origin/main left untouched."
+            exit 1
+          fi
+
+      - name: Validate rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # Catch conflict markers / syntax breakage the rebase may have left in
+          # the import-critical and fork-customised files.
+          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
+            python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
+          done
+          # Guard tests (stdlib-only, no install needed): fail the sync if the
+          # rebase relocated/dropped the custom on_output hook or the _blocked
+          # reset, lost the update syntax-guard coverage, or reintroduced a
+          # shadowed stdlib import. This is the real "CI tests as persistence"
+          # gate — it runs BEFORE the push, so a broken rebase never reaches
+          # origin/main (which every `hermes update` consumer hard-resets to).
+          python3 tests/agent/test_on_output_retry_loop.py
+          python3 tests/hermes_cli/test_update_safety.py
+
+      - name: Push validated rebase
+        # Explicit success() (already implicit) makes the gate unmistakable: the
+        # force-push runs ONLY if the rebase and the pre-push validation passed.
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        run: |
           git push --force-with-lease origin main
-          echo "✓ Fork synced — $CUSTOM_AHEAD commit(s) rebased, pushed to origin/main"
+          echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
+
+      - name: Report sync failure
+        if: failure()
+        run: |
+          echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
