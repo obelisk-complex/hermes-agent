@@ -647,6 +647,15 @@ def _build_child_system_prompt(
         "═══ END VERIFIES_TASK INSTRUCTION ═══"
     )
     parts.append(
+        "\n\n═══ ACCEPTANCE SCENARIOS INSTRUCTION ═══\n"
+        "If the task lists acceptance scenarios or a Testing Strategy, you MUST\n"
+        "run each one and report its result — the command run and its exit code,\n"
+        "or what you observed — before claiming completion. A scenario you did\n"
+        "not actually run is an unverified claim: return FAIL for it rather than\n"
+        "asserting success.\n"
+        "═══ END ACCEPTANCE SCENARIOS INSTRUCTION ═══"
+    )
+    parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
         "- What you did\n"

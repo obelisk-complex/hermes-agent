@@ -4200,9 +4200,11 @@ def run_conversation(
                     if _blocked:
                         if agent._on_output_blocks > 4:
                             final_response = (
-                                "⚠️ Output blocked after 5 attempts. "
-                                "The task could not be completed due to "
-                                "repeated policy violations."
+                                "⚠️ BLOCKED — escalating to a human. The "
+                                "self-check gate blocked this output 5 times "
+                                "(unresolved FAIL / verification). The task is "
+                                "NOT complete and needs human attention; it is "
+                                "not being silently marked done."
                             )
                             agent._on_output_blocks = 0
                         else:

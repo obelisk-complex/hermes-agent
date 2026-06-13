@@ -161,6 +161,17 @@ def test_exactly_two_on_output_call_sites():
     assert n == 2, f"expected exactly 2 on_output invoke sites, found {n}"
 
 
+def test_exhaustion_message_is_blocked_escalation():
+    """#1 (v3.7.0): the 5-block exhaustion exit is an explicit BLOCKED/escalation
+    (needs a human), not a vague 'could not be completed' warning."""
+    src = "\n".join(_source_lines())
+    i = src.find("_on_output_blocks > 4")
+    assert i != -1, "exhaustion branch not found"
+    region = src[i:i + 500]
+    assert "BLOCKED" in region and "escalat" in region.lower(), \
+        "exhaustion message should be an explicit BLOCKED/escalation to a human"
+
+
 if __name__ == "__main__":
     import sys
     _tests = [v for k, v in sorted(globals().items())
