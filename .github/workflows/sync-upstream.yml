@@ -23,7 +23,13 @@ jobs:
         with:
           fetch-depth: 0         # full history needed for rebase
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # SYNC_PAT = fine-grained PAT with Contents + Workflows write. Required
+          # because the default GITHUB_TOKEN may NOT push changes under
+          # .github/workflows/, so the sync fails whenever upstream touches a
+          # workflow file. Falls back to GITHUB_TOKEN if the secret is unset
+          # (sync then still fails on upstream workflow changes, as before).
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
       - name: Add upstream remote and fetch
         run: |
