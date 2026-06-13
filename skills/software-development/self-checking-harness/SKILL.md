@@ -84,9 +84,9 @@ The delegate-task template carries an **ACCEPTANCE SCENARIOS** block — explici
 
 Violation detail is an enumerated per-id checklist of the specific failed checks (`[id] — N failed check(s):` then `  ✗ ...` per item), so a retry targets exactly what failed rather than an opaque blob.
 
-## v3.5.4 Enforcement Features
+## Enforcement Features
 
-The self-check-enforcer plugin (v3.5.4) provides the following enforcement mechanisms:
+The `self-check-enforcer` plugin provides the following enforcement mechanisms. It is now a **bundled plugin in the fork repo** (`plugins/self-check-enforcer/`), on by default — it is no longer hand-installed under `~/.hermes/plugins/`. See `references/gate-enforcement-plugin.md` for the current hook map, feature list, and version history (through v3.7.1).
 
 ### GitHub Actions Daily Auto-Sync (sole sync mechanism)
 
@@ -96,7 +96,7 @@ The fork at `obelisk-complex/hermes-agent` includes `.github/workflows/sync-upst
 
 ### CI Tests as Persistence Check
 
-The old Layer 4 (patch files + apply script) used binary "did the patch apply?" checks. The new model runs the full `pytest` suite on every push and after every `Sync Upstream` run. If a rebase breaks our custom changes, a failing test catches it immediately. See design note 22 in the v15 spec for details.
+The old Layer 4 (patch files + apply script) used binary "did the patch apply?" checks. The new model runs the full `pytest` suite (~193 tests) on every push and after every `Sync Upstream` run; v3.7.1 hardened the pre-push gate to four guard suites and pinned `actions/checkout` to a SHA. If a rebase breaks our custom changes, a failing test catches it immediately. See design note 22 in the v15 spec for details.
 
 ### verifies_task auto-clear
 
@@ -123,31 +123,31 @@ Example:
 
 File:line references (e.g. `conversation_loop.py:450`) in agent output are checked against the filesystem. Unverifiable citations produce a warning injected via pre_llm_call on the next turn. If an ALL CLEAR block is also triggered, citation issues are included in the block message body. Use proper relative paths (`agent/conversation_loop.py:450`, not bare `conversation_loop.py:450`) for best resolution.
 
-### on_post_tool_call read-only tool exemption (v3.5.3)
+### post_tool_call read-only tool exemption
 
-`read_file`, `search_files`, `session_search`, `memory`, `web_extract`, `patch`, and `skill_view` are exempted from FAIL scanning in `on_post_tool_call`. These tools return content verbatim (file contents, search results, session history, memory store, web page text, diff output, skill documents) -- "FAIL" in their output is descriptive text from the source being edited or read, not a tool-operation failure.
+`read_file`, `search_files`, `session_search`, `memory`, `web_extract`, `patch`, and `skill_view` are exempted from FAIL scanning in `post_tool_call`. These tools return content verbatim (file contents, search results, session history, memory store, web page text, diff output, skill documents) -- "FAIL" in their output is descriptive text from the source being edited or read, not a tool-operation failure.
 
-The `patch` tool was added in v3.5.2 because editing files that describe the NO-OP rejection guard produces diff output containing the word "FAIL". The `skill_view` tool was added in v3.5.3 because skill documents may contain "FAIL" as descriptive text. Same class of false positive as `read_file` -- the tool returns content that happens to contain the word "FAIL".
+(Provenance: `patch` was added to the list in v3.5.2 because editing files that describe the NO-OP rejection guard produces diff output containing the word "FAIL"; `skill_view` was added in v3.5.3 because skill documents may contain "FAIL" as descriptive text. Same class of false positive as `read_file` -- the tool returns content that happens to contain the word "FAIL".)
 
 The primary detection chain (`on_subagent_stop` → `on_output` → `pre_tool_call`) is untouched by this exemption. Threat model reviewed: no escape routes created because the exemption only removes noise from tools where "FAIL" is always descriptive text, never a tool-operation failure.
 
-### on_output retry loop fix (v3.5) and double-fire fix (v3.5.2)
+### on_output retry, revalidation, and BLOCKED escalation (current — v3.6.0 / v3.7.0 / v3.7.1)
 
-The in-loop on_output handler's `continue`/`break` previously targeted the inner `for _ores` loop, not the outer conversation `while` loop. When a plugin blocked output, the handler appended the rejection message but never called another API call -- it fell through and broke the while loop. Fixed by introducing a `_blocked` flag:
-- The for-loop sets `_blocked = True` and breaks on first block
-- After the for-loop, `if _blocked: continue` targets the outer while loop, triggering a real LLM retry with the rejection message in history
-- At 5 successive blocks, delivers an abort message
-- `_blocked` initialized at function scope (`_blocked = False`) so the post-loop hook can reference it without UnboundLocalError
+The `on_output` hook fires in two places in `agent/conversation_loop.py`, and the conversation-loop wiring is the current authority — see `references/on-output-hook-implementation.md`.
 
-**Double-fire fix (v3.5.2):** The post-loop guard was originally `and not _blocked`, which only suppressed the post-loop invocation on the **blocked** path. For normal allowed completions, `_blocked` stayed False and the hook fired twice per turn. A separate `agent._on_output_fired` flag was added:
-- Initialised to `False` at the start of each turn
-- Set to `True` unconditionally after the in-loop hook runs (line 4180) - regardless of block or allow
-- Post-loop guard changed from `not _blocked` to `not agent._on_output_fired`
-- This ensures the hook fires exactly once per turn: in-loop for normal completions, post-loop for budget-exhaustion exits where the in-loop never ran
+**In-loop (after final text with no tool calls).** A block appends the rejection message, increments the per-turn counter `agent._on_output_blocks`, and sets `_blocked`; after the `for _ores` loop, `if _blocked` defers the decision to an importable pure helper, `agent/_on_output_gate.py::decide_after_block(block_count)`:
+- `"retry"` → `continue` targets the outer conversation `while` loop, a real LLM retry with the rejection in history.
+- `"escalate"` (the **5th** block, `> ON_OUTPUT_BLOCK_LIMIT == 4`) → replaces `final_response` with an explicit **BLOCKED escalation-to-a-human** message (the task is NOT silently marked done) and resets the counter.
 
-### Negative lookahead for FAIL#1-FIXED false positives (v3.5)
+If no block, the allow path sets `_final_validated = True`. Both `_blocked` and `_final_validated` reset at the top of **every loop iteration** (not just per turn); a per-turn-only reset was the v3.6.0 gate-clearing bug where a compliant retry could never break and the turn burned to budget.
 
-See **Plugin Development Pitfalls → Negative lookahead for false-positive patterns** below — the same section covers the `\bFAIL\b(?!.*(?i:\bfixed\b))` pattern and its verification edge cases.
+**Post-loop (budget-exhaustion / non-standard exit).** Guarded by `not _final_validated` — True only when the in-loop hook ALLOWED the exact response being returned this turn — so a normal validated completion skips this second invocation, while a budget-exhaustion exit (which leaves the last, unvalidated model text) is re-checked here; a block replaces `final_response` with no retry.
+
+The `_final_validated` flag (set only on the allow path) **replaced the old sticky `agent._on_output_fired` flag in v3.6.0**: the sticky flag was set unconditionally, so it skipped revalidation on budget-exhaustion exits and let a leaking all-clear slip through. The 5-block exit became an explicit BLOCKED escalation in v3.7.0, and the decision was extracted to `agent/_on_output_gate.py` in v3.7.1 so it is unit-tested directly.
+
+### Detection-first FAIL scanning (no "fixed" masking — current, v3.6.0)
+
+`subagent_stop` scans the child summary with the full `\bFAIL\b` (`_FAIL_PATTERN`): a bare FAIL opens the gate even alongside a `READY` claim — a false positive is cheaply clearable with `[GATE:ACCEPTING:<id>]`, while a false negative would be a silent bypass. The earlier `\bFAIL\b(?!.*(?i:\bfixed\b))` negative-lookahead was **removed in v3.6.0** because it was itself a bypass: "FAIL: x — will be fixed" is an *unresolved* failure that slipped through. `_FAIL_PATTERN_SHORT` (used at `post_tool_call` / `transform_tool_result`) keeps the conjugation and adjacent-punctuation exclusions; see **Plugin Development Pitfalls → Split FAIL patterns per detection site** below.
 
 ## Plugin Development Pitfalls (from the self-check-enforcer implementation)
 
@@ -201,39 +201,32 @@ When building a violation-detection regex, every alternative branch that is NOT 
 
 This applies broadly: content filters, gate detectors, blocklist matchers, and any regex whose job is to find a specific signal in noisy text.
 
-### Negative lookahead for false-positive patterns
+### Negative lookahead for false-positive patterns (HISTORICAL — this exclusion was removed in v3.6.0)
 
-When a common descriptive pattern causes false positives, prefer a **negative lookahead** scoped to the exclusion over broadening the match set. For example, subagent summaries often contain "FAIL #1 - FIXED" section headers where every FAIL is immediately followed by FIXED describing the remediated issue. The pattern:
+> **Superseded.** This documents a v3.4-era technique and the reason it was **removed in v3.6.0**. It is retained as a cautionary lesson, not as current behaviour. The current `_FAIL_PATTERN` is the plain `re.compile(r"\bFAIL\b")` — there is no `fixed` exclusion.
+
+When a common descriptive pattern causes false positives, a **negative lookahead** scoped to the exclusion can be preferable to broadening the match set. v3.4 applied this to "FAIL #1 - FIXED" section headers, where every FAIL was followed by FIXED describing a remediated issue:
 
 ```python
+# v3.4 only — REMOVED in v3.6.0 (it was a bypass)
 _FAIL_PATTERN = re.compile(r"\bFAIL\b(?!.*(?i:\bfixed\b))")
 ```
 
-This matches FAIL only when fixed/FIXED/Fixed does NOT appear after it on the same line. Key design choices:
-- **Case-insensitive exclusion** (`(?i:...)` inline flag scoped only to `\bfixed\b`). The core signal FAIL remains case-sensitive.
-- **Same-line scope** (`?!.*`) — only suppresses on the same line.
-- **Ordering matters** — FIXED before FAIL doesn't suppress (lookahead checks forward from FAIL). Correctly flags "FIXED the FAIL issue" as a real report.
+**Why it was removed:** the exclusion let an *unresolved* failure slip the gate — "FAIL: auth bypass — will be fixed later" contains "fixed", so the lookahead suppressed the match and the gate never opened. Detection-first (a bare FAIL gates; clear a genuine false positive with `[GATE:ACCEPTING:<id>]`) is strictly safer than a content-sensitive exclusion that an unresolved-but-"will be fixed" summary can defeat. The general lesson still holds for *truly* descriptive noise, but FAIL-on-a-completion-summary is signal, not noise.
 
-**Verification edge cases:**
-- `"FAIL - module not found"` (greater than) MATCH (real failure)
-- `"FAIL #1 - FIXED"` (greater than) NO MATCH (excluded, remediated)
-- `"This FAIL was fixed already"` (greater than) NO MATCH (case-insensitive exclusion)
-- `"FIXED the FAIL issue"` (greater than) MATCH (FIXED before FAIL)
-- `"FAIL - resolved with fixed config"` (greater than) NO MATCH (case-insensitive exclusion)
+### Split FAIL patterns per detection site (current — full at `subagent_stop`, SHORT elsewhere)
 
-### Split FAIL patterns per detection site (v3.5.4)
-
-The `_FAIL_PATTERN_SHORT` was tightened to exclude English conjugations while `_FAIL_PATTERN` remains the full `\bFAIL\b` pattern. Each detection site uses the appropriate pattern:
+`_FAIL_PATTERN` is the full `\bFAIL\b`; `_FAIL_PATTERN_SHORT` adds conjugation + adjacent-punctuation exclusions. Each detection site uses the appropriate pattern:
 
 | Site | Pattern | Reason |
 |------|---------|--------|
-| `subagent_stop` | `_FAIL_PATTERN` (full) | Subagents emit structured `FAIL:` markers -- the standalone word is the correct signal |
+| `subagent_stop` | `_FAIL_PATTERN` (full `\bFAIL\b`) | Subagents emit structured `FAIL:` markers -- the standalone word is the correct signal; detection-first (no "fixed" masking) |
 | `post_tool_call` | `_FAIL_PATTERN_SHORT` (tight) | Natural language tool output contains conjugated forms like "failed", "failing" |
-| `on_transform_tool_result` | `_FAIL_PATTERN_SHORT` (tight) | Annotates delegate_task results in agent-facing text |
+| `transform_tool_result` | `_FAIL_PATTERN_SHORT` (tight) | Annotates delegate_task results in agent-facing text |
 
-The tight pattern excludes these forms after `FAIL`: `ED`, `ed`, `ING`, `ing`, `URE`, `ure`, `OVER`, `over`, `S`, `s`, `TO`, `to` — and adjacent punctuation (`"` `'` `)` `]` `}`) to prevent false positives from source-code scanning (grep returning literal `"FAIL"` strings).
+The tight `_FAIL_PATTERN_SHORT` excludes these forms after `FAIL`: `ED`, `ed`, `ING`, `ing`, `URE`, `ure`, `OVER`, `over`, `S`, `s`, `TO`, `to` — and adjacent punctuation (`"` `'` `)` `]` `}`) to prevent false positives from source-code scanning (grep returning literal `"FAIL"` strings). (v3.6.0 rebuilt this pattern: it dropped a dead conjugation lookahead and a `[\s]` typo while keeping the punctuation exclusion.)
 
-### Violation detail shows child session ID (v3.5.4)
+### Violation detail shows child session ID
 
 Each violation now prefixes its detail with the key (`[child_session_id]` or `[tool:tool_name]`), so the agent can read which ID to use for `[GATE:ACCEPTING:<id>]`. The `pre_llm_call` reminder already said "the child_session_id is shown in the violation detail below" -- now it actually is.
 
@@ -276,16 +269,16 @@ TOOLSETS: [terminal, file, web, ...]
 
 ## Related Skills
 
-- `verification-before-completion` — parent umbrella: the Iron Law gate protocol that this 5-gate protocol automates for subagent delegation tasks. The `self-check-enforcer` plugin (documented in that skill's `references/self-check-enforcer-plugin.md`) mechanically enforces the gates. That reference now covers v3.5.4 features: FAIL regex, on_output retry fix, read-only tool exemption, split FAIL patterns, and punctuation exclusion.
+- `verification-before-completion` — parent umbrella: the Iron Law gate protocol that this 5-gate protocol automates for subagent delegation tasks. The `self-check-enforcer` plugin (documented in this skill's `references/gate-enforcement-plugin.md`) mechanically enforces the gates. That reference covers the current (v3.7.1) hook map and features: split FAIL patterns, READY/NEEDS_WORK/BLOCKED verdict + BLOCKED escalation, `_final_validated` revalidation, done-claim bypass closure, and clearance tokens.
 - `engineering-principles` — cross-fleet verification principles and audit patterns that complement the 5-gate protocol.
 
 ## Reference Files
 
 See `references/` directory for supporting documentation. Key files:
-- `references/gate-enforcement-plugin.md` — full plugin architecture, hook map, v3.5.4 features
-- `references/on-output-hook-implementation.md` — on_output hook code: registration, wiring in conversation_loop.py, retry mechanism (note: written before v3.4 `_blocked` flag fix; actual on-disk code has the fix)
+- `references/gate-enforcement-plugin.md` — full plugin architecture, current (v3.7.1) hook map, feature list, and version history
+- `references/on-output-hook-implementation.md` — on_output hook code (v3.7.1): registration, wiring in `agent/conversation_loop.py`, the `_final_validated` revalidation guard, and the 5-block BLOCKED escalation via `agent/_on_output_gate.py`
 - `references/plugin-enforcement.md` — plugin structure, installation, comparison to Claude Code hooks
 
-**Layer 4 (patch persistence system) was removed in v3.5.** The 4 `.patch` files, apply script, verify script, session-start trigger, and daily cron job are all gone. All changes are committed history on `obelisk-complex/hermes-agent` and auto-rebased on every `hermes update` via GitHub Actions daily sync at 04:00 Pacific. The old `references/patch-persistence.md` reference has been removed.
+**Layer 4 (patch persistence system) was removed in v3.5.** The 4 `.patch` files, apply script, verify script, session-start trigger, and daily cron job are all gone. All changes are committed history on `obelisk-complex/hermes-agent`. The GitHub Actions daily sync at 04:00 Pacific is the **sole** mechanism that rebases custom commits onto upstream and pushes them; local `hermes update` only pulls from `origin` (v3.5.1 removed local auto-rebase). The old `references/patch-persistence.md` reference has been removed.
 
-**External reference:** `self-check-enforcement-system-v15.md` (in the fork repo root) -- the complete v3.5.4 specification covering all 3 layers, source code, detection flow, bypass table, design notes, changelog, and the GitHub Actions daily sync workflow. Key v3.5.4 addition: `_FAIL_PATTERN_SHORT` excludes adjacent punctuation to prevent false positives from source-code scanning. Prior key features (v3.5.3): goal context in violations (child_session_id visible in detail), tighter `FAIL_PATTERN_SHORT` excluding English conjugations, split patterns per detection site, `skill_view` read-only exemption, and `_on_output_fired` double-fire fix.
+**External reference:** `self-check-enforcement-system-v15.md` (in the fork repo root) -- the complete **v3.7.1** specification covering all 3 layers, detection flow, bypass table, design notes, changelog, and the GitHub Actions daily sync workflow. As of v3.7.1 it links the tracked plugin (`plugins/self-check-enforcer/`) rather than embedding the source. Current key features: detection-first `\bFAIL\b` at `subagent_stop` (no "fixed" masking), READY/NEEDS_WORK/BLOCKED verdict with a NEEDS_WORK re-runnable gate and a BLOCKED escalation gate, the 5-block BLOCKED-to-a-human escalation (`agent/_on_output_gate.py`), `_final_validated` revalidation on budget-exhaustion exits, closed done-claim bypasses, strict plan↔artifact matching, and enumerated per-id failed-check feedback.

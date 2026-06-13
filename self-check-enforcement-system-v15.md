@@ -92,6 +92,7 @@ Every subagent must complete these gates before returning:
 
 ```json
 {
+  "verdict": "READY | NEEDS_WORK | BLOCKED",
   "result": "...",
   "evidence": ["file:line" or "url" or "command:output"],
   "confidence": 0.0-1.0,
@@ -100,6 +101,8 @@ Every subagent must complete these gates before returning:
   "escalation_reason": null or "..."
 }
 ```
+
+The `verdict` field was added in v3.7.0 and is **mandated by the delegate prompt** (v3.7.1), so enforcement does not depend on the child loading the skill: `READY` = all gates pass and all acceptance scenarios ran and passed; `NEEDS_WORK` = any verification/test failed (a re-runnable FAIL — opens a re-runnable gate at `subagent_stop`, v3.7.1); `BLOCKED` (with `escalation_reason`) = a human is required (opens an escalation gate even with no FAIL token, v3.7.0).
 
 ### Pre-Harness Allowed Tools
 
@@ -117,14 +120,21 @@ GOAL: [what to accomplish]
 
 CONTEXT:
 [task-specific context]
+If re-dispatching a failed subagent, include: verifies_task=<original_child_session_id>
 
 FIRST STEP: skill_view(name='self-checking-harness')
 
+ACCEPTANCE SCENARIOS (run each; report command + exit code before claiming done):  # v3.7.0
+- [scenario 1 — e.g. `pytest tests/foo.py` exits 0]
+
 === VALIDATION GATES (MANDATORY) ===
 [copy the 5-gate protocol]
+6. Verdict — READY only if every acceptance scenario ran and passed; NEEDS_WORK if any verification/test failed; BLOCKED (+ escalation_reason) if a human is required  # v3.7.0
 
 TOOLSETS: [terminal, file, web, ...]
 ```
+
+(The live template in `SKILL.md` is the authority; `delegate_tool.py` also injects a mandatory run-the-scenarios instruction and, in v3.7.1, mandates the verdict field below the parent's reach.)
 
 ### Key Rules Enforced in the Skill
 
@@ -186,7 +196,12 @@ TOOLSETS: [terminal, file, web, ...]
      child_status="completed" AND id matches open violation?
      → Auto-clear that violation (runtime-verified, works in batch mode
        because each subagent echoes its own marker independently)
-   → _FAIL_PATTERN matches? Store new violation keyed by "child-abc"
+   → _FAIL_PATTERN (full `\bFAIL\b`, detection-first) matches the summary,
+     OR child_status is a failure, OR the summary carries verdict: NEEDS_WORK
+     (re-runnable gate, v3.7.1) / verdict: BLOCKED or a non-null
+     escalation_reason (escalation gate, v3.7.0)?
+     → Store new violation keyed by "child-abc", with an enumerated per-id
+       checklist of the failed checks (v3.7.0)
    → Flag stays: child_session_id is unique per dispatch, so no
      auto-clear on subsequent clean dispatches
 
@@ -209,7 +224,13 @@ TOOLSETS: [terminal, file, web, ...]
      → BLOCK: inject block message (includes citation issues if any)
    → flag set AND text is ALL CLEAR AND clearance token found?
      → _log_acceptances(): log to audit trail, remove acknowledged violations
-   → 5 successive blocks? Deliver abort message
+   → block/escalation decision via agent/_on_output_gate.py::decide_after_block
+     (v3.7.1): the 5th block (> ON_OUTPUT_BLOCK_LIMIT) replaces the response
+     with an explicit BLOCKED escalation-to-a-human (NOT a silent "done")
+
+6. _claims_all_clear denylist (belt-and-suspenders) also catches done-claims:
+   "verification complete" / "task complete" / "all findings addressed" /
+   "nothing failed" (v3.7.1)
 
 7. on_session_end fires:
    → Clean up session state from _session_states dict
@@ -226,7 +247,7 @@ TOOLSETS: [terminal, file, web, ...]
 |----------------|---------|-------------|
 | `send_message("ALL CLEAR ✓")` to another channel | `pre_tool_call` blocks (v3.3: checks clearance token first) | ✅ |
 | Direct text output claiming success (same channel) | `on_output` blocks, forces retry (v3.3: accepts `[GATE:ACCEPTING:]` bypass) | ✅ |
-| LLM keeps producing violating text (5+ times) | `on_output` retry limit → abort | ✅ |
+| LLM keeps producing violating text (5+ times) | `on_output` retry limit → explicit BLOCKED escalation to a human (v3.7.0; decision in `agent/_on_output_gate.py`, v3.7.1) — not a silent "done" | ✅ |
 | Budget-exhaustion summary claims success | `on_output` budget path → replaces text | ✅ |
 | Agent ignores SOUL.md, doesn't load harness | `on_session_start` auto-loads | ✅ |
 | Subagent doesn't call skill_view | `pre_tool_call` blocks write/terminal/delegate_task | ✅ |
@@ -234,7 +255,7 @@ TOOLSETS: [terminal, file, web, ...]
 | Agent dispatches unrelated clean task to clear flag | `subagent_stop` keyed on `child_session_id` — new UUID per dispatch, no auto-clear | ✅ (v3.2) Structural — opaque UUID, no matching possible |
 | Agent dispatches same task to clear flag (with verifies_task) | `verifies_task` auto-clear — but child must genuinely return `child_status="completed"` from runtime | ✅ (v3.3) Mechanical — runtime-verified status |
 | Agent fabricates file/line citations in output | `on_output` verifies `.py:line` refs against filesystem (file-exists + lineno-in-range only) | ⚠️ (v3.3) Advisory — catches nonexistent files and lines-past-EOF, NOT wrong function names or wrong line numbers on real files (see design note 21) |
-| Agent uses non-standard completion language | Regex denylist v3: (still evadable but false positives fixed) | ⚠️ Advisory — pattern boundary |
+| Agent uses non-standard completion language | Primary control is the **clearance-token allowlist** (v3.3): while a violation is open, completion is blocked unless `[GATE:ACCEPTING:<id>]` is present per open violation. The `_claims_all_clear` denylist is belt-and-suspenders (v3.7.1 also catches "verification complete" / "task complete" / "all findings addressed" / "nothing failed") | ✅ (v3.3) Structural allowlist; ⚠️ denylist advisory |
 | Agent ignores pre_llm_call reminder | Not sufficient alone — but on_output catches text | ✅ (chained) |
 | Agent writes completion without [GATE:ACCEPTING:] token | `_has_clearance_token()` requires explicit token per open violation | ✅ (v3.3) Structural — bounded allowlist |
 
@@ -248,13 +269,13 @@ TOOLSETS: [terminal, file, web, ...]
 
 ## Test Suite
 
-### Plugin-Level Test
+As of v3.7.1 the system is covered by the repo's pytest suite (**~193 tests**, run in CI on every push and on the daily sync; the v3.7.1 pre-push gate runs four guard suites). The groups below describe the original dedicated on_output / conversation-loop coverage; the counts are historical snapshots of those specific groups, not the whole suite.
 
-**File:** `~/.hermes/scripts/test-on-output-hook.py`
+### Plugin-Level Test (on_output hook)
 
 Tests the full `invoke_hook` chain for `on_output` by directly registering the enforcer plugin's callbacks with the Hermes plugin manager.
 
-Coverage: 45+ tests across these groups:
+Coverage groups (original snapshot, ~45 tests):
 - Hook registration (3 tests)
 - Normal output without violation (1 test)
 - ALL CLEAR blocked during violation (4 tests)
@@ -265,14 +286,14 @@ Coverage: 45+ tests across these groups:
 - Comprehensive ALL CLEAR pattern coverage — 26 patterns (24 original + 2 v3 false-positive-edge cases)
 - Session-scoped state isolation (2 tests)
 
-Run with:
+Run the full suite from the repo root:
 ```bash
-cd <hermes_root> && python3 ~/.hermes/scripts/test-on-output-hook.py
+cd <hermes_root> && python3 -m pytest
 ```
 
-### Conversation-Loop Integration Test (in reference doc)
+### Conversation-Loop Integration Test
 
-Simulates the `continue`/`break`/retry-limit logic from `conversation_loop.py` without a running agent. Tests: 5 successive blocks → abort, budget-exhaustion interception, clean-budget passthrough. 17 tests.
+Simulates the `continue`/`break`/retry-limit logic from `agent/conversation_loop.py` without a running agent. Tests: 5 successive blocks → **BLOCKED escalation to a human** (v3.7.0; the decision now lives in `agent/_on_output_gate.py` and is unit-tested directly, v3.7.1), budget-exhaustion interception via `_final_validated`, and clean-budget passthrough.
 
 ---
 
@@ -301,9 +322,10 @@ cat > ~/.hermes/SOUL.md << 'EOF'
 **Post-action:** actual state matches config? previously-working still works? new errors? docs updated? temps cleaned?
 EOF
 
-# 4. Create plugin directory + files
-mkdir -p ~/.hermes/plugins/self-check-enforcer
-# Write plugin.yaml and __init__.py (from Layer 3 section in this doc)
+# 4. Plugin — already bundled (v3.7.1)
+#    The enforcer ships in the fork repo at plugins/self-check-enforcer/
+#    (plugin.yaml + __init__.py), on by default. Nothing to hand-install.
+#    (Historically this step created ~/.hermes/plugins/self-check-enforcer/.)
 
 # 5. Auto-sync (server-side)
 #    The fork's .github/workflows/sync-upstream.yml runs daily at 0400 Pacific,
@@ -323,20 +345,21 @@ mkdir -p ~/.hermes/plugins/self-check-enforcer
 After install, confirm:
 
 - [ ] SOUL.md exists and contains self-checking-harness instruction
-- [ ] Plugin directory exists with `plugin.yaml` and `__init__.py`
+- [ ] Bundled plugin present at `plugins/self-check-enforcer/` with `plugin.yaml` and `__init__.py`
 - [ ] Plugin registers all 8 hooks: `pre_tool_call`, `post_tool_call`, `pre_llm_call`, `transform_tool_result`, `subagent_stop`, `on_session_start`, `on_session_end`, `on_output`
 - [ ] `"on_output" in VALID_HOOKS` returns True
-- [ ] `agent/conversation_loop.py` contains `on_output` hook call sites (2 locations)
-- [ ] `tools/delegate_tool.py` contains `NO-OP REJECTION` guard
-- [ ] Plugin test suite passes (45+ tests)
+- [ ] `agent/conversation_loop.py` contains `on_output` hook call sites (2 locations) and the `_final_validated` post-loop guard
+- [ ] `agent/_on_output_gate.py` exists (5-block BLOCKED-escalation decision)
+- [ ] `tools/delegate_tool.py` contains the `NO-OP REJECTION` guard and the mandatory verdict instruction
+- [ ] Full pytest suite passes (~193 tests)
 - [ ] New Hermes session: any subagent session auto-starts with harness loaded (no `skill_view` needed)
-- [ ] delegate_task returning FAIL sets `_pending_gate_violation` flag
+- [ ] delegate_task returning FAIL (or `verdict: NEEDS_WORK`/`BLOCKED`) opens a gate violation
 - [ ] `send_message("ALL CLEAR")` blocked when violation open
-- [ ] `pre_llm_call` injects violation reminder into every turn while flag set
+- [ ] `pre_llm_call` injects violation reminder into every turn while a violation is open
 - [ ] Direct text claiming success blocked by `on_output` hook during violation
-- [ ] 5 successive blocks deliver abort message
-- [ ] Unrelated clean delegate_task does NOT clear the flag (goal-scoped — v3)
-- [ ] Session A violation does not affect session B (session isolation — v3)
+- [ ] 5 successive blocks → explicit BLOCKED escalation to a human (not a silent "done")
+- [ ] Unrelated clean delegate_task does NOT clear the flag (keyed on `child_session_id`)
+- [ ] Session A violation does not affect session B (session isolation)
 
 ---
 
@@ -390,15 +413,15 @@ After install, confirm:
 
 21. **v3.3 citation checker (feedback point 3, round6 pragmatic fix):** The `on_output` handler runs `_verify_citations()` on the final response text, extracting `file.py:line` refs and verifying each against the filesystem via `_discover_hermes_root()` (imports `hermes_constants` at runtime, falls back to known paths). Issues are stored in `state["_citation_issues"]` and surfaced: (a) in `pre_llm_call` warnings next turn, and (b) appended to gate violation block messages when both apply. **Known limitations (round 6):** (i) Cannot catch wrong _function_ names like `_plugin_hooks.dispatch()` because the regex requires `file.py:line` format — missing either part and it doesn't match. (ii) Cannot catch wrong line numbers on real files (e.g. `delegate_tool.py:2306` when the real call is at 2344) because the check only guards `lineno > total_lines`, not whether the cited _symbol_ is at that line — a symbol-proximity grep would be needed for that, which is a materially different check. (iii) Runs in `on_output` only (single pass), not duplicated in `post_llm_call`. Honest boundary: the checker catches nonexistent files and lines-past-EOF but cannot verify semantic accuracy of citations. This is explicitly stated as a limitation rather than shipping security theatre.
 
-22. **CI tests are the new Layer 4 persistence check (v3.5):** The old Layer 4 used 4 patch files + an apply script to verify source changes survived `git pull upstream main`. Now that all changes are committed on the fork, the GitHub Actions `Tests` workflow serves the same role at higher fidelity — it runs the full pytest suite (140+ tests, 6 parallel slices) on every push and daily sync. Instead of "did the patch apply?" (binary file check), it answers "do all modifications still work?" (functional validation). If a rebase breaks our custom NO-OP guard, on_output hook, or auto-rebase logic, the failing test catches it immediately — same detection surface as the old patch system, but orders of magnitude more thorough. The `Sync Upstream` workflow + `Tests` workflow together form a complete replacement for the old patch persistence: sync merges changes, tests verify they still work.
+22. **CI tests are the new Layer 4 persistence check (v3.5):** The old Layer 4 used 4 patch files + an apply script to verify source changes survived `git pull upstream main`. Now that all changes are committed on the fork, the GitHub Actions `Tests` workflow serves the same role at higher fidelity — it runs the full pytest suite (~193 tests as of v3.7.1; v3.7.1 hardened the pre-push gate to four guard suites and pinned `actions/checkout` to a SHA) on every push and daily sync. Instead of "did the patch apply?" (binary file check), it answers "do all modifications still work?" (functional validation). If a rebase breaks our custom NO-OP guard, on_output hook, or auto-rebase logic, the failing test catches it immediately — same detection surface as the old patch system, but orders of magnitude more thorough. The `Sync Upstream` workflow + `Tests` workflow together form a complete replacement for the old patch persistence: sync merges changes, tests verify they still work.
 
 ---
 
-23. **v3.4 FAIL regex false-positive filter (round 8 gate fix):** `_FAIL_PATTERN` changed from `\bFAIL\b` to `\bFAIL\b(?!.*(?i:\bfixed\b))`. When a subagent summary contains "FAIL #1 — FIXED" throughout section headers, the gate scanner previously saw FAIL and flagged it as a violation — even though every FAIL was followed by FIXED describing a remediated issue. The negative lookahead suppresses matches when FIXED appears after FAIL on the same line, case-insensitively. FAIL itself remains case-sensitive.
+23. **v3.4 FAIL regex false-positive filter (round 8 gate fix) — SUPERSEDED in v3.6.0:** v3.4 changed `_FAIL_PATTERN` from `\bFAIL\b` to `\bFAIL\b(?!.*(?i:\bfixed\b))` to suppress "FAIL #1 — FIXED" section headers. **This was reverted in v3.6.0** because the exclusion was itself a bypass: "FAIL: x — will be fixed later" is an *unresolved* failure that the lookahead let slip the gate. The current `_FAIL_PATTERN` is the plain `\bFAIL\b` (detection-first); a genuine false positive is cleared with `[GATE:ACCEPTING:<id>]`. See the v3.6.0 changelog note below.
 
-24. **v3.4 on_output retry loop scope fix (round 7 QA):** The in-loop on_output's `continue` and `break` targeted the inner `for _ores` loop, not the outer `while` loop. Fixed by introducing a `_blocked` flag: for loop sets `_blocked = True` and breaks; afterwards, if blocked and retry limit not exceeded, `continue` targets the while loop triggering a real LLM retry. `_blocked` initialized at function scope so the post-loop guard can reference it.
+24. **v3.4 on_output retry loop scope fix (round 7 QA) — partially superseded (v3.6.0 / v3.7.x):** The in-loop on_output's `continue`/`break` targeted the inner `for _ores` loop, not the outer `while` loop. v3.4 fixed this with a `_blocked` flag: the for-loop sets `_blocked = True` and breaks; afterwards, if blocked, `continue` targets the while loop for a real LLM retry. **Two changes since:** (a) `_blocked` is now reset per *iteration*, not per function/turn (v3.6.0 — a per-turn-only reset left it sticky so a compliant retry could never break); (b) the retry-limit branch no longer "aborts" — at 5 blocks it is an explicit **BLOCKED escalation to a human**, extracted to `agent/_on_output_gate.py::decide_after_block` (v3.7.0/v3.7.1). See the changelog notes below.
 
-25. **v3.4 post-loop double-fire guard (round 7 QA):** Post-loop hook guarded with `and not _blocked` so normal text completions that already fired the in-loop hook skip the second invocation. Budget-exhaustion and error exits bypass the in-loop handler, so `_blocked` stays False and the post-loop hook fires correctly for non-standard exits.
+25. **v3.4 post-loop double-fire guard (round 7 QA) — SUPERSEDED (v3.5.2 → v3.6.0):** The post-loop hook was guarded with `and not _blocked` so normal completions that already fired the in-loop hook skip the second invocation. This guard was **wrong for the allow path** (`_blocked` stayed False on a normal completion, so the hook fired twice); v3.5.2 replaced it with a sticky `_on_output_fired` flag, and **v3.6.0 replaced that** with `_final_validated` (set only on the allow path, reset every iteration) so a budget-exhaustion exit re-checks a leaking all-clear instead of being skipped. The current guard is `not _final_validated`. See notes 33 and the v3.6.0 changelog note.
 
 26. **v3.4 Source patches idempotent (round 8):** All 4 patch files in `~/.hermes/patches/` updated to match the committed-on-fork source code. `003-on-output-update-hook.patch` no longer contains `import subprocess, os` (removed the redundant local import that caused `UnboundLocalError`). `002-on-output-conversation-loop.patch` updated to reflect the `_blocked`-flag fixed version. The `apply-on-output-patches.sh` script's existing idempotency logic now reports `✓ Already applied` for all 4 patches instead of `⚠ Cannot apply (conflict)`.
 
@@ -416,28 +439,38 @@ After install, confirm:
 
 32. **v3.5.1 Local auto-rebase removed (round 12):** The `_sync_with_upstream_if_needed` call in `hermes update` is removed. `hermes update` now only pulls from `origin` — no fetching upstream, no rebasing, no force-pushing from local machines. The `Sync Upstream` GitHub Actions workflow (daily at 0400 Pacific) is the sole mechanism for merging upstream changes. Anyone who clones this fork gets the code without their `git push` touching an unintended repo. The GH Actions `GITHUB_TOKEN` is ephemeral and single-repo-scoped — safe by design. Two tests updated to reflect the removed local sync.
 
-33. **v3.5.2 on_output double-fire fix (round 13):** The post-loop guard in `conversation_loop.py` was changed from `not _blocked` to `not agent._on_output_fired`. Previously, the `not _blocked` guard only suppressed the post-loop invocation on the blocked path — for normal allowed completions, `_blocked` stayed False and the hook fired twice per turn. A separate `_on_output_fired` flag is now set unconditionally after the in-loop hook runs (line 4180), regardless of whether the hook returned a block or allow. The post-loop guard checks this flag instead, firing only when the in-loop hook never ran (budget exhaustion exits). The 5-block exhaustion warning is preserved — the flag is set during the final iteration, so the post-loop guard correctly skips rather than clobbering the warning.
+33. **v3.5.2 on_output double-fire fix (round 13) — SUPERSEDED in v3.6.0:** v3.5.2 changed the post-loop guard from `not _blocked` to `not agent._on_output_fired`, a sticky flag set *unconditionally* after the in-loop hook. **v3.6.0 removed `_on_output_fired`** and replaced it with `_final_validated`, set only on the in-loop *allow* path and reset every iteration. The sticky flag was set even when the in-loop hook blocked, so it skipped the post-loop revalidation on a budget-exhaustion exit and let a leaking all-clear slip through; `_final_validated` (current guard: `not _final_validated`) re-checks that case. The 5-block exit is now an explicit BLOCKED escalation (v3.7.0), not a soft warning. See the v3.6.0 changelog note below.
 
 34. **v3.5.3 Goal context + tighter FAIL filter (round 14):** Three fixes for agent confusion:
     - **Key in violation detail**: subagent failure detent now prefixes each violation with `[{child_session_id}]` or `[tool:{name}]`, so the agent can read which ID to use for `[GATE:ACCEPTING:<id>]`. The `pre_llm_call` reminder already referenced "the child_session_id is shown in the violation detail below" — now it actually is.
-    - **Tighter `_FAIL_PATTERN_SHORT`**: excludes English conjugations (`FAILED`, `FAILING`, `FAILURE`, `FAILOVER`, `FAILS`, `FAIL TO`) via negative lookahead, reducing false positives in natural-language tool output and agent responses. `subagent_stop` still uses the full `_FAIL_PATTERN` (`\bFAIL\b` with fixed negative lookahead) since subagents output structured `FAIL:` markers.
+    - **Tighter `_FAIL_PATTERN_SHORT`**: excludes English conjugations (`FAILED`, `FAILING`, `FAILURE`, `FAILOVER`, `FAILS`, `FAIL TO`) via negative lookahead, reducing false positives in natural-language tool output and agent responses. `subagent_stop` uses the full `_FAIL_PATTERN` since subagents output structured `FAIL:` markers. *(As of this note `_FAIL_PATTERN` also carried the `(?!.*fixed)` exclusion; that exclusion was **removed in v3.6.0** — see note 23 and the v3.6.0 changelog note. The current `_FAIL_PATTERN` is the plain `\bFAIL\b`.)*
     - **Post_tool_call switched to SHORT pattern**: uses `_FAIL_PATTERN_SHORT` instead of `_FAIL_PATTERN`, reducing false positives from tools that return text containing conjugated "fail" words.
     - **`skill_view` exemption**: added to the read-only tool exemption list alongside `read_file`, `search_files`, `web_extract`, `patch`. The tool returns skill document content, which may contain "FAIL" as descriptive text.
+
+35. **v3.5.4 Punctuation exclusion in `_FAIL_PATTERN_SHORT`:** `_FAIL_PATTERN_SHORT` extended to also exclude adjacent punctuation (`"`, `'`, `)`, `]`, `}`) after `FAIL`, preventing false positives when source-code-scanning tools (grep/ripgrep) return literal `"FAIL"` strings. The full `_FAIL_PATTERN` at `subagent_stop` is unchanged.
+
+36. **v3.6.0 Round-1 QA remediation** *(see the v3.6.0 prose at the top of this document for the full account):* clearance tokens now clear a gate **without** all-clear phrasing, and tool-keyed violations surface their `[tool:<name>]` id so they are clearable; the conversation-loop `_blocked` flag resets **per iteration** (a compliant retry now breaks instead of burning to budget) and the post-loop guard revalidates output on budget-exhaustion exits via `_final_validated`, which **replaced the sticky `_on_output_fired` flag** (notes 25/33); the `(?!.*fixed)` exclusion was **removed** so a "will be fixed" line no longer masks an unresolved FAIL (note 23), and `_FAIL_PATTERN_SHORT` was rebuilt (dead conjugation lookahead + `[\s]` typo removed, punctuation exclusion kept); the daily force-push is gated on a pre-push validation step.
+
+37. **v3.7.0 Verification-protocol features (bottega-inspired)** *(see the v3.7.0 prose at the top):* a **READY / NEEDS_WORK / BLOCKED** verdict in the return format, with `subagent_stop` opening a first-class **escalation gate** when a completed child reports `verdict: BLOCKED` / a non-null `escalation_reason` (no FAIL token needed) — and the 5-block `on_output` exhaustion became an explicit **BLOCKED escalation to a human**, not a soft warning; **strict plan↔artifact matching** (claimed file creations/writes whose target is absent are flagged via `on_output`); an **ACCEPTANCE SCENARIOS** block in the delegate template that the child must RUN and report (command + exit code); and **enumerated per-id failed-check feedback** for targeted retries.
+
+38. **v3.7.1 Round-5 QA remediation** *(see the v3.7.1 prose at the top):* **NEEDS_WORK is now enforced** — it opens a re-runnable gate on its own, so a contract-following child can no longer bypass by reporting NEEDS_WORK in prose without a literal FAIL; `_claims_all_clear` closes done-claim bypasses ("verification complete" / "task complete" / "all findings addressed" / "nothing failed"); the dead `_VERIFIES_TASK_RE` was removed; the `on_output` block / 5-block-escalation decision was extracted to an importable `agent/_on_output_gate.py` for direct unit tests; **detection-first is retained at `subagent_stop`** (a bare FAIL gates even alongside a `READY` claim — deliberate); the delegate prompt now **mandates the verdict field**; CI was hardened (pinned `actions/checkout`, four pre-push guard suites); and **the plugin is now bundled in the repo** (`plugins/self-check-enforcer/`) — this spec links the tracked plugin instead of embedding it. Suite is ~193 tests, green.
 
 ---
 
 ## Git Diff Summary (All Changes)
 
+Indicative of the touched surface (the authoritative diff is the fork's git history; the plugin is now **tracked in-repo**, not under `~/.hermes/`):
+
 ```
- hermes_cli/plugins.py             |  5 +++++
- agent/conversation_loop.py        | 63 +++++++++++++++++++++++++++++---
- hermes_cli/main.py                | 91 ++++++++++++++++++++++++++++++++
- tools/delegate_tool.py            | 16 +++++++++
- .github/workflows/sync-upstream.yml | 47 ++++++++++++++++++++++
- ~/.hermes/plugins/self-check-enforcer/__init__.py | 2 regex lines changed
-                                                     (v3.4)
- ~/.hermes/plugins/self-check-enforcer/plugin.yaml | +2 hooks declared
- 7 files changed, ~232 insertions
+ hermes_cli/plugins.py                          | on_output added to VALID_HOOKS
+ agent/conversation_loop.py                     | on_output call sites (2);
+                                                  _blocked/_final_validated guards
+ agent/_on_output_gate.py                       | NEW (v3.7.1) — 5-block decision
+ tools/delegate_tool.py                         | NO-OP guard; verifies_task echo;
+                                                  acceptance-scenarios + verdict
+ .github/workflows/sync-upstream.yml            | daily sync; pinned checkout (v3.7.1)
+ plugins/self-check-enforcer/__init__.py        | bundled plugin (8 hooks)
+ plugins/self-check-enforcer/plugin.yaml        | 8 hooks declared
 ```
 
 ---
@@ -454,6 +487,6 @@ After install, confirm:
 | `transform_tool_result(tool_name, result)` | After tool returns, before model sees | Modified result string | Annotate FAIL results with [GATE CHECK] marker |
 | `on_session_start()` | New session created | Ignored | Auto-load harness; set `_HARNESS_LOADED = True` |
 | `on_session_end()` | End of `run_conversation` | Ignored | Clean up session-scoped state from `_session_states` dict |
-| `on_output(response_text, ...)` | Final text produced, before loop break | `{"action": "block", "message": "..."}` or `None` | Block ALL CLEAR text output while violation open; accept `[GATE:ACCEPTING:]` clearance token bypass (v3.3); verify file:line citations in final text (v3.3) |
+| `on_output(response_text, ...)` | Final text produced, before loop break | `{"action": "block", "message": "..."}` or `None` | Block ALL CLEAR text output while violation open; accept `[GATE:ACCEPTING:]` clearance token bypass; verify file:line citations; flag claimed-but-missing files (v3.7.0); the conversation-loop wiring escalates the 5th block to an explicit BLOCKED-to-a-human via `agent/_on_output_gate.py` (v3.7.0/v3.7.1) |
 | `pre_gateway_dispatch(message)` | Gateway received user message | `{"action": "skip"/"rewrite"/"allow"}` | (Not used) |
-| `subagent_stop(parent_session_id, child_session_id, child_summary, child_status)` | After each delegate_task child finishes | Ignored | Detect FAIL in child_summary via `_FAIL_PATTERN`; auto-clear matching violation on `verifies_task` re-run (v3.3) |
+| `subagent_stop(parent_session_id, child_session_id, child_summary, child_status)` | After each delegate_task child finishes | Ignored | Detect FAIL in child_summary via the full `_FAIL_PATTERN` (detection-first, no "fixed" masking); open a gate on a failure status / `verdict: NEEDS_WORK` (v3.7.1) / `verdict: BLOCKED` or non-null `escalation_reason` (v3.7.0); build an enumerated per-id checklist; auto-clear matching violation on a `verifies_task` re-run |
