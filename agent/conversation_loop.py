@@ -447,7 +447,7 @@ def run_conversation(
     # Per-turn retry counters
     agent._on_output_blocks = 0
     _blocked = False  # Set True by on_output plugin when output is blocked
-    agent._on_output_fired = False  # Set True once on_output hook has run (in-loop)
+    _final_validated = False  # True once on_output ALLOWED the response we return
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
@@ -466,6 +466,14 @@ def run_conversation(
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
+
+        # round-1 QA #1/#5: reset per-iteration on_output state. _blocked MUST be
+        # cleared each turn or a compliant retry can never break (it would loop
+        # to budget exhaustion, burning tokens/turns). _final_validated tracks
+        # whether on_output allowed THIS turn's response so the post-loop guard
+        # doesn't skip revalidating a leaking claim on a budget-exhaustion exit.
+        _blocked = False
+        _final_validated = False
 
         # Check for interrupt request (e.g., user sent new message)
         if agent._interrupt_requested:
@@ -4184,7 +4192,6 @@ def run_conversation(
                         model=agent.model,
                         platform=getattr(agent, "platform", None) or "",
                     )
-                    agent._on_output_fired = True
                     for _ores in _on_results:
                         if isinstance(_ores, dict) and _ores.get("action") == "block":
                             _msg = _ores.get(
@@ -4207,6 +4214,10 @@ def run_conversation(
                             agent._on_output_blocks = 0
                         else:
                             continue  # Retry: continue outer while loop
+                    else:
+                        # on_output allowed this response — it is the validated
+                        # text we will return, so the post-loop guard skips it.
+                        _final_validated = True
 
                 if _blocked:
                     _turn_exit_reason = "text_response(blocked_by_policy)"
@@ -4276,9 +4287,11 @@ def run_conversation(
     # ── Post-loop: on_output for budget-exhaustion / non-standard exits ──
     # Fires when the LLM finished with a summary due to budget exhaustion
     # or other non-standard exit.  No retry here — the loop has exited.
-    # `_on_output_fired` is True if the in-loop hook already ran, so normal
-    # text completions that already fired the hook skip this second invocation.
-    if final_response and not interrupted and not agent._on_output_fired:
+    # `_final_validated` is True only when the in-loop hook ALLOWED the exact
+    # response we are about to return this turn; in that case we skip the second
+    # invocation.  On a budget-exhaustion exit after blocks, `_final_validated`
+    # is False, so a leaking all-clear claim is re-checked here (round-1 QA #5).
+    if final_response and not interrupted and not _final_validated:
         from hermes_cli.plugins import invoke_hook as _budget_invoke
         _budget_results = _budget_invoke(
             "on_output",
