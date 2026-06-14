@@ -134,6 +134,11 @@ VALID_HOOKS: Set[str] = {
     # Plugins return a string to replace the response text, or None/empty to leave unchanged.
     # First non-None string wins. Useful for vocabulary/personality transformation.
     "transform_llm_output",
+    # on_output — fires when the LLM finishes its final text response (no tool
+    # calls).  Plugins return a dict {"action": "block", "message": "..."}
+    # to reject the output and force the model to retry.  Return None to allow.
+    # Kwargs: response_text, session_id, model, platform
+    "on_output",
     "pre_llm_call",
     "post_llm_call",
     "pre_api_request",

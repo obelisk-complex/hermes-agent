@@ -572,6 +572,11 @@ def run_conversation(
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
+    # Per-turn retry counters
+    agent._on_output_blocks = 0
+    _blocked = False  # Set True by on_output plugin when output is blocked
+    _final_validated = False  # True once on_output ALLOWED the response we return
+
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
     # all run inside Codex). Default Hermes path is bypassed entirely.
@@ -589,6 +594,14 @@ def run_conversation(
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
+
+        # round-1 QA #1/#5: reset per-iteration on_output state. _blocked MUST be
+        # cleared each turn or a compliant retry can never break (it would loop
+        # to budget exhaustion, burning tokens/turns). _final_validated tracks
+        # whether on_output allowed THIS turn's response so the post-loop guard
+        # doesn't skip revalidating a leaking claim on a budget-exhaustion exit.
+        _blocked = False
+        _final_validated = False
 
         # Check for interrupt request (e.g., user sent new message)
         if agent._interrupt_requested:
@@ -4473,8 +4486,55 @@ def run_conversation(
                     messages.pop()
 
                 messages.append(final_msg)
-                
-                _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+
+                # ── Plugin hook: on_output ──────────────────────────────────
+                # Fires when the LLM produces final text with no tool calls.
+                # Plugin returns {"action": "block", "message": "..."} to
+                # reject the output and force the model to retry.  Return None
+                # or a dict without "block" action → allow output through.
+                if final_response and not interrupted:
+                    from hermes_cli.plugins import invoke_hook as _on_invoke
+                    _on_results = _on_invoke(
+                        "on_output",
+                        response_text=final_response,
+                        session_id=agent.session_id or "",
+                        model=agent.model,
+                        platform=getattr(agent, "platform", None) or "",
+                    )
+                    for _ores in _on_results:
+                        if isinstance(_ores, dict) and _ores.get("action") == "block":
+                            _msg = _ores.get(
+                                "message",
+                                "Output rejected by policy. Please revise and retry.",
+                            )
+                            messages.append({"role": "user", "content": _msg})
+                            agent._empty_content_retries = 0
+                            agent._post_tool_empty_retried = False
+                            agent._on_output_blocks += 1
+                            _blocked = True
+                            break
+                    if _blocked:
+                        # Delegate the block/escalation decision to the pure
+                        # helper so the threshold + message are unit-tested
+                        # directly (agent/_on_output_gate.decide_after_block).
+                        from agent._on_output_gate import decide_after_block
+                        _decision, _esc_msg = decide_after_block(
+                            agent._on_output_blocks
+                        )
+                        if _decision == "escalate":
+                            final_response = _esc_msg
+                            agent._on_output_blocks = 0
+                        else:
+                            continue  # Retry: continue outer while loop
+                    else:
+                        # on_output allowed this response — it is the validated
+                        # text we will return, so the post-loop guard skips it.
+                        _final_validated = True
+
+                if _blocked:
+                    _turn_exit_reason = "text_response(blocked_by_policy)"
+                else:
+                    _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
                     agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
                 break
@@ -4535,7 +4595,32 @@ def run_conversation(
                 # session resume (avoids consecutive user messages).
                 messages.append({"role": "assistant", "content": final_response})
                 break
-    
+
+    # ── Post-loop: on_output for budget-exhaustion / non-standard exits ──
+    # Fires when the LLM finished with a summary due to budget exhaustion
+    # or other non-standard exit.  No retry here — the loop has exited.
+    # `_final_validated` is True only when the in-loop hook ALLOWED the exact
+    # response we are about to return this turn; in that case we skip the second
+    # invocation.  On a budget-exhaustion exit after blocks, `_final_validated`
+    # is False, so a leaking all-clear claim is re-checked here (round-1 QA #5).
+    if final_response and not interrupted and not _final_validated:
+        from hermes_cli.plugins import invoke_hook as _budget_invoke
+        _budget_results = _budget_invoke(
+            "on_output",
+            response_text=final_response,
+            session_id=agent.session_id or "",
+            model=agent.model,
+            platform=getattr(agent, "platform", None) or "",
+        )
+        for _bres in _budget_results:
+            if isinstance(_bres, dict) and _bres.get("action") == "block":
+                _msg = _bres.get(
+                    "message",
+                    "Output rejected by policy during budget-exhaustion summary.",
+                )
+                final_response = _msg
+                break
+
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.
