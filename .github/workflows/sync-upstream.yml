@@ -1,0 +1,137 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # daily at 11:00 UTC (04:00 PDT / 03:00 PST)
+  workflow_dispatch:       # also triggerable manually
+
+permissions:
+  contents: write
+
+# Never let two daily syncs (or a manual dispatch + the schedule) race the
+# force-push to main.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0         # full history needed for rebase
+          ref: main
+          # SYNC_PAT = fine-grained PAT with Contents + Workflows write. Required
+          # because the default GITHUB_TOKEN may NOT push changes under
+          # .github/workflows/, so the sync fails whenever upstream touches a
+          # workflow file. Falls back to GITHUB_TOKEN if the secret is unset
+          # (sync then still fails on upstream workflow changes, as before).
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream main --quiet
+
+      # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
+      # conflict resolved once (here or in a manual rebase) auto-replays on the single
+      # rolling fork-patch commit, and the nightly sync stops re-litigating the same
+      # hunks. Best-effort: a missing/empty cache just means "no recorded resolutions
+      # yet".
+      - name: Restore rerere resolution cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
+          restore-keys: |
+            rerere-cache-
+
+      - name: Check if upstream has new commits
+        id: check
+        run: |
+          UPSTREAM_AHEAD=$(git rev-list --count origin/main..upstream/main 2>/dev/null || echo "0")
+          CUSTOM_AHEAD=$(git rev-list --count upstream/main..origin/main 2>/dev/null || echo "0")
+          echo "upstream_ahead=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
+          echo "custom_ahead=$CUSTOM_AHEAD" >> $GITHUB_OUTPUT
+          echo "Upstream ahead by $UPSTREAM_AHEAD commits"
+          echo "Fork ahead by $CUSTOM_AHEAD commits (custom)"
+
+      - name: Rebase custom commits onto upstream
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # Committer identity for the rebase replay. MUST be obelisk-complex's
+          # real noreply id, not the old `obelisk@…` (which is an unrelated user
+          # and re-stamps every custom commit's committer with the wrong author).
+          git config user.email "265670482+obelisk-complex@users.noreply.github.com"
+          git config user.name "obelisk-complex"
+          # rerere: record/replay conflict resolutions; autoupdate stages a hunk the
+          # moment a recorded resolution fully resolves it.
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          echo "⚜️ Rebasing ${{ steps.check.outputs.custom_ahead }} custom commit(s) onto ${{ steps.check.outputs.upstream_ahead }} new upstream commit(s)..."
+          if git rebase upstream/main; then
+            echo "✓ Rebased cleanly."
+          else
+            # The rebase paused on a conflict. If rerere already knew every conflicting
+            # hunk, autoupdate staged the resolution and no unmerged paths remain — drive
+            # --continue through. If any path is still unmerged it's a NEW conflict with
+            # no recorded resolution: abort and fail for a human.
+            while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
+              if git diff --name-only --diff-filter=U | grep -q .; then
+                git rebase --abort || true
+                echo "::error::Upstream rebase hit an UNKNOWN conflict (no recorded rerere resolution). Resolve it once locally with rerere enabled, push the rolling patch, and the cache auto-replays it next time. origin/main left untouched."
+                exit 1
+              fi
+              GIT_EDITOR=true git rebase --continue || { git rebase --abort || true; echo "::error::git rebase --continue failed after a rerere auto-resolution."; exit 1; }
+            done
+            echo "✓ Rebase completed using recorded rerere resolution(s)."
+          fi
+
+      - name: Validate rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # The guard tests import the in-repo `agent`/`hermes_cli` packages, so the
+          # repo root must be on sys.path. Running `python3 tests/...py` bare puts only
+          # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
+          export PYTHONPATH="$PWD"
+          # Catch conflict markers / syntax breakage the rebase may have left in
+          # the import-critical and fork-customised files.
+          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
+            python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
+          done
+          # Guard tests (stdlib-only, no install needed): fail the sync if the
+          # rebase relocated/dropped the custom on_output hook or the _blocked
+          # reset, lost the update syntax-guard coverage, or reintroduced a
+          # shadowed stdlib import. This is the real "CI tests as persistence"
+          # gate — it runs BEFORE the push, so a broken rebase never reaches
+          # origin/main (which every `hermes update` consumer hard-resets to).
+          python3 tests/agent/test_on_output_retry_loop.py
+          python3 tests/hermes_cli/test_update_safety.py
+          python3 tests/agent/test_hook_contract.py
+          python3 tests/tools/test_delegate_instructions.py
+
+      - name: Push validated rebase
+        # Explicit success() (already implicit) makes the gate unmistakable: the
+        # force-push runs ONLY if the rebase and the pre-push validation passed.
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        run: |
+          git push --force-with-lease origin main
+          echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
+
+      # Persist any resolutions rerere recorded this run (even on failure, so a
+      # resolution applied mid-run is not lost). Unique key per run; restore-keys
+      # picks up the most recent on the next run.
+      - name: Save rerere resolution cache
+        if: always() && steps.check.outputs.upstream_ahead != '0'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
+
+      - name: Report sync failure
+        if: failure()
+        run: |
+          echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."

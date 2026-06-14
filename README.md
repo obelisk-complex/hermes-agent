@@ -1,3 +1,27 @@
+## ⚜️ Obelisk Complex Fork: Customisations
+
+[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx)
+
+This fork adds a **self-check enforcement system**: it stops the agent reporting a task as done when a sub-task or validation actually failed.
+
+**Full install and technical details:** [`self-check-enforcement-system-v15.md`](self-check-enforcement-system-v15.md).
+
+### What you get
+
+- **No false 'done'.** When a subagent reports a failure, the agent is mechanically blocked from sending or printing an 'all clear' until the failure is fixed or explicitly acknowledged. It cannot slip past the block via another channel, plain text, or a no-op subagent dispatch.
+- **A verification protocol on every subagent.** Subagents load a 5-gate harness (evidence, confidence score, contradiction check, alternatives, threshold) and must run their acceptance checks before they can report `READY`.
+- **Escalation instead of silent failure.** After repeated blocked attempts the turn ends with an explicit 'BLOCKED, needs a human', never a quiet 'done'.
+- **Stays current with upstream, safely.** A GitHub Action rebases the fork onto `NousResearch/hermes-agent` daily and force-pushes server-side, so it tracks upstream with no local machine involved. Your local `hermes update` only pulls from `origin`, so no clone can force-push by accident.
+
+### How to get it
+
+- **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
+- **Add it to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
+
+**Human involvement:** Ghostwritten. AI generated all code in this fork; a human operator briefed, reviewed, and signed off on every change (catching security issues, challenging design decisions, directing rework). No code was written directly by human hands.
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
