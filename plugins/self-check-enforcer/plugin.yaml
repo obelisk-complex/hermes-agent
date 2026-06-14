@@ -1,0 +1,22 @@
+name: self-check-enforcer
+version: "3.7.1"
+description: "Auto-loads the self-checking-harness skill and enforces gate
+  compliance. v3.7.1: round-5 remediation — NEEDS_WORK opens its own re-runnable
+  gate, closed done-claim bypasses, removed dead code, extracted the on_output
+  escalation decision. v3.7.0: verification-protocol features — READY/NEEDS_WORK/BLOCKED
+  verdict with BLOCKED escalation gate, strict plan↔artifact matching, enumerated
+  failed-check feedback, acceptance-scenarios instruction; v3.6.0: round-1 QA
+  remediation (FAIL no longer masked by 'fixed', clearance without all-clear,
+  tool-keyed clearable id, regex cleanup); v3.5.4: punctuation exclusion;
+  v3.5.2: on_output double-fire fix; v3.3: subagent_stop, verifies_task, tokens."
+author: hermes
+kind: standalone
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  - transform_tool_result
+  - subagent_stop
+  - on_session_start
+  - on_session_end
+  - on_output
