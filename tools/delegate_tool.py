@@ -706,6 +706,43 @@ def _build_child_system_prompt(
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
     parts.append(
+        "\n\n═══ MANDATORY INSTRUCTION ═══\n"
+        "If this task requires no real work, or the work has already\n"
+        "been completed by a prior subagent, return FAIL with reason\n"
+        "'NO-OP REJECTION: <explanation>'. Do NOT fabricate results.\n"
+        "A FAIL return is preferred over a fake-clean result.\n"
+        "═══ END MANDATORY INSTRUCTION ═══"
+    )
+    parts.append(
+        "\n\n═══ VERIFIES_TASK INSTRUCTION ═══\n"
+        "If the task's goal or description contains `verifies_task=<id>`,\n"
+        "include `VERIFIES_TASK: <id>` at the very beginning of your\n"
+        "summary. This allows the parent to correlate your result with\n"
+        "the original failure being re-verified.\n"
+        "═══ END VERIFIES_TASK INSTRUCTION ═══"
+    )
+    parts.append(
+        "\n\n═══ ACCEPTANCE SCENARIOS INSTRUCTION ═══\n"
+        "If the task lists acceptance scenarios or a Testing Strategy, you MUST\n"
+        "run each one and report its result — the command run and its exit code,\n"
+        "or what you observed — before claiming completion. A scenario you did\n"
+        "not actually run is an unverified claim: return FAIL for it rather than\n"
+        "asserting success.\n"
+        "═══ END ACCEPTANCE SCENARIOS INSTRUCTION ═══"
+    )
+    parts.append(
+        "\n\n═══ VERDICT INSTRUCTION ═══\n"
+        "End your summary with an explicit verdict line: `verdict: READY`,\n"
+        "`verdict: NEEDS_WORK`, or `verdict: BLOCKED`.\n"
+        "  - READY: every gate passed and every acceptance scenario ran and passed.\n"
+        "  - NEEDS_WORK: any verification or test failed. This is a re-runnable\n"
+        "    FAIL: the parent re-dispatches or acknowledges it; do NOT claim done.\n"
+        "  - BLOCKED: the work needs a human (missing credential, outage, or\n"
+        "    ambiguous requirement); also set an `escalation_reason`.\n"
+        "Emitting the verdict is mandatory and does not depend on loading any skill.\n"
+        "═══ END VERDICT INSTRUCTION ═══"
+    )
+    parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
         "- What you did\n"
