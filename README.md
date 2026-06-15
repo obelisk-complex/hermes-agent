@@ -22,9 +22,12 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 
 ### Private-by-default image generation
 
-Separate from the self-check system above, and unrelated to the `on_output` hook: every image-generation request this fork sends to FAL carries the `X-Fal-Store-IO: 0` header (`tools/image_generation_tool.py`), on both the direct fal.ai path and the managed Nous gateway path, so FAL does not store or index your prompts or generated images.
+Separate from the self-check system above, and unrelated to the `on_output` hook. Image generation (`tools/image_generation_tool.py`) is hardened on two fronts so nothing you generate is left behind on fal:
 
-**Principle:** data retention should be **opt-in** — off by default, enabled only if the user explicitly chooses to — never **opt-out**, where the provider keeps your data unless you remember to turn it off. FAL's API stores by default (an opt-out model); this fork sends the opt-out header on every request so the private default holds with no action from you.
+- **No payload retention.** Every request sends the `X-Fal-Store-IO: 0` header, on both the direct fal.ai path and the managed Nous gateway path, so fal does not keep the request/response JSON (prompt, parameters, result metadata) in its request history.
+- **No public CDN image.** Every generation, and the upscale pass, forces fal `sync_mode`, so images come back inline as data URIs and are never uploaded to fal's public CDN. This is the part the header does **not** cover: fal's docs are explicit that `X-Fal-Store-IO` only suppresses payload history, and that any file already pushed to the CDN "will still be accessible". `sync_mode` is what guarantees no generated image is left on a public bucket.
+
+**Principle:** data retention should be **opt-in**, off by default and enabled only if the user explicitly chooses it, never **opt-out**, where the provider keeps your data unless you remember to turn it off.
 
 
 ---
