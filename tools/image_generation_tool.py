@@ -587,6 +587,25 @@ def _resolve_fal_model() -> tuple:
     return model_id, FAL_MODELS[model_id]
 
 
+def _upscale_enabled() -> bool:
+    """Whether the optional Clarity Upscaler pass is enabled (default OFF).
+
+    The upscaler (fal-ai/clarity-upscaler) has no sync_mode in its fal schema,
+    so its output is served from fal's PUBLIC CDN. Keeping it opt-in means
+    generation stays private-by-default; set ``image_gen.upscale: true`` in
+    config.yaml only if you accept the upscaled result transiting the CDN.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        img_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if isinstance(img_cfg, dict):
+            return bool(img_cfg.get("upscale", False))
+    except Exception as exc:
+        logger.debug("Could not load image_gen.upscale from config: %s", exc)
+    return False
+
+
 def _build_fal_payload(
     model_id: str,
     prompt: str,
@@ -901,6 +920,15 @@ def image_generate_tool(
     """
     model_id, meta = _resolve_fal_model()
 
+    if model_id not in SYNC_MODE_MODELS:
+        logger.warning(
+            "Image model %s has no sync_mode in its fal schema: its output will "
+            "be served from fal's PUBLIC CDN, not returned privately inline. Use "
+            "a sync_mode-capable model for private generation (see README, "
+            "'Private-by-default image generation').",
+            model_id,
+        )
+
     # Collect any source images (primary + references) into one ordered list.
     source_images: list = []
     if isinstance(image_url, str) and image_url.strip():
@@ -1007,9 +1035,15 @@ def image_generate_tool(
         if not images:
             raise ValueError("No images were generated")
 
-        # Edit endpoints already return the final composition; the Clarity
-        # upscaler is a text-to-image quality pass, so skip it for edits.
-        should_upscale = bool(meta.get("upscale", False)) and not use_edit
+        # Upscaling is opt-in (default OFF): clarity-upscaler has no sync_mode,
+        # so an upscaled result transits fal's public CDN (see _upscale_enabled).
+        # Edit endpoints already return the final composition, so skip the pass
+        # for edits regardless.
+        should_upscale = (
+            bool(meta.get("upscale", False))
+            and _upscale_enabled()
+            and not use_edit
+        )
 
         formatted_images = []
         for img in images:
