@@ -49,6 +49,19 @@ v3.7.1: round-5 QA fan-out remediation —
       - on_output block / 5-block-escalation decision extracted to
         agent/_on_output_gate.py for direct unit tests; delegate_tool.py now
         mandates the verdict field in the child prompt.
+v3.7.2: on_output loop-fix via the documented token path (NO trigger narrowing,
+      NO auto-clear — detection-first and the "not silently marked done"
+      guarantee are both preserved) —
+      - as on_output blocks accumulate within a turn, the rejection message
+        escalates to a forcing directive once the per-session counter reaches
+        ON_OUTPUT_BLOCK_LIMIT-1: stop re-emitting a bare all-clear and resolve
+        via verifies_task=<id> (mechanical clear) or [GATE:ACCEPTING:<id>]
+        (on-record honest override) before the 5th-block human escalation.
+        Breaks the false-positive retry loop *through the existing clearance
+        mechanism* instead of by weakening the gate;
+      - per-session on_output block counter (_on_output_blocks), reset on the
+        allow path; the threshold is imported from agent/_on_output_gate so it
+        stays in lockstep with the conversation-loop escalation limit.
 """
 
 from __future__ import annotations
@@ -59,6 +72,15 @@ import os
 import re
 import threading
 import time
+
+# v3.7.2: keep the in-turn forcing-message threshold in lockstep with the
+# conversation-loop's escalation limit (single source of truth). The fallback
+# keeps this plugin importable stdlib-only — e.g. the bundled-plugin test loads
+# it by file path, where the ``agent`` package may not be on sys.path.
+try:
+    from agent._on_output_gate import ON_OUTPUT_BLOCK_LIMIT as _BLOCK_LIMIT
+except Exception:  # pragma: no cover - fallback when agent pkg not importable
+    _BLOCK_LIMIT = 4
 
 # ── v1: harness auto-load state ────────────────────────────────────────
 _HARNESS_LOADED: bool = False
@@ -87,6 +109,7 @@ def _get_state(session_id: str) -> dict:
                 "violations": {},  # child_session_id -> detail lines
                 "_citation_issues": [],  # [{file:line}] from citation check
                 "_audit_log": [],  # [(violation_id, action, timestamp)]
+                "_on_output_blocks": 0,  # v3.7.2: consecutive on_output blocks
             }
         else:
             # Move to end (most recently used) when accessed
@@ -658,6 +681,12 @@ def on_output(
         # Re-evaluate after clearing: if violations REMAIN and the text still
         # claims completion, block and force a retry.
         if state["pending_gate_violation"] and _claims_all_clear(response_text):
+            # v3.7.2: count consecutive blocked all-clear attempts so the message
+            # can drive the agent onto the documented clearance path as the retry
+            # budget nears exhaustion. This does NOT clear the gate — detection
+            # stays broad and the failure is never silently passed.
+            state["_on_output_blocks"] = state.get("_on_output_blocks", 0) + 1
+            n = state["_on_output_blocks"]
             msg = (
                 "⚠️ GATE VIOLATION: you attempted to report completion "
                 "while unaddressed FAIL results exist.\n\n"
@@ -669,6 +698,24 @@ def on_output(
                 "response (honest override — no all-clear wording required).\n\n"
                 f"Pending:\n{state['last_violation_detail']}"
             )
+            # v3.7.2: once the per-turn retry budget nears the 5th-block human
+            # escalation, force the agent onto ONE of the two documented clearance
+            # paths — repeating a bare all-clear cannot work, so this breaks the
+            # false-positive loop without weakening the gate.
+            if n >= _BLOCK_LIMIT - 1:
+                remaining = max(0, (_BLOCK_LIMIT + 1) - n)
+                msg += (
+                    f"\n\n⛔ RETRY BUDGET NEARLY EXHAUSTED — {n} block(s); "
+                    f"{remaining} left before this escalates to a human. "
+                    "Re-emitting a completion claim will NOT clear the gate. "
+                    "Do EXACTLY ONE now:\n"
+                    "  1. Fix the failure and re-dispatch with verifies_task=<id> "
+                    "(mechanical clear), OR\n"
+                    "  2. If you judge an item a false positive, take responsibility "
+                    "ON RECORD with [GATE:ACCEPTING:<id>] for each open id above "
+                    "(logged to the audit trail).\n"
+                    "These are the only two ways forward."
+                )
             if citation_issues:
                 msg += (
                     "\n\n⚠️ CITATION ISSUES:\n"
@@ -676,6 +723,9 @@ def on_output(
                 )
             return {"action": "block", "message": msg}
 
+    # Allow path (gate not pending, or no all-clear claim this output): reset the
+    # consecutive-block counter so a later re-opened gate gets a fresh budget.
+    state["_on_output_blocks"] = 0
     return None
 
 
