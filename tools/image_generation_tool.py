@@ -443,6 +443,17 @@ SYNC_MODE_MODELS = frozenset({
     "fal-ai/qwen-image",
 })
 
+# Catalog models whose fal schema has NO sync_mode (verified 2026-06-15), so
+# their output is served from fal's public CDN: recraft/v4 and the krea/v2
+# models (krea's schema is gated/unverifiable, treated as unsupported). Kept as
+# an explicit companion set so the test suite forces every NEW catalog model to
+# be classified sync vs non-sync (see test_every_catalog_model_is_classified).
+NON_SYNC_MODE_MODELS = frozenset({
+    "fal-ai/recraft/v4/pro/text-to-image",
+    "fal-ai/krea/v2/medium/text-to-image",
+    "fal-ai/krea/v2/large/text-to-image",
+})
+
 
 # ---------------------------------------------------------------------------
 # Upscaler (Clarity Upscaler — unchanged from previous implementation)
@@ -595,7 +606,17 @@ def _upscale_enabled() -> bool:
         cfg = load_config()
         img_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
         if isinstance(img_cfg, dict):
-            return bool(img_cfg.get("upscale", False))
+            val = img_cfg.get("upscale", False)
+            # Fail CLOSED: bool("false") is True in Python, so a quoted-string
+            # config like `upscale: "false"` must NOT silently enable the
+            # CDN-leaking upscaler. Accept only real booleans / explicit tokens.
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(val, (int, float)):
+                return val == 1
+            return False
     except Exception as exc:
         logger.debug("Could not load image_gen.upscale from config: %s", exc)
     return False
