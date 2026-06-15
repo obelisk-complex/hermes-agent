@@ -607,10 +607,19 @@ def _build_fal_payload(
     # ``prompt`` is required by every FAL text-to-image endpoint; keep it even
     # if a model's ``supports`` whitelist omits it, so a missing whitelist entry
     # can't silently strip the prompt and send an empty request.
-    return {
+    filtered = {
         k: v for k, v in payload.items()
         if k in supports or k == "prompt"
     }
+    # Force inline (data URI) delivery on every model so generated images are
+    # returned in-band and never uploaded to fal's public CDN. sync_mode is a
+    # fal platform-level parameter (handled by fal's serving layer, not the
+    # model), so it is injected after the per-model `supports` filter rather
+    # than whitelisted per model. The X-Fal-Store-IO header only suppresses
+    # payload history, NOT CDN files — see README "Private-by-default image
+    # generation".
+    filtered["sync_mode"] = True
+    return filtered
 
 
 def _build_fal_edit_payload(
@@ -683,6 +692,8 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         logger.info("Upscaling image with Clarity Upscaler...")
 
         upscaler_arguments = {
+            # The source image may arrive as an inline data URI (sync_mode
+            # output); fal accepts data URIs as file inputs.
             "image_url": image_url,
             "prompt": f"{UPSCALER_DEFAULT_PROMPT}, {original_prompt}",
             "upscale_factor": UPSCALER_FACTOR,
@@ -692,6 +703,8 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
             "guidance_scale": UPSCALER_GUIDANCE_SCALE,
             "num_inference_steps": UPSCALER_NUM_INFERENCE_STEPS,
             "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
+            # Keep the upscaled output off the public CDN too (inline data URI).
+            "sync_mode": True,
         }
 
         handler = _submit_fal_request(UPSCALER_MODEL, arguments=upscaler_arguments)
