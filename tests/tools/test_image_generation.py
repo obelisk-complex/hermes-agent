@@ -189,7 +189,10 @@ class TestSupportsFilter:
     def test_payload_keys_are_subset_of_supports_for_all_models(self, image_tool):
         for mid, meta in image_tool.FAL_MODELS.items():
             payload = image_tool._build_fal_payload(mid, "test", "landscape", seed=42)
-            unsupported = set(payload.keys()) - meta["supports"]
+            # sync_mode is a fal platform-level param forced on every model
+            # (private-by-default: inline data URI, no public CDN file), so it
+            # is allowed on top of each model's own `supports` whitelist.
+            unsupported = set(payload.keys()) - (meta["supports"] | {"sync_mode"})
             assert not unsupported, \
                 f"{mid} payload has unsupported keys: {unsupported}"
 
@@ -212,7 +215,7 @@ class TestSupportsFilter:
         p = image_tool._build_fal_payload("fal-ai/recraft/v4/pro/text-to-image", "hi", "landscape")
         assert set(p.keys()) <= {
             "prompt", "image_size", "enable_safety_checker",
-            "colors", "background_color",
+            "colors", "background_color", "sync_mode",
         }
 
     def test_nano_banana_never_gets_image_size(self, image_tool):
@@ -220,6 +223,38 @@ class TestSupportsFilter:
         p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hi", "landscape", seed=1)
         assert "image_size" not in p
         assert p["aspect_ratio"] == "16:9"
+
+
+# ---------------------------------------------------------------------------
+# Private-by-default: force sync_mode so images never hit the public CDN
+# ---------------------------------------------------------------------------
+
+class TestPrivateByDefaultSyncMode:
+    """Every generation (and the upscale pass) must force fal sync_mode so
+    images come back inline as data URIs and are never persisted to fal's
+    public CDN. X-Fal-Store-IO only suppresses payload history, not CDN files."""
+
+    def test_every_model_forces_sync_mode(self, image_tool):
+        for mid in image_tool.FAL_MODELS:
+            p = image_tool._build_fal_payload(mid, "test", "landscape")
+            assert p.get("sync_mode") is True, f"{mid} did not force sync_mode"
+
+    def test_upscaler_forces_sync_mode(self, image_tool, monkeypatch):
+        captured = {}
+
+        class _Handle:
+            def get(self):
+                return {"image": {"url": "data:image/png;base64,AAAA",
+                                  "width": 2048, "height": 2048}}
+
+        def _fake_submit(model, arguments=None):
+            captured["arguments"] = arguments
+            return _Handle()
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request", _fake_submit)
+        out = image_tool._upscale_image("data:image/png;base64,BBBB", "a cat")
+        assert out is not None
+        assert captured["arguments"]["sync_mode"] is True
 
 
 # ---------------------------------------------------------------------------
