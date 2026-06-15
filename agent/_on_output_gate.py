@@ -23,7 +23,11 @@ BLOCKED_ESCALATION_MESSAGE = (
     "self-check gate blocked this output 5 times "
     "(unresolved FAIL / verification). The task is "
     "NOT complete and needs human attention; it is "
-    "not being silently marked done."
+    "not being silently marked done. The gate stays "
+    "OPEN — resolve it honestly by fixing and "
+    "re-dispatching with verifies_task=<id>, or by "
+    "acknowledging each open violation on record with "
+    "[GATE:ACCEPTING:<id>]."
 )
 
 
