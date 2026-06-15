@@ -22,10 +22,12 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 
 ### Private-by-default image generation
 
-Separate from the self-check system above, and unrelated to the `on_output` hook. Image generation (`tools/image_generation_tool.py`) is hardened on two fronts so nothing you generate is left behind on fal:
+Separate from the self-check system above, and unrelated to the `on_output` hook. Image generation (`tools/image_generation_tool.py`) is hardened on two fronts:
 
 - **No payload retention.** Every request sends the `X-Fal-Store-IO: 0` header, on both the direct fal.ai path and the managed Nous gateway path, so fal does not keep the request/response JSON (prompt, parameters, result metadata) in its request history.
-- **No public CDN image.** Every generation, and the upscale pass, forces fal `sync_mode`, so images come back inline as data URIs and are never uploaded to fal's public CDN. This is the part the header does **not** cover: fal's docs are explicit that `X-Fal-Store-IO` only suppresses payload history, and that any file already pushed to the CDN "will still be accessible". `sync_mode` is what guarantees no generated image is left on a public bucket.
+- **No public CDN image, where fal supports it.** Every model whose fal schema accepts `sync_mode` is sent it, so the image is returned inline as a data URI and is never written to fal's public CDN. This is the part the header does **not** cover: fal's docs are explicit that `X-Fal-Store-IO` only suppresses payload history, and that any file already on the CDN "will still be accessible".
+
+  Verified `sync_mode`-capable (private): flux-2 klein/pro, z-image, nano-banana-pro, gpt-image-1.5/2, ideogram v3, qwen. **Exceptions that still serve from the public CDN:** `recraft/v4/pro` and the `krea/v2` models (no `sync_mode` in their fal schema), and the `clarity-upscaler` used by the optional upscale pass (so an upscaled flux-2-pro result transits the CDN). For fully private output, use a `sync_mode`-capable model without upscaling, or purge the result with fal's Delete Request Payloads API.
 
 **Principle:** data retention should be **opt-in**, off by default and enabled only if the user explicitly chooses it, never **opt-out**, where the provider keeps your data unless you remember to turn it off.
 
