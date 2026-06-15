@@ -20,6 +20,12 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 - **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
 - **Add it to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
 
+### Private-by-default image generation
+
+Separate from the self-check system above, and unrelated to the `on_output` hook: every image-generation request this fork sends to FAL carries the `X-Fal-Store-IO: 0` header (`tools/image_generation_tool.py`), on both the direct fal.ai path and the managed Nous gateway path, so FAL does not store or index your prompts or generated images.
+
+**Principle:** data retention should be **opt-in** — off by default, enabled only if the user explicitly chooses to — never **opt-out**, where the provider keeps your data unless you remember to turn it off. FAL's API stores by default (an opt-out model); this fork sends the opt-out header on every request so the private default holds with no action from you.
+
 
 ---
 
