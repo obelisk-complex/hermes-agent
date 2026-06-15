@@ -215,7 +215,7 @@ class TestSupportsFilter:
         p = image_tool._build_fal_payload("fal-ai/recraft/v4/pro/text-to-image", "hi", "landscape")
         assert set(p.keys()) <= {
             "prompt", "image_size", "enable_safety_checker",
-            "colors", "background_color", "sync_mode",
+            "colors", "background_color",
         }
 
     def test_nano_banana_never_gets_image_size(self, image_tool):
@@ -230,21 +230,34 @@ class TestSupportsFilter:
 # ---------------------------------------------------------------------------
 
 class TestPrivateByDefaultSyncMode:
-    """Every generation (and the upscale pass) must force fal sync_mode so
-    images come back inline as data URIs and are never persisted to fal's
-    public CDN. X-Fal-Store-IO only suppresses payload history, not CDN files."""
+    """sync_mode (inline data URI, no public CDN file) is forced only on models
+    whose fal schema accepts it. Models without sync_mode in their schema must
+    NOT receive it (fal can reject unknown keys). X-Fal-Store-IO only suppresses
+    payload history, not CDN files."""
 
-    def test_every_model_forces_sync_mode(self, image_tool):
-        for mid in image_tool.FAL_MODELS:
+    def test_sync_mode_capable_models_force_sync_mode(self, image_tool):
+        assert image_tool.SYNC_MODE_MODELS  # non-empty allow-list
+        for mid in image_tool.SYNC_MODE_MODELS:
+            assert mid in image_tool.FAL_MODELS, f"{mid} not in catalog"
             p = image_tool._build_fal_payload(mid, "test", "landscape")
             assert p.get("sync_mode") is True, f"{mid} did not force sync_mode"
 
-    def test_upscaler_forces_sync_mode(self, image_tool, monkeypatch):
+    def test_non_sync_models_do_not_receive_sync_mode(self, image_tool):
+        # recraft/v4 and krea/v2 have no sync_mode in their fal schema
+        # (verified 2026-06-15); sending it risks rejection.
+        for mid in image_tool.FAL_MODELS:
+            if mid in image_tool.SYNC_MODE_MODELS:
+                continue
+            p = image_tool._build_fal_payload(mid, "test", "landscape")
+            assert "sync_mode" not in p, f"{mid} must not receive sync_mode"
+
+    def test_upscaler_does_not_send_sync_mode(self, image_tool, monkeypatch):
+        # clarity-upscaler has no sync_mode in its fal schema.
         captured = {}
 
         class _Handle:
             def get(self):
-                return {"image": {"url": "data:image/png;base64,AAAA",
+                return {"image": {"url": "https://cdn.example/x.png",
                                   "width": 2048, "height": 2048}}
 
         def _fake_submit(model, arguments=None):
@@ -254,7 +267,7 @@ class TestPrivateByDefaultSyncMode:
         monkeypatch.setattr(image_tool, "_submit_fal_request", _fake_submit)
         out = image_tool._upscale_image("data:image/png;base64,BBBB", "a cat")
         assert out is not None
-        assert captured["arguments"]["sync_mode"] is True
+        assert "sync_mode" not in captured["arguments"]
 
 
 # ---------------------------------------------------------------------------
