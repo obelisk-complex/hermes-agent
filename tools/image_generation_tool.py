@@ -425,6 +425,24 @@ DEFAULT_MODEL = "fal-ai/flux-2/klein/9b"
 DEFAULT_ASPECT_RATIO = "landscape"
 VALID_ASPECT_RATIOS = ("landscape", "square", "portrait")
 
+# Models whose fal input schema accepts `sync_mode` (verified against fal's
+# per-model API schemas, 2026-06-15). For these, generation forces sync_mode so
+# the image is returned inline as a data URI and is never written to fal's
+# public CDN. Models NOT in this set (recraft/v4, the krea/v2 models, and the
+# clarity-upscaler) have no sync_mode in their schema, so their output is served
+# from the CDN. Do NOT add a model here without first checking its fal schema —
+# sending sync_mode to a model that does not support it risks rejection.
+SYNC_MODE_MODELS = frozenset({
+    "fal-ai/flux-2/klein/9b",
+    "fal-ai/flux-2-pro",
+    "fal-ai/z-image/turbo",
+    "fal-ai/nano-banana-pro",
+    "fal-ai/gpt-image-1.5",
+    "fal-ai/gpt-image-2",
+    "fal-ai/ideogram/v3",
+    "fal-ai/qwen-image",
+})
+
 
 # ---------------------------------------------------------------------------
 # Upscaler (Clarity Upscaler — unchanged from previous implementation)
@@ -611,14 +629,14 @@ def _build_fal_payload(
         k: v for k, v in payload.items()
         if k in supports or k == "prompt"
     }
-    # Force inline (data URI) delivery on every model so generated images are
-    # returned in-band and never uploaded to fal's public CDN. sync_mode is a
-    # fal platform-level parameter (handled by fal's serving layer, not the
-    # model), so it is injected after the per-model `supports` filter rather
-    # than whitelisted per model. The X-Fal-Store-IO header only suppresses
-    # payload history, NOT CDN files — see README "Private-by-default image
-    # generation".
-    filtered["sync_mode"] = True
+    # Force inline (data URI) delivery so the image is returned in-band and
+    # never written to fal's public CDN. Only for models whose fal schema
+    # accepts sync_mode (see SYNC_MODE_MODELS); sending it to a model that does
+    # not support it risks rejection. Note: the X-Fal-Store-IO header only
+    # suppresses payload history, NOT CDN files. See README "Private-by-default
+    # image generation".
+    if model_id in SYNC_MODE_MODELS:
+        filtered["sync_mode"] = True
     return filtered
 
 
@@ -693,7 +711,9 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
 
         upscaler_arguments = {
             # The source image may arrive as an inline data URI (sync_mode
-            # output); fal accepts data URIs as file inputs.
+            # output from a sync_mode-capable model); fal accepts data URIs as
+            # file inputs. NOTE: clarity-upscaler has no sync_mode in its fal
+            # schema, so its UPSCALED output is still served from fal's CDN.
             "image_url": image_url,
             "prompt": f"{UPSCALER_DEFAULT_PROMPT}, {original_prompt}",
             "upscale_factor": UPSCALER_FACTOR,
@@ -703,8 +723,6 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
             "guidance_scale": UPSCALER_GUIDANCE_SCALE,
             "num_inference_steps": UPSCALER_NUM_INFERENCE_STEPS,
             "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
-            # Keep the upscaled output off the public CDN too (inline data URI).
-            "sync_mode": True,
         }
 
         handler = _submit_fal_request(UPSCALER_MODEL, arguments=upscaler_arguments)
