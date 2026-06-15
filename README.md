@@ -1,6 +1,8 @@
 ## ⚜️ Obelisk Complex Fork: Customisations
 
-[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx)
+[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx) - Ghostwritten. AI generated all code in this fork; a human operator briefed, reviewed, and signed off on every change (catching security issues, challenging design decisions, directing rework). No code was written directly by human hands.
+
+-----
 
 This fork adds a **self-check enforcement system**: it stops the agent reporting a task as done when a sub-task or validation actually failed.
 
@@ -18,7 +20,6 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 - **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
 - **Add it to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
 
-**Human involvement:** Ghostwritten. AI generated all code in this fork; a human operator briefed, reviewed, and signed off on every change (catching security issues, challenging design decisions, directing rework). No code was written directly by human hands.
 
 ---
 
