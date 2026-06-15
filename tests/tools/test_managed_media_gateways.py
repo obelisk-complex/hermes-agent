@@ -197,7 +197,10 @@ def test_managed_fal_submit_uses_gateway_origin_and_nous_token(monkeypatch):
     assert captured["submit_url"] == "http://127.0.0.1:3009/fal-ai/flux-2-pro"
     assert captured["method"] == "POST"
     assert captured["arguments"] == {"prompt": "test prompt", "num_images": 1}
-    assert captured["headers"] == {"x-idempotency-key": "fal-submit-123"}
+    assert captured["headers"] == {
+        "x-idempotency-key": "fal-submit-123",
+        "X-Fal-Store-IO": "0",
+    }
     assert captured["sync_client_inits"] == 1
 
 
