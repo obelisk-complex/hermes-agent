@@ -1,5 +1,5 @@
 name: self-check-enforcer
-version: "3.7.1"
+version: "3.7.2"
 description: "Auto-loads the self-checking-harness skill and enforces gate
   compliance. v3.7.1: round-5 remediation — NEEDS_WORK opens its own re-runnable
   gate, closed done-claim bypasses, removed dead code, extracted the on_output
