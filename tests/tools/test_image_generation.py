@@ -269,6 +269,19 @@ class TestPrivateByDefaultSyncMode:
         assert out is not None
         assert "sync_mode" not in captured["arguments"]
 
+    def test_upscale_disabled_by_default(self, image_tool, monkeypatch):
+        # Default OFF keeps generation private: clarity-upscaler has no
+        # sync_mode, so an upscaled result would transit the public CDN.
+        import hermes_cli.config as cfgmod
+        monkeypatch.setattr(cfgmod, "load_config", lambda: {})
+        assert image_tool._upscale_enabled() is False
+
+    def test_upscale_opt_in_via_config(self, image_tool, monkeypatch):
+        import hermes_cli.config as cfgmod
+        monkeypatch.setattr(cfgmod, "load_config",
+                            lambda: {"image_gen": {"upscale": True}})
+        assert image_tool._upscale_enabled() is True
+
 
 # ---------------------------------------------------------------------------
 # Default merging
