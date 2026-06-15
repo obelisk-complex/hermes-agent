@@ -189,10 +189,14 @@ class TestSupportsFilter:
     def test_payload_keys_are_subset_of_supports_for_all_models(self, image_tool):
         for mid, meta in image_tool.FAL_MODELS.items():
             payload = image_tool._build_fal_payload(mid, "test", "landscape", seed=42)
-            # sync_mode is a fal platform-level param forced on every model
-            # (private-by-default: inline data URI, no public CDN file), so it
-            # is allowed on top of each model's own `supports` whitelist.
-            unsupported = set(payload.keys()) - (meta["supports"] | {"sync_mode"})
+            # sync_mode is a fal platform-level param injected ONLY for models
+            # in SYNC_MODE_MODELS (private-by-default inline data URI). It is
+            # allowed on top of `supports` for exactly those models, and must
+            # NOT appear for any other model.
+            allowed = set(meta["supports"])
+            if mid in image_tool.SYNC_MODE_MODELS:
+                allowed.add("sync_mode")
+            unsupported = set(payload.keys()) - allowed
             assert not unsupported, \
                 f"{mid} payload has unsupported keys: {unsupported}"
 
@@ -281,6 +285,94 @@ class TestPrivateByDefaultSyncMode:
         monkeypatch.setattr(cfgmod, "load_config",
                             lambda: {"image_gen": {"upscale": True}})
         assert image_tool._upscale_enabled() is True
+
+    def test_upscale_enabled_fails_closed_on_truthy_string(self, image_tool, monkeypatch):
+        # bool("false") is True in Python: the gate must NOT enable on a
+        # quoted-string config value. Fail closed for anything but real truthy.
+        import hermes_cli.config as cfgmod
+        for bad in ["false", "no", "off", "False", "maybe", ""]:
+            monkeypatch.setattr(cfgmod, "load_config",
+                                lambda b=bad: {"image_gen": {"upscale": b}})
+            assert image_tool._upscale_enabled() is False, f"upscale={bad!r} must be off"
+        for good in ["true", "yes", "on", "1", "True"]:
+            monkeypatch.setattr(cfgmod, "load_config",
+                                lambda g=good: {"image_gen": {"upscale": g}})
+            assert image_tool._upscale_enabled() is True, f"upscale={good!r} must be on"
+
+    def test_every_catalog_model_is_classified(self, image_tool):
+        # Forcing function: a new catalog model must be explicitly placed in
+        # SYNC_MODE_MODELS or NON_SYNC_MODE_MODELS, never silently defaulted.
+        union = set(image_tool.SYNC_MODE_MODELS) | set(image_tool.NON_SYNC_MODE_MODELS)
+        catalog = set(image_tool.FAL_MODELS)
+        assert union == catalog, (
+            f"unclassified models: {catalog - union}; "
+            f"stale entries: {union - catalog}"
+        )
+        # The two sets must be disjoint.
+        assert not (set(image_tool.SYNC_MODE_MODELS) & set(image_tool.NON_SYNC_MODE_MODELS))
+
+    def test_generate_returns_data_uri_result_intact(self, image_tool, monkeypatch):
+        # sync_mode returns the image inline as a data URI; the generate path
+        # must hand that back unchanged (not choke on a non-http url).
+        monkeypatch.setattr(image_tool, "fal_key_is_configured", lambda: True)
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: None)
+        monkeypatch.setattr(
+            image_tool, "_resolve_fal_model",
+            lambda: ("fal-ai/flux-2/klein/9b",
+                     image_tool.FAL_MODELS["fal-ai/flux-2/klein/9b"]),
+        )
+        data_uri = "data:image/png;base64,QUJDREVG"
+
+        class _Handle:
+            def get(self):
+                return {"images": [{"url": data_uri, "width": 512, "height": 512}]}
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request",
+                            lambda model, arguments=None: _Handle())
+        import json
+        out = json.loads(image_tool.image_generate_tool("a red cube", "square"))
+        assert out["success"] is True
+        assert out["image"] == data_uri
+
+    def test_non_sync_model_logs_cdn_warning(self, image_tool, monkeypatch, caplog):
+        import logging
+        monkeypatch.setattr(image_tool, "fal_key_is_configured", lambda: True)
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: None)
+        recraft = "fal-ai/recraft/v4/pro/text-to-image"
+        monkeypatch.setattr(image_tool, "_resolve_fal_model",
+                            lambda: (recraft, image_tool.FAL_MODELS[recraft]))
+
+        class _Handle:
+            def get(self):
+                return {"images": [{"url": "https://v3.fal.media/x.png",
+                                    "width": 512, "height": 512}]}
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request",
+                            lambda model, arguments=None: _Handle())
+        with caplog.at_level(logging.WARNING):
+            image_tool.image_generate_tool("a logo", "square")
+        assert any("PUBLIC CDN" in r.getMessage() for r in caplog.records)
+
+    def test_sync_model_emits_no_cdn_warning(self, image_tool, monkeypatch, caplog):
+        import logging
+        monkeypatch.setattr(image_tool, "fal_key_is_configured", lambda: True)
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: None)
+        monkeypatch.setattr(
+            image_tool, "_resolve_fal_model",
+            lambda: ("fal-ai/flux-2/klein/9b",
+                     image_tool.FAL_MODELS["fal-ai/flux-2/klein/9b"]),
+        )
+
+        class _Handle:
+            def get(self):
+                return {"images": [{"url": "data:image/png;base64,QUJD",
+                                    "width": 512, "height": 512}]}
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request",
+                            lambda model, arguments=None: _Handle())
+        with caplog.at_level(logging.WARNING):
+            image_tool.image_generate_tool("a red cube", "square")
+        assert not any("PUBLIC CDN" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
