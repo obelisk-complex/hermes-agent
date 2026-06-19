@@ -1,7 +1,11 @@
 name: self-check-enforcer
-version: "3.7.2"
+version: "3.7.3"
 description: "Auto-loads the self-checking-harness skill and enforces gate
-  compliance. v3.7.1: round-5 remediation — NEEDS_WORK opens its own re-runnable
+  compliance. v3.7.3: Claude-harness parity guards — Chesterton's Fence reminder
+  appended on the first file edit per repo (transform_tool_result, never blocks)
+  and a push/merge pre-flight that blocks-once before git push / gh pr create|merge
+  (pre_tool_call, self-clearing). v3.7.2: on_output loop-fix via the documented
+  token path (no trigger narrowing, no auto-clear). v3.7.1: round-5 remediation — NEEDS_WORK opens its own re-runnable
   gate, closed done-claim bypasses, removed dead code, extracted the on_output
   escalation decision. v3.7.0: verification-protocol features — READY/NEEDS_WORK/BLOCKED
   verdict with BLOCKED escalation gate, strict plan↔artifact matching, enumerated

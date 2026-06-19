@@ -62,6 +62,20 @@ v3.7.2: on_output loop-fix via the documented token path (NO trigger narrowing,
       - per-session on_output block counter (_on_output_blocks), reset on the
         allow path; the threshold is imported from agent/_on_output_gate so it
         stays in lockstep with the conversation-loop escalation limit.
+v3.7.3: Claude-harness parity guards (two PreToolUse behaviours from the
+      reference Claude-Code harness, mapped onto the hooks whose timing fits) —
+      - Chesterton's Fence: transform_tool_result on write_file/patch/skill_manage
+        APPENDS a "walk the history first" reminder + recent `git log` on the
+        first edit per (session, repo) in a git repo. Never blocks (the only
+        place a never-blocks nudge can land, since pre_tool_call is block-only);
+      - push/merge pre-flight: pre_tool_call on `terminal` matching git push /
+        gh pr create|merge BLOCKS once with a checklist (surfaced as the tool
+        result), then self-clears for that exact command for the session so a
+        re-run proceeds. This is the one guard here that blocks, by design — a
+        pre-flight must land before the outward action, and pre_tool_call can
+        only block, not inject-and-allow;
+      - both extend already-registered handlers (no new hooks; count stays 8);
+        tests in tests/plugins/test_self_check_guards.py.
 """
 
 from __future__ import annotations
@@ -70,6 +84,7 @@ import collections
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 
@@ -198,6 +213,111 @@ def _blocked_reason(text: str) -> str | None:
     return None
 
 
+# ── v3.7.2: Claude-harness parity guards ──────────────────────────────
+# Two advisory/guard behaviours ported from the reference Claude-Code harness's
+# PreToolUse hooks. Hermes cannot inject-and-allow on pre_tool_call (it is
+# block-only), so each maps to the hook that fits its timing:
+#   - Chesterton's Fence rides transform_tool_result (fires AFTER the edit) and
+#     only APPENDS a reminder -- it never blocks.
+#   - push/merge pre-flight rides pre_tool_call and BLOCKS once (then self-
+#     clears) so the checkpoint lands BEFORE the outward action runs.
+
+# Edit tools whose args carry a file path we can map back to a git repo.
+_CHESTERTON_TOOLS = {"write_file": "path", "patch": "path", "skill_manage": "file_path"}
+
+# Outward, hard-to-reverse terminal commands the pre-flight gates.
+_PUSH_PREFLIGHT_RE = re.compile(
+    r"\bgit\s+push\b|\bgh\s+pr\s+(?:create|merge)\b", re.IGNORECASE
+)
+
+_PUSH_PREFLIGHT_MESSAGE = (
+    "🚦 Push/merge pre-flight (this is a CHECKPOINT, not a failure). You are "
+    "about to run an outward, hard-to-reverse git action. Confirm BEFORE "
+    "proceeding:\n"
+    "  - Did the user give an explicit go-ahead for THIS push/PR/merge? "
+    "Approval for one does not extend to the next; if unsure, stop and ask.\n"
+    "  - Walked the git history and understood why the code is the way it is?\n"
+    "  - Any behaviour/contract changes named, with a regression test for the "
+    "prior behaviour?\n"
+    "  - Verification (tests / build / lint) actually run and passed, not "
+    "assumed?\n"
+    "  - Pushing to a feature branch (not straight to the default branch) "
+    "unless told otherwise?\n"
+    "When satisfied, re-run the SAME command to proceed (this checkpoint "
+    "self-clears for that exact command for the rest of the session)."
+)
+
+
+def _git_read(cwd: str, *args: str) -> str | None:
+    """Run a read-only git command in ``cwd``; return stdout, or None on any
+    failure (not a repo, git missing, timeout). Never raises, never writes."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True, text=True, timeout=8,
+        )
+    except Exception:
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _is_error_result(result: str) -> bool:
+    """True when ``result`` is a small JSON object carrying an 'error' key -- a
+    failed tool call. We don't decorate those (same rule as security-guidance)."""
+    try:
+        parsed = json.loads(result)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, dict) and "error" in parsed and len(parsed) <= 2
+
+
+def _chesterton_reminder(
+    tool_name: str, args: object, result: str, state: dict
+) -> str | None:
+    """First edit per (session, repo) inside a git repo: append a 'walk the
+    history first' reminder (with recent ``git log``) to the tool result.
+
+    Advisory only -- it appends to the result the model sees next and never
+    blocks. transform_tool_result fires AFTER the edit, so the nudge lands
+    before the model's NEXT action in this repo, not before the first edit
+    (the closest Hermes can get to the reference PreToolUse(Edit|Write) hook
+    without blocking every file write).
+    """
+    if not isinstance(result, str) or not result or _is_error_result(result):
+        return None
+    if not isinstance(args, dict):
+        return None
+    path = args.get(_CHESTERTON_TOOLS[tool_name]) or ""
+    if not isinstance(path, str) or not path:
+        return None
+    start_dir = path if os.path.isdir(path) else (os.path.dirname(path) or ".")
+    repo_root = _git_read(start_dir, "rev-parse", "--show-toplevel")
+    if not repo_root:
+        return None  # not a git repo -> stay silent
+    fired = state.setdefault("_chesterton_fired_repos", set())
+    if repo_root in fired:
+        return None  # already nudged for this repo this session
+    fired.add(repo_root)
+    branch = _git_read(start_dir, "rev-parse", "--abbrev-ref", "HEAD") or "?"
+    recent = _git_read(start_dir, "log", "--oneline", "-15") or "(no history)"
+    return result + (
+        "\n\n🔎 Chesterton's Fence - first edit in git repo "
+        f"'{repo_root}' (branch {branch}) this session.\n"
+        "Before changing more code here, walk the history and understand WHY it "
+        "is the way it is. Do NOT 'fix', remove, or re-enable code that may have "
+        "been deliberately shaped or retired:\n"
+        "  - For the lines you touch: `git log --oneline -- <file>`, "
+        "`git log -S '<symbol>'`, `git blame`; read the introducing commit's "
+        "message for intent.\n"
+        "  - Code that looks dead/unused/redundant is a hypothesis, not a "
+        "conclusion - confirm from history before acting on it.\n"
+        "  - State what your change will actually accomplish in behaviour terms, "
+        "not just what the code superficially implies.\n"
+        "Recent commits (newest first):\n"
+        f"{recent}"
+    )
+
+
 # ── v1/v2/v3 hooks ────────────────────────────────────────────────────
 
 def on_session_start(**_: object) -> None:
@@ -258,6 +378,20 @@ def on_pre_tool_call(
                     f"Pending violations:\n{state['last_violation_detail']}"
                 ),
             }
+
+    # ── v3.7.2: push/merge pre-flight (block-once, self-clearing) ──
+    # The ONLY guard here that blocks. pre_tool_call cannot inject-and-allow, so
+    # to land the checkpoint BEFORE an outward, hard-to-reverse action we block
+    # the first occurrence of an exact command and allow the re-run. Keyed on the
+    # exact command string so re-running the SAME command proceeds; a different
+    # command is a different action and gets its own checkpoint.
+    if tool_name == "terminal" and isinstance(args, dict):
+        command = args.get("command") or ""
+        if isinstance(command, str) and _PUSH_PREFLIGHT_RE.search(command):
+            fired = state.setdefault("_push_preflight_fired", set())
+            if command not in fired:
+                fired.add(command)
+                return {"action": "block", "message": _PUSH_PREFLIGHT_MESSAGE}
 
     return None
 
@@ -496,19 +630,26 @@ def on_pre_llm_call(
 def on_transform_tool_result(
     *,
     tool_name: str = "",
+    args: object = None,
     result: str = "",
+    session_id: str = "",
     **_: object,
 ) -> str | None:
-    """Annotate delegate_task results that contain FAIL patterns."""
-    if tool_name != "delegate_task" or not result:
+    """Annotate delegate_task FAIL results; append the Chesterton's Fence
+    reminder on the first file edit per (session, repo)."""
+    # delegate_task FAIL annotation (unchanged behaviour)
+    if tool_name == "delegate_task":
+        if result and _FAIL_PATTERN_SHORT.search(result):
+            return result + (
+                "\n\n[GATE CHECK: This subagent result contains FAIL patterns. "
+                "You must re-dispatch or explicitly document each failure "
+                "before reporting completion.]"
+            )
         return None
 
-    if _FAIL_PATTERN_SHORT.search(result):
-        return result + (
-            "\n\n[GATE CHECK: This subagent result contains FAIL patterns. "
-            "You must re-dispatch or explicitly document each failure "
-            "before reporting completion.]"
-        )
+    # v3.7.2: Chesterton's Fence advisory on file-editing tools.
+    if tool_name in _CHESTERTON_TOOLS:
+        return _chesterton_reminder(tool_name, args, result, _get_state(session_id))
 
     return None
 
