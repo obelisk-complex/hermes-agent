@@ -49,6 +49,24 @@ jobs:
           restore-keys: |
             rerere-cache-
 
+      # Seed rerere with resolutions committed to the repo (ci/rerere-cache/),
+      # so a known conflict auto-replays on the FIRST run that hits it, without
+      # depending on the best-effort Actions cache above (which starts empty and
+      # can be evicted). Copied AFTER the cache restore so committed resolutions
+      # always win; the restore/save steps still carry any NEW resolutions
+      # recorded at runtime. Each ci/rerere-cache/<hash>/ holds the preimage +
+      # postimage git rerere recorded for one resolved conflict.
+      - name: Seed rerere from committed resolutions
+        run: |
+          if [ -d ci/rerere-cache ] && [ -n "$(ls -A ci/rerere-cache 2>/dev/null)" ]; then
+            mkdir -p .git/rr-cache
+            cp -R ci/rerere-cache/. .git/rr-cache/
+            echo "Seeded rerere from ci/rerere-cache:"
+            ls -1 .git/rr-cache
+          else
+            echo "No committed rerere resolutions to seed."
+          fi
+
       - name: Check if upstream has new commits
         id: check
         run: |
