@@ -62,7 +62,7 @@ def next_rung(current: Optional[str], ladder: List[str]) -> Optional[str]:
     if current is not None:
         logger.warning(
             "quality-gate: current model %r is not on the configured ladder %r; "
-            "falling back to the weakest rung %r (a downgrade-escalation) — "
+            "falling back to the weakest rung %r (a downgrade-escalation); "
             "check quality_gate.model_ladder", current, ladder, ladder[0],
         )
     return ladder[0]
