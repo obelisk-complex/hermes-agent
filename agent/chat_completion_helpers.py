@@ -1223,33 +1223,61 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 fb_model, fb_provider, _norm_err,
             )
 
-        # Determine api_mode from provider / base URL / model
-        fb_api_mode = "chat_completions"
+        # Determine api_mode. An EXPLICIT api_mode on the chain entry wins —
+        # fallback_cmd.py persists api_mode onto fallback_providers entries and
+        # the live config carries `api_mode: chat_completions` on every entry,
+        # but the value was previously ignored, so a configured chat_completions
+        # fallback could be silently upgraded to codex_responses by url/model
+        # detection and 4xx against a provider that only serves /chat/completions.
+        # Honour the operator's explicit choice; fall back to detection only
+        # when the entry omits api_mode.
         fb_base_url = str(fb_client.base_url)
-        _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
-        if fb_provider == "openai-codex":
-            fb_api_mode = "codex_responses"
-        elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
-            fb_api_mode = "anthropic_messages"
-        elif _fb_is_azure:
-            # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
-            # support the Responses API. Stay on chat_completions.
+        _explicit_api_mode = (fb.get("api_mode") or "").strip()
+        if _explicit_api_mode:
+            fb_api_mode = _explicit_api_mode
+        else:
             fb_api_mode = "chat_completions"
-        elif agent._is_direct_openai_url(fb_base_url):
-            fb_api_mode = "codex_responses"
-        elif agent._provider_model_requires_responses_api(
-            fb_model,
-            provider=fb_provider,
-        ):
-            # GPT-5.x models usually need Responses API, but keep
-            # provider-specific exceptions like Copilot gpt-5-mini on
-            # chat completions.
-            fb_api_mode = "codex_responses"
-        elif fb_provider == "bedrock" or (
-            base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
-            and base_url_host_matches(fb_base_url, "amazonaws.com")
-        ):
-            fb_api_mode = "bedrock_converse"
+            _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
+            if fb_provider == "openai-codex":
+                fb_api_mode = "codex_responses"
+            elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
+                fb_api_mode = "anthropic_messages"
+            elif _fb_is_azure:
+                # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
+                # support the Responses API. Stay on chat_completions.
+                fb_api_mode = "chat_completions"
+            elif agent._is_direct_openai_url(fb_base_url):
+                fb_api_mode = "codex_responses"
+            elif agent._provider_model_requires_responses_api(
+                fb_model,
+                provider=fb_provider,
+            ):
+                # GPT-5.x models usually need Responses API, but keep
+                # provider-specific exceptions like Copilot gpt-5-mini on
+                # chat completions.
+                fb_api_mode = "codex_responses"
+            elif fb_provider == "bedrock" or (
+                base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
+                and base_url_host_matches(fb_base_url, "amazonaws.com")
+            ):
+                fb_api_mode = "bedrock_converse"
+
+        # Fail loud: one WARNING per fallback activation naming the target so
+        # cost + transport are visible in logs (the entry api_mode override is
+        # otherwise invisible). Log only the HOSTNAME, never the raw base_url:
+        # some proxy/custom providers embed an API key in the URL
+        # (https://<token>@host/v1 or ?key=<secret>) and this WARNING reaches
+        # the Hermes log files / forwarded targets. base_url_hostname() is the
+        # existing helper (imported from utils at chat_completion_helpers.py:37);
+        # this mirrors the secret-safe fallback-skip WARNING at
+        # chat_completion_helpers.py:1114 which logs provider/model only.
+        logger.warning(
+            "Fallback activating: provider=%s model=%s api_mode=%s "
+            "(api_mode_source=%s, base_url_host=%s)",
+            fb_provider, fb_model, fb_api_mode,
+            "entry" if _explicit_api_mode else "detected",
+            base_url_hostname(fb_base_url),
+        )
 
         old_model = agent.model
 
