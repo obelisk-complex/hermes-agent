@@ -4179,7 +4179,19 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        return True
+        _blocked_hook_kwargs = dict(
+            task_id=task_id,
+            reason=reason,
+            run_id=run_id,
+            trigger="manual",
+        )
+    # Fire kanban_task_blocked OUTSIDE the write transaction (status already
+    # committed) so a callback may safely call kanban_db write functions and a
+    # slow callback cannot hold the BEGIN IMMEDIATE lock. Only reached when
+    # cur.rowcount == 1; the early `return False` short-circuits the no-op case,
+    # so the hook never fires on a non-block.
+    _invoke_kanban_hook("kanban_task_blocked", **_blocked_hook_kwargs)
+    return True
 
 
 
@@ -6124,6 +6136,7 @@ def _record_task_failure(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     blocked = False
+    _blocked_hook_kwargs = None  # captured inside txn; fired after commit
     with write_txn(conn):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries "
@@ -6193,6 +6206,20 @@ def _record_task_failure(
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
+            # Capture kwargs now; the hook is fired AFTER write_txn commits
+            # (see below) so a callback can safely call kanban_db write
+            # functions and a slow callback cannot stall other writers while
+            # the BEGIN IMMEDIATE lock is held.
+            _blocked_hook_kwargs = dict(
+                task_id=task_id,
+                reason=error[:500],
+                consecutive_failures=failures,
+                effective_limit=effective_limit,
+                limit_source=limit_source,
+                trigger_outcome=outcome,
+                trigger="auto_block",
+                run_id=run_id,
+            )
             blocked = True
         else:
             # Below threshold.
@@ -6227,6 +6254,11 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+    # kanban_task_blocked is fired OUTSIDE the write transaction so plugin
+    # callbacks can safely call kanban_db write functions (no nested-txn
+    # error) and a slow callback cannot hold the BEGIN IMMEDIATE lock.
+    if _blocked_hook_kwargs is not None:
+        _invoke_kanban_hook("kanban_task_blocked", **_blocked_hook_kwargs)
     return blocked
 
 
