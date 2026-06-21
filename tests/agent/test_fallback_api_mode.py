@@ -77,8 +77,6 @@ def _install_common_stubs(monkeypatch, agent):
     monkeypatch.setattr(cch, "rewrite_prompt_model_identity",
                         lambda *a, **k: None, raising=False)
     # Capture api_mode the instant it is assigned onto the agent.
-    orig_setattr = _FakeAgent.__setattr__
-
     def capturing_setattr(self, name, value):
         if name == "api_mode" and getattr(self, "_capture_on", False):
             object.__setattr__(self, "captured_api_mode", value)
@@ -115,7 +113,7 @@ def test_auto_detection_when_no_entry_api_mode(monkeypatch):
 
 def test_activation_warning_does_not_leak_base_url_secret(monkeypatch, caplog):
     # A credential embedded in the entry base_url must NOT reach the WARNING
-    # log — only the hostname is logged (Revision Log §7b-secret).
+    # log - only the hostname is logged (Revision Log §7b-secret).
     secret = "supersecrettoken"
     agent = _FakeAgent([
         {"provider": "openai", "model": "gpt-5",
@@ -180,8 +178,6 @@ def test_detection_tree_unchanged(monkeypatch, provider, base, model, expected):
                         lambda *a, **k: None, raising=False)
     monkeypatch.setattr(cch, "rewrite_prompt_model_identity",
                         lambda *a, **k: None, raising=False)
-    orig = _FakeAgent.__setattr__
-
     def cap(self, name, value):
         if name == "api_mode" and getattr(self, "_capture_on", False):
             object.__setattr__(self, "captured_api_mode", value)

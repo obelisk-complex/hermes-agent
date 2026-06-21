@@ -114,6 +114,24 @@ def test_classify_llm_error_falls_back():
     assert t == tiers.DEFAULT_TIER
 
 
+def test_read_tier_corrupted_sidecar_returns_none(tmp_workspace, caplog, monkeypatch):
+    """A sidecar whose normalise_tier call raises ValueError must return None and log WARNING."""
+    import tiers as _tiers
+    p = classify.tier_sidecar_path(tmp_workspace)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("corrupted\n", encoding="utf-8")
+
+    def _raise(v):
+        raise ValueError(f"unknown tier: {v!r}")
+
+    # Simulate a future tiers implementation that raises ValueError on bad input.
+    monkeypatch.setattr(_tiers, "normalise_tier", _raise)
+    with caplog.at_level("WARNING"):
+        result = classify.read_tier(tmp_workspace)
+    assert result is None
+    assert any("tier sidecar" in r.getMessage() for r in caplog.records)
+
+
 def test_executor_is_module_singleton():
     import concurrent.futures
     assert isinstance(classify._EXECUTOR, concurrent.futures.ThreadPoolExecutor)

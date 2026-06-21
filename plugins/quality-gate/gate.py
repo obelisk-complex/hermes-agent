@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_TOTAL_S = 1800.0
 
 
-def _budget_skip(cmd: List[str], cwd: str) -> "runner.GateRun":
+def _budget_skip(cmd: List[str], cwd: Union[str, Path]) -> "runner.GateRun":
     """A synthetic skipped run for a command not executed due to the budget."""
     return runner.GateRun(
         cmd=list(cmd), cwd=str(cwd), rc=-4, stdout="", stderr="",

@@ -134,7 +134,7 @@ def test_unblock_task_backward_compat_two_arg():
     ).fetchone()
     assert row["status"] == "ready"
     assert row["model_override"] == "weak-model"   # untouched
-    # No requeued event from a bare unblock_task — only requeue_blocked_task
+    # No requeued event from a bare unblock_task - only requeue_blocked_task
     # (which passes requeue_event) emits it.
     n = conn.execute(
         "SELECT COUNT(*) c FROM task_events "
