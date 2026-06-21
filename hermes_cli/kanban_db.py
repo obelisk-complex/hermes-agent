@@ -5950,6 +5950,132 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+# ---------------------------------------------------------------------------
+# Kanban lifecycle hook bridge (fork-local)
+# ---------------------------------------------------------------------------
+# Field names a pre_kanban_spawn plugin is allowed to override on the
+# claimed task before it spawns. Anything else in a returned dict is
+# ignored (fail-safe: a plugin cannot rewrite arbitrary task state here).
+_PRE_SPAWN_OVERRIDE_FIELDS = ("model_override", "skills", "priority")
+
+
+def _sanitize_pre_spawn_override(field, value):
+    """Validate a single pre_kanban_spawn override value before it is
+    applied to ``claimed`` and later spliced into the worker argv
+    (``--skills <sk>`` / ``-m <model_override>`` in _default_spawn). A value
+    starting with ``-`` would inject a CLI flag; a skill containing ``,``
+    would splatter multiple names into one argv slot — both are the
+    create_task validations the override path would otherwise bypass.
+
+    Returns the cleaned value, or ``None`` to skip the override (the caller
+    logs a WARNING and leaves the existing value untouched). Fail loud: an
+    invalid value is dropped + warned, never silently applied.
+    """
+    if field == "model_override":
+        mo = str(value).strip()
+        if not mo or mo.startswith("-"):
+            return None
+        return mo
+    if field == "skills":
+        if not isinstance(value, (list, tuple)):
+            return None
+        cleaned = [
+            str(s).strip() for s in value
+            if s and not str(s).strip().startswith("-")
+            and "," not in str(s)
+        ]
+        return cleaned or None
+    # priority (and any future scalar field): pass through unchanged.
+    return value
+
+
+def _invoke_kanban_hook(name: str, **kwargs: Any) -> list:
+    """Fire a kanban lifecycle hook, returning the list of hook results.
+
+    Degrades to ``[]`` (never raises) when plugins are unimportable (partial
+    install / import cycle) or when invocation errors. Each plugin callback
+    is already isolated inside PluginManager.invoke_hook; this wrapper only
+    guards the import + dispatch boundary so the single-writer kernel can
+    never be broken by a plugin.
+
+    The ``from hermes_cli.plugins import invoke_hook`` below is INTENTIONALLY
+    a per-call local import (not cached at module level): it ensures the
+    ImportError guard fires even after a partial install where
+    ``hermes_cli.plugins`` failed mid-init. Do not hoist it to module scope.
+    """
+    try:
+        from hermes_cli.plugins import invoke_hook  # local: avoids cycle
+        # (per-call import is deliberate — keeps the guard live; do not cache)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("kanban hook %s skipped: plugins unimportable: %s", name, exc)
+        return []
+    try:
+        return invoke_hook(name, **kwargs) or []
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("kanban hook %s raised during dispatch: %s", name, exc)
+        return []
+
+
+def _apply_pre_kanban_spawn_override(claimed, *, board, workspace_path) -> None:
+    """Fire pre_kanban_spawn and apply the first override directive (if any).
+
+    Observers see the task; a plugin may return a dict of mutable spawn
+    fields (see ``_PRE_SPAWN_OVERRIDE_FIELDS``) to change how the task
+    spawns (e.g. escalate ``model_override`` or force ``skills``). The first
+    dict carrying at least one recognised key wins; later dicts are ignored,
+    mirroring the first-directive-wins rule in
+    ``get_pre_tool_call_block_message``.
+    """
+    results = _invoke_kanban_hook(
+        "pre_kanban_spawn",
+        task_id=claimed.id,
+        title=getattr(claimed, "title", None),
+        body=getattr(claimed, "body", None),
+        assignee=getattr(claimed, "assignee", None),
+        model_override=getattr(claimed, "model_override", None),
+        workspace_path=workspace_path,
+        workspace_kind=getattr(claimed, "workspace_kind", None),
+        branch_name=getattr(claimed, "branch_name", None),
+        priority=getattr(claimed, "priority", None),
+        skills=getattr(claimed, "skills", None),
+        consecutive_failures=getattr(claimed, "consecutive_failures", None),
+        board=board,
+    )
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        applied = [f for f in _PRE_SPAWN_OVERRIDE_FIELDS if f in result]
+        if not applied:
+            continue
+        # Validate each value before applying it — the override path
+        # otherwise bypasses create_task's skills/model checks and would
+        # let a returned dict inject CLI flags (e.g. {"skills":
+        # ["--accept-hooks"]} or {"model_override": "-x"}) into the worker
+        # argv. Invalid values are dropped + WARNED, never applied.
+        effective = {}
+        for field in applied:
+            cleaned = _sanitize_pre_spawn_override(field, result[field])
+            if cleaned is None:
+                _log.warning(
+                    "pre_kanban_spawn override for %s on %s rejected "
+                    "(invalid value %r); skipping that field",
+                    field, claimed.id, result[field],
+                )
+                continue
+            effective[field] = cleaned
+        if not effective:
+            # This directive had recognised keys but none survived
+            # validation — try the next dict (first VALID directive wins).
+            continue
+        for field, cleaned in effective.items():
+            setattr(claimed, field, cleaned)
+        _log.warning(
+            "pre_kanban_spawn override applied to %s: %s",
+            claimed.id, effective,
+        )
+        break
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6618,6 +6744,9 @@ def dispatch_once(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        _apply_pre_kanban_spawn_override(
+            claimed, board=board, workspace_path=str(workspace)
+        )
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -6710,11 +6839,16 @@ def dispatch_once(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        _apply_pre_kanban_spawn_override(
+            claimed, board=board, workspace_path=str(workspace)
+        )
         # Force-load sdlc-review skill for review agents.  The
         # _default_spawn function already auto-loads kanban-worker, and
         # appends task.skills via --skills.  Setting task.skills here
         # means the review agent gets both kanban-worker (lifecycle)
         # and sdlc-review (review logic: AC verification, merge, etc.).
+        # Review tasks always load sdlc-review; this intentionally
+        # overrides any skills set by pre_kanban_spawn above.
         claimed.skills = ["sdlc-review"]
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
