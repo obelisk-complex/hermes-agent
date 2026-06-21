@@ -151,6 +151,7 @@ jobs:
           python3 tests/hermes_cli/test_update_safety.py
           python3 tests/agent/test_hook_contract.py
           python3 tests/tools/test_delegate_instructions.py
+          python3 tests/test_b2_kanban_hooks.py
 
       - name: Push validated rebase
         # Explicit success() (already implicit) makes the gate unmistakable: the
