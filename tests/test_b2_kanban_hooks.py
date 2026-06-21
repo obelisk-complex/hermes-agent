@@ -1,7 +1,7 @@
 """Stdlib-only guard for the fork-local kanban lifecycle hooks (B2).
 
 Runs in the upstream-sync pre-push gate as `python3 tests/test_b2_kanban_hooks.py`
-with only the repo root on sys.path — so it imports NOTHING from the repo and
+with only the repo root on sys.path - so it imports NOTHING from the repo and
 reads source text instead (mirrors tests/agent/test_hook_contract.py). It
 fails the sync if a rebase drops a hook name, renames a fire-site kwarg, or
 removes the pre_kanban_complete block loop.
@@ -103,7 +103,7 @@ def test_guard_has_teeth_on_hookless_source():
     literal = _valid_hooks_literal(hookless)
     missing = [n for n in _HOOK_NAMES if f'"{n}"' not in literal]
     assert missing == list(_HOOK_NAMES), (
-        "guard failed to detect missing hooks in a hookless source — "
+        "guard failed to detect missing hooks in a hookless source - "
         "its extraction/membership logic has no teeth"
     )
 
@@ -197,7 +197,7 @@ def test_kanban_task_blocked_has_both_fire_sites():
         "expected kanban_task_blocked fired from BOTH _record_task_failure "
         f"and block_task; found {len(sites)} fire site(s)"
     )
-    # Both fire sites use **_blocked_hook_kwargs — assert the splat pattern
+    # Both fire sites use **_blocked_hook_kwargs - assert the splat pattern
     # exists in both enclosing functions.
     block_task_body = _function_body(src, "block_task")
     record_failure_body = _function_body(src, "_record_task_failure")
@@ -251,7 +251,7 @@ def test_block_semantics_contract():
 
     Mirrors PluginManager.invoke_hook (first non-None results) and the
     complete_task block loop (first {action:block,message:str} wins, aborts).
-    No repo imports — pure stdlib — so it runs in the CI sync gate.
+    No repo imports - pure stdlib - so it runs in the CI sync gate.
     """
     class _Blocked(Exception):
         pass

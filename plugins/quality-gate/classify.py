@@ -3,10 +3,10 @@
 There is NO tier column on the kanban ``tasks`` table (confirmed), so the
 chosen tier is written to a per-card SIDECAR file under the workspace.
 
-CRITICAL — the timeout uses a MODULE-LEVEL singleton ThreadPoolExecutor and
+CRITICAL - the timeout uses a MODULE-LEVEL singleton ThreadPoolExecutor and
 ``fut.cancel()``. We do NOT use the executor as a context manager: a
 ``with ThreadPoolExecutor() as ex:`` block calls ``shutdown(wait=True)`` on
-exit, which BLOCKS until the (slow) LLM call returns — defeating the timeout
+exit, which BLOCKS until the (slow) LLM call returns - defeating the timeout
 entirely. The singleton + cancel pattern returns promptly and lets the
 orphaned worker die on its own.
 """
@@ -21,7 +21,7 @@ from . import tiers
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — NEVER used as a context manager (see module docstring).
+# Module-level singleton - NEVER used as a context manager (see module docstring).
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="qg-classify",
 )
@@ -65,7 +65,8 @@ def read_tier(workspace: Union[str, Path]) -> Optional[str]:
         return None
     try:
         return tiers.normalise_tier(p.read_text(encoding="utf-8").strip())
-    except OSError:
+    except (OSError, ValueError) as exc:
+        logger.warning("quality-gate: could not read tier sidecar %s: %s", p, exc)
         return None
 
 
@@ -98,9 +99,9 @@ def _parse_tier(raw: Any) -> str:
 def classify_tier(title: str, body: str, *, llm: Any, timeout_s: float = 12.0) -> str:
     """Classify a card's tier via the aux-LLM, fail-safe to DEFAULT_TIER.
 
-    Calls the host facade with the VERIFIED contract — SYNCHRONOUS
+    Calls the host facade with the VERIFIED contract - SYNCHRONOUS
     ``complete(messages: list[dict]) -> result`` with text on ``.text`` (see
-    agent/plugin_llm.py) — NOT a bare-string prompt returning a string. Timeout
+    agent/plugin_llm.py) - NOT a bare-string prompt returning a string. Timeout
     enforced with the module singleton executor + fut.cancel() (best-effort;
     cannot kill a running thread, but fut.result returns promptly).
     """

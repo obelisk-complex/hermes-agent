@@ -98,7 +98,7 @@ def test_pre_kanban_complete_block_aborts(monkeypatch):
     with pytest.raises(kdb.CompletionBlockedError) as ei:
         kdb.complete_task(conn, "t_c", result="ok")
     assert "tests failing" in str(ei.value)
-    # State must be untouched — NOT done.
+    # State must be untouched - NOT done.
     row = conn.execute(
         "SELECT status, completed_at FROM tasks WHERE id = ?", ("t_c",)
     ).fetchone()
@@ -128,7 +128,7 @@ def test_completion_auto_blocks_after_threshold(monkeypatch):
     """Kernel backstop (FIX 2): once a task has been blocked
     _MAX_COMPLETION_BLOCKS times, the next gate block auto-transitions the
     task to `blocked` (for human review) and returns False instead of
-    raising forever — bounding a broken gate's retry loop. The task must end
+    raising forever - bounding a broken gate's retry loop. The task must end
     `blocked`, NOT `done`, and no done write must occur."""
     monkeypatch.setattr(
         kdb, "_invoke_kanban_hook",

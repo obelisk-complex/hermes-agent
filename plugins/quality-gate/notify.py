@@ -2,7 +2,7 @@
 
 By DEFAULT this is a no-op: no Matrix client is imported, no network call is
 made, no third-party service is wired. It activates ONLY when config sets
-``quality_gate.matrix.enabled: true`` AND a ``room`` — at which point the
+``quality_gate.matrix.enabled: true`` AND a ``room`` - at which point the
 caller-supplied ``sender`` callable performs the actual send. This keeps the
 plugin free of any hard dependency on a live Matrix server (operator policy:
 no unilateral third-party integrations).
@@ -47,7 +47,19 @@ def notify(
     No-op (returns False) when Matrix is not configured. Never raises.
     """
     if not matrix_enabled(config):
-        logger.debug("quality-gate: Matrix notify disabled; skipping")
+        m = _matrix_cfg(config)
+        if m.get("enabled"):
+            # Operator set enabled=true but did not provide a room (and/or token);
+            # a skipped notify must be observable.
+            room = home_room(config)
+            token = m.get("token")
+            logger.warning(
+                "quality-gate: Matrix notify enabled but misconfigured "
+                "(room=%s token=%s); skipping",
+                room, "set" if token else "missing",
+            )
+        else:
+            logger.debug("quality-gate: Matrix notify disabled; skipping")
         return False
     if sender is None:
         logger.warning("quality-gate: Matrix enabled but no sender wired; skipping")

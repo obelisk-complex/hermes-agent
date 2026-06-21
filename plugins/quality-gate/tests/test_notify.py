@@ -42,6 +42,18 @@ def test_notify_never_raises_on_sender_error():
     assert ok is False  # swallowed + logged, not raised
 
 
+def test_notify_warns_when_enabled_but_no_room(caplog):
+    """When enabled=true but no room is configured, must log WARNING and return False."""
+    cfg = {"quality_gate": {"matrix": {"enabled": True}}}  # no room
+    with caplog.at_level("WARNING"):
+        result = notify.notify(cfg, "hello")
+    assert result is False
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("misconfigured" in m for m in warnings), (
+        f"expected a misconfigured WARNING; got: {warnings}"
+    )
+
+
 def test_home_room():
     cfg = {"quality_gate": {"matrix": {"room": "!r:hs"}}}
     assert notify.home_room(cfg) == "!r:hs"

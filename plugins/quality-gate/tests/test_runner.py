@@ -53,14 +53,13 @@ def test_timeout_is_failure(tmp_workspace):
 def test_pytest_rc5_is_pass(tmp_workspace):
     # Simulate pytest's "no tests collected" exit code 5 via a fake argv0.
     # run_gate must treat rc==5 as a pass ONLY for pytest.
-    script = "import sys; sys.exit(5)"
     # Name the process 'pytest' by symlinking python -> not portable; instead
     # exercise the classifier directly through a pytest-basename command.
     r = runner.run_gate(["pytest", "-q", "--co"], tmp_workspace)
     # If pytest is installed and collects nothing here it returns 5 -> pass.
     if r.rc == 5:
         assert r.passed is True
-    # else pytest collected something (rc 0) or isn't installed (skip) — both fine.
+    # else pytest collected something (rc 0) or isn't installed (skip) - both fine.
 
 
 def test_utf8_replace_does_not_raise(tmp_workspace):

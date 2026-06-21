@@ -1223,7 +1223,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 fb_model, fb_provider, _norm_err,
             )
 
-        # Determine api_mode. An EXPLICIT api_mode on the chain entry wins —
+        # Determine api_mode. An EXPLICIT api_mode on the chain entry wins -
         # fallback_cmd.py persists api_mode onto fallback_providers entries and
         # the live config carries `api_mode: chat_completions` on every entry,
         # but the value was previously ignored, so a configured chat_completions
@@ -1243,7 +1243,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
                 fb_api_mode = "anthropic_messages"
             elif _fb_is_azure:
-                # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
+                # Azure OpenAI serves gpt-5.x on /chat/completions - does NOT
                 # support the Responses API. Stay on chat_completions.
                 fb_api_mode = "chat_completions"
             elif agent._is_direct_openai_url(fb_base_url):

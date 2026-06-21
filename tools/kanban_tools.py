@@ -651,7 +651,7 @@ def _handle_complete(args: dict, **kw) -> str:
                 # A pre_kanban_complete quality gate vetoed this completion.
                 # The task was NOT mutated (the gate runs before the write
                 # txn), so the worker can retry after fixing the gate
-                # failures. Spell that out — without it the model often
+                # failures. Spell that out - without it the model often
                 # treats a tool_error as terminal and blocks/crashes the run.
                 return tool_error(
                     f"kanban_complete blocked by quality gate: "
@@ -672,7 +672,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     return tool_error(
                         f"kanban_complete: {tid} was auto-blocked for human "
                         f"review after the quality gate blocked it repeatedly. "
-                        f"The task is now in 'blocked' state — do NOT retry "
+                        f"The task is now in 'blocked' state - do NOT retry "
                         f"completion; a human must unblock or requeue it."
                     )
                 return tool_error(

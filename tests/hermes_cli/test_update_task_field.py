@@ -56,7 +56,7 @@ def test_update_claim_column_rejected():
 
 def test_update_status_rejected():
     # status transitions only via complete_task/block_task/unblock_task/
-    # requeue_blocked_task — never a raw column write (F4/B4).
+    # requeue_blocked_task - never a raw column write (F4/B4).
     conn = _mk_conn()
     with pytest.raises(ValueError):
         kdb.update_task_field(conn, "t_u", "status", "done")
