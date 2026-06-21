@@ -1894,15 +1894,37 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
-            if not kb.complete_task(
-                conn, tid,
-                result=args.result,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=_worker_run_id_for(tid),
-            ):
+            try:
+                completed = kb.complete_task(
+                    conn, tid,
+                    result=args.result,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=_worker_run_id_for(tid),
+                )
+            except kb.CompletionBlockedError as gate_err:
                 failed.append(tid)
-                print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
+                print(
+                    f"completion blocked by quality gate: "
+                    f"{gate_err.block_message}",
+                    file=sys.stderr,
+                )
+                continue
+            if not completed:
+                failed.append(tid)
+                # complete_task returns False for an unknown/terminal id OR
+                # when the kernel auto-blocked the task after the gate blocked
+                # it _MAX_COMPLETION_BLOCKS times (FIX 2). Report the latter
+                # distinctly so the operator is not misled.
+                _t = kb.get_task(conn, tid)
+                if _t is not None and _t.status == "blocked":
+                    print(
+                        f"{tid} was auto-blocked for human review after the "
+                        f"quality gate blocked it repeatedly (now 'blocked')",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
             else:
                 print(f"Completed {tid}")
     return 0 if not failed else 1

@@ -3577,6 +3577,38 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class CompletionBlockedError(ValueError):
+    """Raised by ``complete_task`` when a ``pre_kanban_complete`` plugin
+    returns ``{"action": "block", "message": ...}``.
+
+    The block message is the exception text; the completing task is left in
+    its prior state (no status->done write). Kept as a ``ValueError`` subclass
+    so existing tool-error handlers treat it as a recoverable user error,
+    matching ``HallucinatedCardsError``.
+
+    Bounded-retry guidance (the task stays ``running`` after a block, so an
+    unfixed gate will block every retry): a worker should treat **3+
+    consecutive ``CompletionBlockedError`` responses as a signal to call
+    ``kanban_block``** with a reason summarising the gate output, rather than
+    looping ``complete -> blocked -> complete`` indefinitely. The
+    ``pre_kanban_complete`` hook also receives ``blocked_attempt_count`` (the
+    number of prior ``completion_blocked_plugin`` events for this task) so a
+    gate plugin can escalate or back off after a threshold of its own.
+
+    Kernel backstop: this exception is NOT raised indefinitely. Once a task
+    has been blocked ``_MAX_COMPLETION_BLOCKS`` times, ``complete_task`` stops
+    raising and instead auto-transitions the task to ``blocked`` (via
+    ``block_task``) for human review, returning ``False`` — so a permanently
+    broken gate cannot drive an unbounded retry loop even when no worker or
+    plugin intervenes.
+    """
+
+    def __init__(self, message: str, completing_task_id: str):
+        self.block_message = message
+        self.completing_task_id = completing_task_id
+        super().__init__(f"completion blocked by quality gate: {message}")
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3643,6 +3675,78 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # ---- pre_kanban_complete quality gate (fork-local) ------------------
+    # Fired BEFORE the status->done write so a plugin (e.g. a CI/tests
+    # gate) can veto a completion. This is net-new: complete_task fired no
+    # hook before. The first {"action":"block","message":} directive aborts:
+    # we record an auditable event and raise CompletionBlockedError WITHOUT
+    # mutating task state. Fail loud — the block is logged at WARNING and
+    # surfaced to the worker. blocked_attempt_count lets a gate plugin see
+    # how many times it has already blocked this task (bounded-retry signal).
+    _gate_row = conn.execute(
+        "SELECT workspace_path, branch_name, assignee, model_override "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    _prior_blocks = conn.execute(
+        "SELECT COUNT(*) AS c FROM task_events "
+        "WHERE task_id = ? AND kind = 'completion_blocked_plugin'",
+        (task_id,),
+    ).fetchone()
+    _blocked_attempt_count = int(_prior_blocks["c"]) if _prior_blocks else 0
+    _gate_results = _invoke_kanban_hook(
+        "pre_kanban_complete",
+        task_id=task_id,
+        result=result,
+        workspace_path=(_gate_row["workspace_path"] if _gate_row else None),
+        branch_name=(_gate_row["branch_name"] if _gate_row else None),
+        assignee=(_gate_row["assignee"] if _gate_row else None),
+        model_override=(_gate_row["model_override"] if _gate_row else None),
+        blocked_attempt_count=_blocked_attempt_count,
+    )
+    for _gate in _gate_results:
+        if not isinstance(_gate, dict):
+            continue
+        if _gate.get("action") != "block":
+            continue
+        _block_msg = _gate.get("message")
+        if not (isinstance(_block_msg, str) and _block_msg):
+            continue
+        _log.warning(
+            "pre_kanban_complete blocked completion of %s (attempt %d): %s",
+            task_id, _blocked_attempt_count + 1, _block_msg,
+        )
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_plugin",
+                {
+                    "message": _block_msg[:500],
+                    "attempt": _blocked_attempt_count + 1,
+                },
+            )
+        # Kernel backstop (FIX 2): if the gate has already blocked this task
+        # _MAX_COMPLETION_BLOCKS times, stop raising (which would let a broken
+        # gate loop forever) and auto-transition the task to `blocked` for
+        # human review. block_task closes the run, fires kanban_task_blocked,
+        # and leaves the task terminal-for-now. We return False (not done) so
+        # the caller reports the task did not complete.
+        if _blocked_attempt_count >= _MAX_COMPLETION_BLOCKS:
+            _log.warning(
+                "pre_kanban_complete has blocked %s %d times "
+                "(>= _MAX_COMPLETION_BLOCKS=%d); auto-blocking for human "
+                "review instead of raising again",
+                task_id, _blocked_attempt_count, _MAX_COMPLETION_BLOCKS,
+            )
+            block_task(
+                conn, task_id,
+                reason=(
+                    f"completion gate blocked {_blocked_attempt_count} times; "
+                    f"auto-blocked for human review (last: {_block_msg[:200]})"
+                ),
+            )
+            return False
+        raise CompletionBlockedError(_block_msg, task_id)
 
     with write_txn(conn):
         if expected_run_id is None:
@@ -5071,6 +5175,13 @@ def schedule_task(
 DEFAULT_FAILURE_LIMIT = 2
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
+
+# Kernel backstop for a permanently broken pre_kanban_complete gate. Once a
+# task has been blocked this many times, complete_task stops raising
+# CompletionBlockedError and auto-transitions the task to `blocked` for human
+# review, so a broken gate cannot drive an unbounded complete->blocked->
+# complete retry loop (FIX 2).
+_MAX_COMPLETION_BLOCKS = 5
 
 # Max bytes to keep in a single worker log file. The dispatcher truncates
 # and rotates on spawn if the file is larger than this at spawn time.
