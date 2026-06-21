@@ -49,6 +49,7 @@ Fixes #
 - [ ] I've run `pytest tests/ -q` and all tests pass
 - [ ] I've added tests for my changes (required for bug fixes, strongly encouraged for features)
 - [ ] I've tested on my platform: <!-- e.g. Ubuntu 24.04, macOS 15.2, Windows 11 -->
+- [ ] For non-trivial changes I planned first and had the plan critiqued (e.g. a plan-audit / blind-spot pass) before implementing - or N/A (self-attested; not CI-checked)
 
 ### Documentation & Housekeeping
 
