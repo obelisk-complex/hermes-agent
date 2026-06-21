@@ -64,7 +64,7 @@ def test_scratch_dir_with_code_is_gated(tmp_workspace, monkeypatch):
 
 def test_hygiene_default_non_repo_passes(tmp_workspace, monkeypatch):
     # The default is check_hygiene=True. A non-repo workspace with a stack must
-    # still PASS hygiene (non-repo => clean) — exercises the default code path
+    # still PASS hygiene (non-repo => clean) - exercises the default code path
     # that every other gate test bypasses with check_hygiene=False.
     (tmp_workspace / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     monkeypatch.setattr(

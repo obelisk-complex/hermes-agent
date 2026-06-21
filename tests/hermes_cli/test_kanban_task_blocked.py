@@ -108,7 +108,7 @@ def test_blocked_hook_fires_outside_txn_callback_can_write(monkeypatch):
 
     def real_invoke(name, **kw):
         if name == "kanban_task_blocked":
-            # Open a write_txn from inside the callback — this proves the hook
+            # Open a write_txn from inside the callback - this proves the hook
             # fires after write_txn commits (not while the lock is held).
             with kdb.write_txn(conn):
                 conn.execute(

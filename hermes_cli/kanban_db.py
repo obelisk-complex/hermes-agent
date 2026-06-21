@@ -3996,7 +3996,7 @@ class CompletionBlockedError(ValueError):
     Kernel backstop: this exception is NOT raised indefinitely. Once a task
     has been blocked ``_MAX_COMPLETION_BLOCKS`` times, ``complete_task`` stops
     raising and instead auto-transitions the task to ``blocked`` (via
-    ``block_task``) for human review, returning ``False`` — so a permanently
+    ``block_task``) for human review, returning ``False`` - so a permanently
     broken gate cannot drive an unbounded retry loop even when no worker or
     plugin intervenes.
     """
@@ -4079,7 +4079,7 @@ def complete_task(
     # gate) can veto a completion. This is net-new: complete_task fired no
     # hook before. The first {"action":"block","message":} directive aborts:
     # we record an auditable event and raise CompletionBlockedError WITHOUT
-    # mutating task state. Fail loud — the block is logged at WARNING and
+    # mutating task state. Fail loud - the block is logged at WARNING and
     # surfaced to the worker. blocked_attempt_count lets a gate plugin see
     # how many times it has already blocked this task (bounded-retry signal).
     _gate_row = conn.execute(
@@ -4965,7 +4965,7 @@ def unblock_task(
     ``model_override``
         When supplied (not None), the new value is folded into the SAME
         status-flip UPDATE statement so the model escalation commits
-        atomically with the status change — no window where the task is
+        atomically with the status change - no window where the task is
         ready on the old model (crash-safe).
 
     ``requeue_event``
@@ -5056,15 +5056,15 @@ def unblock_task(
 # (see SCHEMA_SQL). DELIBERATELY excludes:
 #   * the primary key (id) and immutable timestamps (created_at);
 #   * claim/run machinery (claim_lock, claim_expires, worker_pid,
-#     current_run_id, consecutive_failures, last_heartbeat_at) — kernel-owned;
-#   * ``status`` — status transitions go ONLY through complete_task /
+#     current_run_id, consecutive_failures, last_heartbeat_at) - kernel-owned;
+#   * ``status`` - status transitions go ONLY through complete_task /
 #     block_task / unblock_task / requeue_blocked_task, which maintain
 #     completed_at, run closure, claim clearing, events, and child re-gating.
 #     A raw status write would corrupt the state machine (no CHECK constraint
 #     on the column). See Revision Log F4/B4.
 # update_task_field validates against this frozen set so a caller can never
 # name an arbitrary column (SQL-injection / footgun guard). EXPANDING this set
-# requires an explicit review — fields here can be rewritten by any plugin.
+# requires an explicit review - fields here can be rewritten by any plugin.
 _MUTABLE_TASK_FIELDS = frozenset({
     "title",
     "body",
@@ -5106,9 +5106,9 @@ def update_task_field(
     """Set a single mutable column on a task.
 
     ``field`` must be a member of :data:`_MUTABLE_TASK_FIELDS`; any other
-    name (the primary key, claim/run machinery, or ``status`` — which has
+    name (the primary key, claim/run machinery, or ``status`` - which has
     dedicated transition functions) raises ``ValueError`` BEFORE any SQL is
-    built — the column identifier is only ever taken verbatim from the frozen
+    built - the column identifier is only ever taken verbatim from the frozen
     allowlist, never from caller input, and the value is bound as a
     parameter. ``result`` additionally cannot be set on a task whose status
     is in :data:`_RESULT_FROZEN_STATUSES` (no rewriting finished output).
@@ -5167,7 +5167,7 @@ def requeue_blocked_task(
     counter reset, stale-run close, parent re-gating, the optional
     ``model_override`` escalation AND the ``requeued`` audit event) to
     :func:`unblock_task` in a SINGLE transaction, so the status change, the
-    model write and the audit event are atomic — there is no window where the
+    model write and the audit event are atomic - there is no window where the
     task is requeued on the old model and a crash cannot lose either the
     escalation or the audit record. Returns ``unblock_task``'s result: False
     when the task was not in a requeueable state (in which case NO model
@@ -6867,7 +6867,7 @@ def _sanitize_pre_spawn_override(field, value):
     applied to ``claimed`` and later spliced into the worker argv
     (``--skills <sk>`` / ``-m <model_override>`` in _default_spawn). A value
     starting with ``-`` would inject a CLI flag; a skill containing ``,``
-    would splatter multiple names into one argv slot — both are the
+    would splatter multiple names into one argv slot - both are the
     create_task validations the override path would otherwise bypass.
 
     Returns the cleaned value, or ``None`` to skip the override (the caller
@@ -6908,7 +6908,7 @@ def _invoke_kanban_hook(name: str, **kwargs: Any) -> list:
     """
     try:
         from hermes_cli.plugins import invoke_hook  # local: avoids cycle
-        # (per-call import is deliberate — keeps the guard live; do not cache)
+        # (per-call import is deliberate - keeps the guard live; do not cache)
     except Exception as exc:  # noqa: BLE001
         _log.debug("kanban hook %s skipped: plugins unimportable: %s", name, exc)
         return []
@@ -6950,7 +6950,7 @@ def _apply_pre_kanban_spawn_override(claimed, *, board, workspace_path) -> None:
         applied = [f for f in _PRE_SPAWN_OVERRIDE_FIELDS if f in result]
         if not applied:
             continue
-        # Validate each value before applying it — the override path
+        # Validate each value before applying it - the override path
         # otherwise bypasses create_task's skills/model checks and would
         # let a returned dict inject CLI flags (e.g. {"skills":
         # ["--accept-hooks"]} or {"model_override": "-x"}) into the worker
@@ -6968,7 +6968,7 @@ def _apply_pre_kanban_spawn_override(claimed, *, board, workspace_path) -> None:
             effective[field] = cleaned
         if not effective:
             # This directive had recognised keys but none survived
-            # validation — try the next dict (first VALID directive wins).
+            # validation - try the next dict (first VALID directive wins).
             continue
         for field, cleaned in effective.items():
             setattr(claimed, field, cleaned)

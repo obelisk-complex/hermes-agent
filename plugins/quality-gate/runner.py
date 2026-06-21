@@ -46,7 +46,7 @@ def _classify(cmd: List[str], rc: int) -> bool:
     if rc == 0:
         return True
     if rc == 5 and os.path.basename(cmd[0]) == "pytest":
-        # pytest exit 5 = "no tests collected" — not a failure.
+        # pytest exit 5 = "no tests collected" - not a failure.
         return True
     return False
 
@@ -74,11 +74,11 @@ def run_gate(
             errors="replace",
             timeout=timeout_s,
         )
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError) as exc:
         # PermissionError covers WSL paths that resolve to a Windows executable
-        # which cannot be invoked from Linux — treat as "not available", same as
+        # which cannot be invoked from Linux - treat as "not available", same as
         # a missing binary.  Both conditions mean the toolchain is absent here.
-        logger.warning("quality-gate: executable not found/accessible for %r (skipping)", cmd)
+        logger.warning("quality-gate: executable not found/accessible for %r (skipping): %s", cmd, exc)
         return GateRun(
             cmd, cwd_str, -2, "", "", time.monotonic() - start,
             False, True, "executable not found",
