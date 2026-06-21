@@ -4425,6 +4425,107 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         return True
 
 
+# Operator-mutable task columns. Derived from the ``tasks`` schema
+# (see SCHEMA_SQL). DELIBERATELY excludes:
+#   * the primary key (id) and immutable timestamps (created_at);
+#   * claim/run machinery (claim_lock, claim_expires, worker_pid,
+#     current_run_id, consecutive_failures, last_heartbeat_at) — kernel-owned;
+#   * ``status`` — status transitions go ONLY through complete_task /
+#     block_task / unblock_task / requeue_blocked_task, which maintain
+#     completed_at, run closure, claim clearing, events, and child re-gating.
+#     A raw status write would corrupt the state machine (no CHECK constraint
+#     on the column). See Revision Log F4/B4.
+# update_task_field validates against this frozen set so a caller can never
+# name an arbitrary column (SQL-injection / footgun guard). EXPANDING this set
+# requires an explicit review — fields here can be rewritten by any plugin.
+_MUTABLE_TASK_FIELDS = frozenset({
+    "title",
+    "body",
+    "assignee",
+    "priority",
+    "workspace_kind",
+    "workspace_path",
+    "branch_name",
+    "tenant",
+    "result",  # guarded below: rejected when status in done/archived
+    "idempotency_key",
+    "last_failure_error",
+    "max_runtime_seconds",
+    "workflow_template_id",
+    "current_step_key",
+    "skills",
+    "model_override",
+    "max_retries",
+    "goal_mode",
+    "goal_max_turns",
+    "session_id",
+})
+
+# Statuses in which ``result`` is frozen: a finished task's recorded
+# completion output must not be rewritten out from under the audit log.
+_RESULT_FROZEN_STATUSES = ("done", "archived")
+
+# Columns stored as JSON text in the schema - a list/dict value must be
+# serialised before binding (a raw list bind raises sqlite3.ProgrammingError).
+_JSON_TASK_FIELDS = frozenset({"skills"})
+
+
+def update_task_field(
+    conn: sqlite3.Connection,
+    task_id: str,
+    field: str,
+    value: Any,
+) -> bool:
+    """Set a single mutable column on a task.
+
+    ``field`` must be a member of :data:`_MUTABLE_TASK_FIELDS`; any other
+    name (the primary key, claim/run machinery, or ``status`` — which has
+    dedicated transition functions) raises ``ValueError`` BEFORE any SQL is
+    built — the column identifier is only ever taken verbatim from the frozen
+    allowlist, never from caller input, and the value is bound as a
+    parameter. ``result`` additionally cannot be set on a task whose status
+    is in :data:`_RESULT_FROZEN_STATUSES` (no rewriting finished output).
+    Fields stored as JSON text in the schema (:data:`_JSON_TASK_FIELDS`,
+    e.g. ``skills``) are serialised with ``json.dumps`` before binding when
+    given a non-string value, so a Python list does not raise
+    ``sqlite3.ProgrammingError``.
+    Returns True iff exactly one row was updated (False when the task does
+    not exist).
+    """
+    if field not in _MUTABLE_TASK_FIELDS:
+        raise ValueError(
+            f"update_task_field: column {field!r} is not in the mutable "
+            f"allowlist (allowed: {', '.join(sorted(_MUTABLE_TASK_FIELDS))}). "
+            f"Status transitions must use complete_task / block_task / "
+            f"unblock_task / requeue_blocked_task."
+        )
+    with write_txn(conn):
+        if field == "result":
+            _row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if _row is None:
+                return False
+            if _row["status"] in _RESULT_FROZEN_STATUSES:
+                raise ValueError(
+                    f"update_task_field: cannot set 'result' on a task in "
+                    f"status {_row['status']!r} (finished output is frozen)"
+                )
+        if field in _JSON_TASK_FIELDS and value is not None and not isinstance(value, str):
+            value = json.dumps(list(value), ensure_ascii=False)
+        cur = conn.execute(
+            f"UPDATE tasks SET {field} = ? WHERE id = ?",
+            (value, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "field_updated",
+            {"field": field},
+        )
+        return True
+
+
 def specify_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
