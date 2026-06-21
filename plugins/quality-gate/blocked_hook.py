@@ -43,7 +43,7 @@ def on_kanban_task_blocked(
     current = _field(task, "model_override")
 
     if not ladder.is_retriable(reason):
-        logger.info(
+        logger.warning(
             "quality-gate: block reason %r not retriable; not escalating %s",
             reason, task_id,
         )
