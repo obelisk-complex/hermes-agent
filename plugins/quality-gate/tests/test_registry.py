@@ -21,7 +21,7 @@ def test_is_allowed_basename():
 
 
 def test_is_allowed_versioned_python():
-    # sys.executable may be python3.11 / python3.14 etc. — must be allowed.
+    # sys.executable may be python3.11 / python3.14 etc. - must be allowed.
     import sys, os
     assert registry.is_allowed([sys.executable, "-c", "x"]) is True
     assert registry.is_allowed(["/usr/bin/python3.14", "-c", "x"]) is True

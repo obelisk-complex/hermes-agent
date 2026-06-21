@@ -17,7 +17,7 @@ So instead we load the plugin exactly as the loader does (``real_load_plugin``)
 under ``hermes_plugins.quality_gate`` (NO sys.path insert), then register each
 already-loaded submodule ALSO under its bare name in ``sys.modules``. Test
 files keep writing ``import registry`` / ``import gate`` and get the SAME module
-object the package uses — which also means ``monkeypatch.setattr(registry,
+object the package uses - which also means ``monkeypatch.setattr(registry,
 "DEFAULT_GATES", ...)`` patches the exact object the gate reads (no module
 identity split). This is the contract the unit tests rely on AND it exercises
 the real relative-import wiring.
@@ -45,7 +45,7 @@ _SUBMODULES = (
 
 
 def real_load_plugin(pkg_name: str = _PKG):
-    """Load the plugin the way ``_load_directory_module`` does — NO sys.path.
+    """Load the plugin the way ``_load_directory_module`` does - NO sys.path.
 
     Builds a spec with ``submodule_search_locations=[plugin_dir]``, ensures the
     ``hermes_plugins`` namespace parent exists, registers the package in
