@@ -93,17 +93,38 @@ jobs:
           if git rebase upstream/main; then
             echo "✓ Rebased cleanly."
           else
-            # The rebase paused on a conflict. If rerere already knew every conflicting
-            # hunk, autoupdate staged the resolution and no unmerged paths remain — drive
-            # --continue through. If any path is still unmerged it's a NEW conflict with
-            # no recorded resolution: abort and fail for a human.
-            while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
+            # The rebase paused on a conflict. With rerere + autoupdate, a recorded
+            # resolution is applied and STAGED automatically, leaving no unmerged
+            # paths. Drive --continue through every such auto-resolved step. If any
+            # path is still unmerged it's a NEW conflict with no recorded
+            # resolution: abort and fail for a human.
+            #
+            # IMPORTANT: `git rebase --continue` exits NON-ZERO whenever it commits
+            # one resolved step and then pauses at the NEXT conflict — that is the
+            # normal shape of a multi-conflict rerere replay (e.g. two custom
+            # commits that both touch one file), NOT a failure. So we must NOT treat
+            # a non-zero --continue as fatal; instead re-check unmerged paths at the
+            # top of the loop. (The old `--continue || { abort; exit 1; }` form
+            # aborted on that benign intermediate exit, so any sync needing ≥2
+            # recorded resolutions failed even though every conflict was resolved.)
+            while [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; do
               if git diff --name-only --diff-filter=U | grep -q .; then
                 git rebase --abort || true
                 echo "::error::Upstream rebase hit an UNKNOWN conflict (no recorded rerere resolution). Resolve it once locally with rerere enabled, push the rolling patch, and the cache auto-replays it next time. origin/main left untouched."
                 exit 1
               fi
-              GIT_EDITOR=true git rebase --continue || { git rebase --abort || true; echo "::error::git rebase --continue failed after a rerere auto-resolution."; exit 1; }
+              head_before=$(git rev-parse HEAD)
+              GIT_EDITOR=true git rebase --continue || true
+              # Stall guard: still rebasing, nothing unmerged, and HEAD did not
+              # advance => --continue made no progress (not a normal pause). Fail
+              # loud rather than spin until the job times out.
+              if { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; } \
+                 && ! git diff --name-only --diff-filter=U | grep -q . \
+                 && [ "$(git rev-parse HEAD)" = "$head_before" ]; then
+                git rebase --abort || true
+                echo "::error::git rebase --continue made no progress with no unmerged paths — aborting to avoid an infinite loop. origin/main left untouched."
+                exit 1
+              fi
             done
             echo "✓ Rebase completed using recorded rerere resolution(s)."
           fi
