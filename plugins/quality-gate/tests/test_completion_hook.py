@@ -32,9 +32,15 @@ def test_failing_gate_blocks(tmp_workspace, monkeypatch):
     assert "FAIL" in out["message"]
 
 
-def test_no_workspace_allows_but_warns(tmp_workspace):
-    out = completion_hook.on_pre_kanban_complete(task={"id": "t-1"}, config={})
+def test_no_workspace_allows_but_warns(tmp_workspace, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        out = completion_hook.on_pre_kanban_complete(task={"id": "t-1"}, config={})
     assert out is None  # no workspace -> allow
+    assert any(
+        r.levelno >= logging.WARNING and "workspace_path" in r.message
+        for r in caplog.records
+    ), "expected a WARNING mentioning workspace_path when workspace is absent"
 
 
 def test_internal_error_blocks_fail_closed(tmp_workspace, monkeypatch):
