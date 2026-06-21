@@ -54,7 +54,6 @@ def test_load_config_degrades_to_empty():
 
 
 def test_completion_adapter_blocks_on_failing_gate(tmp_path, monkeypatch):
-    import sys
     import gate
     entry = _load_entry()
     ctx = _Ctx()
@@ -69,7 +68,10 @@ def test_completion_adapter_blocks_on_failing_gate(tmp_path, monkeypatch):
     def fake_eval(workspace, tier, *, task_id="", **kw):
         return gate.GateResult(passed=False, summary="quality-gate [standard]: FAIL\n  FAIL python/test")
     monkeypatch.setattr(gate, "evaluate_completion", fake_eval)
-    out = ctx.hooks["pre_kanban_complete"](task={"id": "t-1", "workspace_path": str(ws)})
+    # Call with the REAL flat kwargs the fork fires (not a task= object).
+    out = ctx.hooks["pre_kanban_complete"](
+        task_id="t-1", workspace_path=str(ws),
+    )
     assert out["action"] == "block"
     assert "FAIL" in out["message"]
 
@@ -92,7 +94,9 @@ def test_complete_closure_is_fail_closed_on_crash(tmp_path, monkeypatch):
         raise RuntimeError("gate exploded")
 
     monkeypatch.setattr(gate, "evaluate_completion", boom)
-    # Call exactly as invoke_hook does: cb(**kwargs). Must not raise.
-    out = ctx.hooks["pre_kanban_complete"](task={"id": "t-1", "workspace_path": str(ws)})
+    # Call with the REAL flat kwargs the fork fires (not a task= object).
+    out = ctx.hooks["pre_kanban_complete"](
+        task_id="t-1", workspace_path=str(ws),
+    )
     assert isinstance(out, dict) and out["action"] == "block"
     assert "could not be evaluated" in out["message"]
