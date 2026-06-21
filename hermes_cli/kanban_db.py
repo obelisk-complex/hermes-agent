@@ -4944,7 +4944,13 @@ def promote_task(
     return True, None
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    model_override: Optional[str] = None,
+    requeue_event: Optional[dict] = None,
+) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
@@ -4953,6 +4959,23 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     the leaked run is closed as ``reclaimed`` inside the same txn so the
     runs invariant (``current_run_id IS NULL`` ⇔ run row in terminal
     state) holds for the rest of this function's lifetime.
+
+    Optional keyword-only parameters:
+
+    ``model_override``
+        When supplied (not None), the new value is folded into the SAME
+        status-flip UPDATE statement so the model escalation commits
+        atomically with the status change — no window where the task is
+        ready on the old model (crash-safe).
+
+    ``requeue_event``
+        When supplied (not None) and the status flip succeeded, a
+        ``requeued`` audit event carrying this dict as payload is appended
+        INSIDE the same ``write_txn`` as the status/model write (FIX 1),
+        so the requeue, the model escalation and the audit event are atomic.
+        ``_append_event`` is designed to run inside an open txn.
+        When None, no ``requeued`` event is emitted (the two-arg /
+        model-only paths are unchanged).
     """
     now = int(time.time())
     with write_txn(conn):
@@ -4995,18 +5018,37 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # (the *dispatcher* spawn/crash/timeout counter — a different signal) is
         # still reset here, which is correct: a deliberate unblock is a fresh
         # start for the dispatcher's retry budget.
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')",
-            (new_status, task_id),
-        )
+        if model_override is not None:
+            # Atomic escalation (fork): fold the new model into the same
+            # status-flip UPDATE so the requeue + model change commit together
+            # (no window where the task is ready on the old model; crash-safe).
+            # Like the base path, deliberately leaves block_recurrences/
+            # block_kind intact so the loop breaker still sees the history.
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, model_override = ?, "
+                "current_run_id = NULL, consecutive_failures = 0, "
+                "last_failure_error = NULL "
+                "WHERE id = ? AND status IN ('blocked', 'scheduled')",
+                (new_status, model_override, task_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, current_run_id = NULL, "
+                "consecutive_failures = 0, last_failure_error = NULL "
+                "WHERE id = ? AND status IN ('blocked', 'scheduled')",
+                (new_status, task_id),
+            )
         if cur.rowcount != 1:
             return False
         _append_event(
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
+        if requeue_event is not None:
+            # Fold the requeue audit event into the SAME write_txn as the
+            # status/model write so nothing is lost on a crash between them
+            # (FIX 1). _append_event is designed to run inside an open txn.
+            _append_event(conn, task_id, "requeued", requeue_event)
         return True
 
 
@@ -5109,6 +5151,49 @@ def update_task_field(
             {"field": field},
         )
         return True
+
+
+def requeue_blocked_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    model_override: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> bool:
+    """Requeue a blocked task for another attempt, optionally escalating
+    it onto a stronger model.
+
+    Delegates the blocked/scheduled -> ready|todo transition (with failure
+    counter reset, stale-run close, parent re-gating, the optional
+    ``model_override`` escalation AND the ``requeued`` audit event) to
+    :func:`unblock_task` in a SINGLE transaction, so the status change, the
+    model write and the audit event are atomic — there is no window where the
+    task is requeued on the old model and a crash cannot lose either the
+    escalation or the audit record. Returns ``unblock_task``'s result: False
+    when the task was not in a requeueable state (in which case NO model
+    change and NO ``requeued`` event were applied). Logs the escalation at
+    WARNING.
+    """
+    requeue_event = {
+        "reason": reason,
+        "model_override": model_override,
+        "escalation_applied": model_override is not None,
+    }
+    if not unblock_task(
+        conn, task_id,
+        model_override=model_override,
+        requeue_event=requeue_event,
+    ):
+        # unblock_task short-circuited (not in a requeueable state); it did
+        # NOT write the requeue_event, so there is nothing to roll back.
+        return False
+    if model_override is not None:
+        _log.warning(
+            "Requeued blocked task %s with escalated model_override=%s "
+            "(reason=%s)",
+            task_id, model_override, reason,
+        )
+    return True
 
 
 def specify_triage_task(
