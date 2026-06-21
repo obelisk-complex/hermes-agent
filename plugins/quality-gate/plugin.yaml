@@ -1,0 +1,19 @@
+name: quality-gate
+version: "1.0.0"
+description: >-
+  Mechanical lint/test/typecheck/build gate that BLOCKS kanban task completion
+  on failure (subsystem B1), plus an aux-LLM tier classifier and a static
+  config-driven model-ladder escalation (subsystem B2). Matrix notify is
+  optional and a no-op unless quality_gate.matrix is configured. Opt-in via
+  plugins.enabled. Requires the fork hooks pre_kanban_spawn, kanban_task_blocked
+  and pre_kanban_complete.
+author: hermes
+kind: standalone
+# NOTE: the loader reads ``provides_hooks`` (plugins.py:1479), NOT ``hooks``.
+# Other bundled plugins use ``hooks:`` and therefore report 0 declared hooks in
+# ``hermes plugins list`` -- we use the correct key so introspection is accurate.
+# This is introspection only; actual registration happens in register(ctx).
+provides_hooks:
+  - pre_kanban_spawn
+  - kanban_task_blocked
+  - pre_kanban_complete
