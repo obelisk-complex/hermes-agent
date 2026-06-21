@@ -594,7 +594,34 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.CompletionBlockedError as gate_err:
+                # A pre_kanban_complete quality gate vetoed this completion.
+                # The task was NOT mutated (the gate runs before the write
+                # txn), so the worker can retry after fixing the gate
+                # failures. Spell that out — without it the model often
+                # treats a tool_error as terminal and blocks/crashes the run.
+                return tool_error(
+                    f"kanban_complete blocked by quality gate: "
+                    f"{gate_err.block_message}. "
+                    f"Your task is still in-flight (no state change). "
+                    f"Fix the gate failures and retry kanban_complete. "
+                    f"After 3+ consecutive blocks, call kanban_block with a "
+                    f"reason summarising the gate output instead of looping."
+                )
             if not ok:
+                # complete_task returns False either for an unknown/terminal id
+                # OR when the pre_kanban_complete gate blocked this task
+                # _MAX_COMPLETION_BLOCKS times and the kernel auto-blocked it
+                # for human review (FIX 2). Distinguish them so the worker
+                # learns the task is now blocked, not silently un-completable.
+                _t = kb.get_task(conn, tid)
+                if _t is not None and _t.status == "blocked":
+                    return tool_error(
+                        f"kanban_complete: {tid} was auto-blocked for human "
+                        f"review after the quality gate blocked it repeatedly. "
+                        f"The task is now in 'blocked' state — do NOT retry "
+                        f"completion; a human must unblock or requeue it."
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
