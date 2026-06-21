@@ -923,6 +923,7 @@ refactor/description   # Code restructuring
 2. **Test manually**: Run `hermes` and exercise the code path you changed
 3. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
 4. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.
+5. **Plan before you build (non-trivial changes)**: For anything beyond a one-line fix, write the plan first, have it critiqued (an AI agent should run a plan-audit / blind-spot pass), and refine it until clean before implementing. This is a local discipline - there is no CI check for it.
 
 ### PR description
 
