@@ -172,6 +172,39 @@ VALID_HOOKS: Set[str] = {
     #   choice: "once" | "session" | "always" | "deny" | "timeout"
     "pre_approval_request",
     "post_approval_response",
+    # ---- Kanban lifecycle hooks (fork-local) ----------------------------
+    # pre_kanban_spawn — fired in dispatch_once after the workspace is
+    # resolved and BEFORE spawn selection. Observers may inspect the task;
+    # a plugin may also OVERRIDE the spawn by returning a dict of task
+    # fields to apply (first directive wins), e.g.:
+    #     {"model_override": "claude-opus-4-8"}  /  {"skills": ["sdlc-review"]}
+    # Kwargs: task_id, title, body, assignee, model_override, workspace_path,
+    #   workspace_kind, branch_name, priority, skills, consecutive_failures,
+    #   board. Return None to leave the spawn unchanged.
+    "pre_kanban_spawn",
+    # kanban_task_blocked — OBSERVER ONLY (return values ignored). Fired the
+    # instant a task is blocked, covering BOTH the auto-block circuit-breaker
+    # path (spawn/review/timeout/crash, via _record_task_failure) and the
+    # manual block_task path.
+    # PERFORMANCE CONTRACT: callbacks MUST return fast. The hook fires just
+    # after the kanban write transaction commits, but the dispatcher thread
+    # is still serial — a slow callback (HTTP, Matrix notify, file I/O)
+    # stalls the kanban writer. Do any I/O off-thread (background thread /
+    # asyncio task); never block the callback on network latency.
+    # Kwargs (auto): task_id, reason, consecutive_failures, effective_limit,
+    #   limit_source, trigger_outcome, trigger="auto_block", run_id.
+    # Kwargs (manual): task_id, reason, run_id, trigger="manual".
+    "kanban_task_blocked",
+    # pre_kanban_complete — BLOCK-CAPABLE. Fired in complete_task BEFORE the
+    # status→done write. A plugin returning {"action": "block", "message": str}
+    # ABORTS the completion (the task is NOT marked done) and the message is
+    # surfaced to the worker. First valid block directive wins; non-block
+    # return values are ignored. This is the quality-gate plugin's seam.
+    # Kwargs: task_id, result, workspace_path, branch_name, assignee,
+    #   model_override, blocked_attempt_count (count of prior
+    #   completion_blocked_plugin events — a bounded-retry / escalation
+    #   signal; the plugin should escalate or back off after a threshold).
+    "pre_kanban_complete",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
