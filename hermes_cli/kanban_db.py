@@ -7149,7 +7149,7 @@ def _record_task_failure(
     # callbacks can safely call kanban_db write functions (no nested-txn
     # error) and a slow callback cannot hold the BEGIN IMMEDIATE lock.
     if _blocked_hook_kwargs is not None:
-        _invoke_kanban_hook("kanban_task_blocked", **_blocked_hook_kwargs)
+        _invoke_kanban_hook("fork_kanban_task_blocked", **_blocked_hook_kwargs)
     return blocked
 
 

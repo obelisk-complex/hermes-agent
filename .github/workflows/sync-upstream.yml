@@ -137,8 +137,17 @@ jobs:
           # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
           export PYTHONPATH="$PWD"
           # Catch conflict markers / syntax breakage the rebase may have left in
-          # the import-critical and fork-customised files.
-          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
+          # the import-critical and fork-customised files. hermes_cli/kanban_db.py
+          # and plugins/quality-gate/*.py are included DELIBERATELY: they carry the
+          # four kanban-hook rebase-conflict resolutions and the
+          # fork_kanban_task_blocked rename (the collision fix vs upstream's own
+          # kanban_task_blocked observer). They are the files most likely to take a
+          # bad three-way merge, so a conflict marker there must fail the sync, not
+          # ride to origin/main. Keep this list in sync with the rename's blast radius.
+          for f in hermes_cli/main.py hermes_cli/plugins.py hermes_cli/kanban_db.py \
+                   agent/conversation_loop.py tools/delegate_tool.py \
+                   plugins/quality-gate/__init__.py plugins/quality-gate/blocked_hook.py \
+                   plugins/quality-gate/completion_hook.py plugins/quality-gate/spawn_hook.py; do
             python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
           done
           # Guard tests (stdlib-only, no install needed): fail the sync if the

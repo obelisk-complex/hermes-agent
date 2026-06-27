@@ -10,9 +10,12 @@ def _task(**over):
 def test_escalates_to_next_rung_on_retriable():
     cfg = {"quality_gate": {"model_ladder": ["a", "b", "c"]}}
     calls = []
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(model_override="a"), reason="gate_failed", config=cfg,
-        requeue=lambda tid, **kw: calls.append((tid, kw)),
+        # requeue_blocked_task returns True on a successful requeue; `or True`
+        # records the call AND yields that truthy success so the hook takes the
+        # escalation-confirmed branch (the bool return is now load-bearing).
+        requeue=lambda tid, **kw: calls.append((tid, kw)) or True,
     )
     assert calls == [("t-1", {"model_override": "b"})]
 
@@ -20,7 +23,7 @@ def test_escalates_to_next_rung_on_retriable():
 def test_non_retriable_does_not_requeue():
     cfg = {"quality_gate": {"model_ladder": ["a", "b"]}}
     calls = []
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(), reason="permission_denied", config=cfg,
         requeue=lambda tid, **kw: calls.append(tid),
     )
@@ -30,7 +33,7 @@ def test_non_retriable_does_not_requeue():
 def test_top_rung_does_not_requeue():
     cfg = {"quality_gate": {"model_ladder": ["a", "b", "c"]}}
     calls = []
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(model_override="c"), reason="gate_failed", config=cfg,
         requeue=lambda tid, **kw: calls.append(tid),
     )
@@ -46,7 +49,7 @@ def test_exhaustion_sets_terminal_signal(caplog):
     requeue_calls = []
     field_calls = []
     with caplog.at_level(logging.ERROR):
-        blocked_hook.on_kanban_task_blocked(
+        blocked_hook.on_fork_kanban_task_blocked(
             task=_task(model_override="c"), reason="gate_failed", config=cfg,
             requeue=lambda tid, **kw: requeue_calls.append(tid),
             update_field=lambda tid, field, value: field_calls.append((tid, field, value)),
@@ -63,7 +66,7 @@ def test_exhaustion_update_field_failure_is_swallowed():
     def boom(tid, field, value):
         raise RuntimeError("db locked")
 
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(model_override="a"), reason="gate_failed", config=cfg,
         update_field=boom,
     )  # must not raise
@@ -80,9 +83,9 @@ def test_object_task_escalates_correctly():
         workspace_path = "/tmp/ws"
     cfg = {"quality_gate": {"model_ladder": ["a", "b", "c"]}}
     calls = []
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=T(), reason="gate_failed", config=cfg,
-        requeue=lambda tid, **kw: calls.append((tid, kw)),
+        requeue=lambda tid, **kw: calls.append((tid, kw)) or True,
     )
     assert calls == [("t-9", {"model_override": "b"})]
 
@@ -94,7 +97,7 @@ def test_requeue_failure_is_swallowed():
         raise RuntimeError("db locked")
 
     # Must not raise.
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(model_override="a"), reason="timeout", config=cfg, requeue=boom,
     )
 
@@ -103,10 +106,30 @@ def test_matrix_notify_called_when_enabled():
     cfg = {"quality_gate": {"model_ladder": ["a", "b"],
                             "matrix": {"enabled": True, "room": "!r:hs"}}}
     sent = []
-    blocked_hook.on_kanban_task_blocked(
+    blocked_hook.on_fork_kanban_task_blocked(
         task=_task(model_override="a"), reason="gate_failed", config=cfg,
-        requeue=lambda tid, **kw: None,
+        requeue=lambda tid, **kw: True,  # successful requeue -> notify fires
         notify_sender=lambda room, text, token: sent.append((room, text)),
     )
     assert len(sent) == 1
     assert "!r:hs" == sent[0][0]
+
+
+def test_no_op_requeue_skips_notify_and_warns(caplog):
+    # Graceful-False seam: when requeue_blocked_task returns False (the card was
+    # NOT requeueable, e.g. upstream's BLOCK_RECURRENCE_LIMIT breaker already
+    # routed it to 'triage'), the hook must NOT send a success notify and must
+    # log the no-op (fail loud) instead of claiming a phantom escalation.
+    import logging
+    cfg = {"quality_gate": {"model_ladder": ["a", "b"],
+                            "matrix": {"enabled": True, "room": "!r:hs"}}}
+    sent = []
+    with caplog.at_level(logging.WARNING):
+        blocked_hook.on_fork_kanban_task_blocked(
+            task=_task(model_override="a"), reason="gate_failed", config=cfg,
+            requeue=lambda tid, **kw: False,  # not requeueable (triage/moved)
+            notify_sender=lambda room, text, token: sent.append((room, text)),
+        )
+    assert sent == [], "no escalation notify must fire on a requeue no-op"
+    assert any(r.levelno >= logging.WARNING and "NO-OP" in r.getMessage()
+               for r in caplog.records), "the requeue no-op must be logged loud"
