@@ -2,7 +2,7 @@
 
 Registers three kanban hooks supplied by the fork-edits plan:
   * pre_kanban_spawn    -> classify tier, pick initial model rung
-  * kanban_task_blocked -> escalate up the static model ladder via requeue
+  * fork_kanban_task_blocked -> escalate up the static model ladder via requeue
   * pre_kanban_complete -> run the mechanical gate, BLOCK on failure
 
 All host wiring (live config, ctx.llm, the fork's requeue_blocked_task,
@@ -91,7 +91,7 @@ def _matrix_sender(config: dict) -> Optional[Callable[..., Any]]:
 def _bind_get_model_override() -> Optional[Callable[[str], Optional[str]]]:
     """Return a callable that looks up the current model_override for a task.
 
-    The fork's ``kanban_task_blocked`` fire does NOT include ``model_override``
+    The fork's ``fork_kanban_task_blocked`` fire does NOT include ``model_override``
     (it is absent from both the manual and auto-block kwargs dicts). We resolve
     it at hook-fire time by querying the DB directly, mirroring the
     connect/try/finally-close pattern used by ``_bind_requeue`` and
@@ -167,7 +167,7 @@ def register(ctx) -> None:
         return spawn_hook.on_pre_kanban_spawn(task=task, config=config, llm=llm)
 
     def _blocked(**kwargs):
-        # ADAPTER: fork fires kanban_task_blocked with FLAT kwargs (no task= object)
+        # ADAPTER: fork fires fork_kanban_task_blocked with FLAT kwargs (no task= object)
         # and does NOT include model_override. We look it up from the DB via the
         # bound getter and build the task dict. We also normalise retriability via
         # trigger (structural) rather than reason (free text) -- see
@@ -191,7 +191,7 @@ def register(ctx) -> None:
         trigger = kwargs.get("trigger", "")
         mapped_reason = _TRIGGER_TO_RETRIABLE.get(trigger, _NON_RETRIABLE_SENTINEL)
         config = _load_config()
-        return blocked_hook.on_kanban_task_blocked(
+        return blocked_hook.on_fork_kanban_task_blocked(
             task=task,
             reason=mapped_reason,
             config=config,
@@ -221,6 +221,6 @@ def register(ctx) -> None:
         return completion_hook.on_pre_kanban_complete(task=task, config=config)
 
     ctx.register_hook("pre_kanban_spawn", _spawn)
-    ctx.register_hook("kanban_task_blocked", _blocked)
+    ctx.register_hook("fork_kanban_task_blocked", _blocked)
     ctx.register_hook("pre_kanban_complete", _complete)
     logger.info("quality-gate: registered 3 kanban hooks")

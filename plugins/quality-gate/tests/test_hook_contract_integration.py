@@ -168,7 +168,7 @@ class TestCompletionHookContract:
 # ---------------------------------------------------------------------------
 
 class TestBlockedHookContract:
-    """kanban_task_blocked closure must map trigger -> retriability correctly."""
+    """fork_kanban_task_blocked closure must map trigger -> retriability correctly."""
 
     def _patch_kdb(self, monkeypatch, model_override, requeue_calls, update_calls):
         """Stub the three kanban_db seams used by the blocked adapter."""
@@ -219,7 +219,7 @@ class TestBlockedHookContract:
         entry, ctx = _fresh_entry_and_ctx()
 
         # Fire with REAL flat kwargs from the fork's auto-block path.
-        ctx.hooks["kanban_task_blocked"](
+        ctx.hooks["fork_kanban_task_blocked"](
             task_id="t-auto",
             reason="Worker process crashed after 3s: OOMKilled",  # free text; NOT in RETRIABLE_FAILURES
             consecutive_failures=3,
@@ -256,7 +256,7 @@ class TestBlockedHookContract:
         entry, ctx = _fresh_entry_and_ctx()
 
         # Fire with REAL flat kwargs from the fork's manual-block path.
-        ctx.hooks["kanban_task_blocked"](
+        ctx.hooks["fork_kanban_task_blocked"](
             task_id="t-manual",
             reason="Blocked by operator: external dependency not ready",
             run_id=7,

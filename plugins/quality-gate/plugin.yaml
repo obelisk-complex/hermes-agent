@@ -5,7 +5,7 @@ description: >-
   on failure (subsystem B1), plus an aux-LLM tier classifier and a static
   config-driven model-ladder escalation (subsystem B2). Matrix notify is
   optional and a no-op unless quality_gate.matrix is configured. Opt-in via
-  plugins.enabled. Requires the fork hooks pre_kanban_spawn, kanban_task_blocked
+  plugins.enabled. Requires the fork hooks pre_kanban_spawn, fork_kanban_task_blocked
   and pre_kanban_complete.
 author: hermes
 kind: standalone
@@ -15,5 +15,5 @@ kind: standalone
 # This is introspection only; actual registration happens in register(ctx).
 provides_hooks:
   - pre_kanban_spawn
-  - kanban_task_blocked
+  - fork_kanban_task_blocked
   - pre_kanban_complete

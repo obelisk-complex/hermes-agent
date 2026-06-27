@@ -27,7 +27,7 @@ def _no_plugins(monkeypatch):
 def test_invoke_hook_returns_empty_without_plugin(monkeypatch):
     _no_plugins(monkeypatch)
     assert kdb._invoke_kanban_hook("pre_kanban_spawn", task_id="x") == []
-    assert kdb._invoke_kanban_hook("kanban_task_blocked", task_id="x") == []
+    assert kdb._invoke_kanban_hook("fork_kanban_task_blocked", task_id="x") == []
     assert kdb._invoke_kanban_hook("pre_kanban_complete", task_id="x") == []
 
 

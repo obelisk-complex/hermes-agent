@@ -1,6 +1,6 @@
-"""on_kanban_task_blocked: escalate a retriably-blocked card up the ladder.
+"""on_fork_kanban_task_blocked: escalate a retriably-blocked card up the ladder.
 
-Fired by the fork's ``kanban_task_blocked`` observer hook. On a retriable
+Fired by the fork's ``fork_kanban_task_blocked`` observer hook. On a retriable
 failure we requeue the card onto the next-stronger model rung (via the fork's
 requeue_blocked_task, injected as ``requeue``). At the top rung the ladder is
 exhausted and we stop. Matrix evidence is posted only when configured.
@@ -30,7 +30,7 @@ def _field(task: Any, name: str, default: Any = None) -> Any:
     return getattr(task, name, default)
 
 
-def on_kanban_task_blocked(
+def on_fork_kanban_task_blocked(
     task: Any = None,
     reason: Optional[str] = None,
     config: Optional[dict] = None,
@@ -89,12 +89,26 @@ def on_kanban_task_blocked(
             logger.warning(
                 "quality-gate: no requeue callable wired; cannot escalate %s", task_id,
             )
-        else:
-            requeue(task_id, model_override=nxt)
+        elif requeue(task_id, model_override=nxt):
             logger.info(
                 "quality-gate: escalated %s from %r to %r (reason=%s)",
                 task_id, current, nxt, reason,
             )
+        else:
+            # requeue_blocked_task returns False when the card was NOT in a
+            # requeueable state: e.g. upstream PR #52848's BLOCK_RECURRENCE_LIMIT
+            # breaker already routed it to 'triage', or another worker moved it.
+            # Surface the no-op (fail loud) and skip the "escalated" notify below
+            # rather than claim a success that never happened. The quality-gate
+            # model ladder and the core recurrence breaker COEXIST; this branch
+            # is the documented seam between them.
+            logger.warning(
+                "quality-gate: requeue of %s to %r was a NO-OP (card not in a "
+                "requeueable state -- likely routed to triage by the recurrence "
+                "breaker, or already moved); not escalating. reason=%s",
+                task_id, nxt, reason,
+            )
+            return
     except Exception as exc:
         logger.warning(
             "quality-gate: requeue/escalation failed for %s: %s", task_id, exc,

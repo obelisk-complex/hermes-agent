@@ -225,10 +225,14 @@ VALID_HOOKS: Set[str] = {
     #   workspace_kind, branch_name, priority, skills, consecutive_failures,
     #   board. Return None to leave the spawn unchanged.
     "pre_kanban_spawn",
-    # kanban_task_blocked - OBSERVER ONLY (return values ignored). Fired the
-    # instant a task is blocked, covering BOTH the auto-block circuit-breaker
-    # path (spawn/review/timeout/crash, via _record_task_failure) and the
-    # manual block_task path.
+    # fork_kanban_task_blocked - OBSERVER ONLY (return values ignored). Renamed
+    # from kanban_task_blocked to avoid colliding with upstream's own
+    # kanban_task_blocked observer (added by upstream PR #50349, merged into this
+    # fork on sync): both dispatch through hermes_cli.plugins.invoke_hook, so a
+    # shared name would deliver upstream's lean kwargs to the fork's quality-gate
+    # consumer. Fired the instant a task is blocked, covering BOTH the auto-block
+    # circuit-breaker path (spawn/review/timeout/crash, via _record_task_failure)
+    # and the manual block_task path.
     # PERFORMANCE CONTRACT: callbacks MUST return fast. The hook fires just
     # after the kanban write transaction commits, but the dispatcher thread
     # is still serial - a slow callback (HTTP, Matrix notify, file I/O)
@@ -237,7 +241,7 @@ VALID_HOOKS: Set[str] = {
     # Kwargs (auto): task_id, reason, consecutive_failures, effective_limit,
     #   limit_source, trigger_outcome, trigger="auto_block", run_id.
     # Kwargs (manual): task_id, reason, run_id, trigger="manual".
-    "kanban_task_blocked",
+    "fork_kanban_task_blocked",
     # pre_kanban_complete - BLOCK-CAPABLE. Fired in complete_task BEFORE the
     # status→done write. A plugin returning {"action": "block", "message": str}
     # ABORTS the completion (the task is NOT marked done) and the message is

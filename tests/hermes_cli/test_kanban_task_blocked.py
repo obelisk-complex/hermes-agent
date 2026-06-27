@@ -30,7 +30,7 @@ def test_record_task_failure_fires_blocked_hook(monkeypatch):
         failure_limit=1, release_claim=True, end_run=False,
     )
     assert blocked is True
-    fired = [c for c in calls if c[0] == "kanban_task_blocked"]
+    fired = [c for c in calls if c[0] == "fork_kanban_task_blocked"]
     assert len(fired) == 1
     kw = fired[0][1]
     assert kw["task_id"] == "t_blk"
@@ -55,7 +55,7 @@ def test_block_task_fires_manual_hook(monkeypatch):
     )
     conn.commit()
     assert kdb.block_task(conn, "t_man", reason="manual stop") is True
-    fired = [c for c in calls if c[0] == "kanban_task_blocked"]
+    fired = [c for c in calls if c[0] == "fork_kanban_task_blocked"]
     assert len(fired) == 1
     assert fired[0][1]["trigger"] == "manual"
     assert fired[0][1]["reason"] == "manual stop"
@@ -75,7 +75,7 @@ def test_block_task_no_hook_when_noop(monkeypatch):
     conn.commit()
     # 'done' is not in ('running','ready') → rowcount 0 → returns False.
     assert kdb.block_task(conn, "t_done", reason="late") is False
-    assert [c for c in calls if c[0] == "kanban_task_blocked"] == []
+    assert [c for c in calls if c[0] == "fork_kanban_task_blocked"] == []
 
 
 def test_block_task_still_blocks_without_plugin():
@@ -107,7 +107,7 @@ def test_blocked_hook_fires_outside_txn_callback_can_write(monkeypatch):
     wrote = []
 
     def real_invoke(name, **kw):
-        if name == "kanban_task_blocked":
+        if name == "fork_kanban_task_blocked":
             # Open a write_txn from inside the callback - this proves the hook
             # fires after write_txn commits (not while the lock is held).
             with kdb.write_txn(conn):

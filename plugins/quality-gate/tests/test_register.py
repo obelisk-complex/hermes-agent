@@ -30,7 +30,7 @@ def test_register_wires_three_kanban_hooks():
     ctx = _Ctx()
     entry.register(ctx)
     assert set(ctx.hooks) == {
-        "pre_kanban_spawn", "kanban_task_blocked", "pre_kanban_complete",
+        "pre_kanban_spawn", "fork_kanban_task_blocked", "pre_kanban_complete",
     }
 
 
