@@ -17,6 +17,7 @@ ERR_EXTRACTION = "extraction_failed"   # no code could be extracted from the res
 ERR_COLLECTION = "collection_error"    # import/syntax error: pytest could not collect
 ERR_TEST_FAIL = "test_failure"         # code ran, oracle assertions failed
 ERR_TIMEOUT = "timeout"                # hard wall-clock timeout in the sandbox
+ERR_CALL = "call_error"                # the API call itself failed (non-200 / transport error)
 
 
 @dataclass(frozen=True)
