@@ -38,6 +38,19 @@ def on_pre_kanban_spawn(
         logger.debug("quality-gate: spawn hook skipping review/terminal card %s", _field(task, "id"))
         return None
 
+    # Re-spawn guard: a card that already carries a model_override has been
+    # escalated up the ladder by blocked_hook (requeue(..., model_override=nxt))
+    # and re-queued (status flips back to an actionable value). Recomputing the
+    # initial rung here would RESET that escalation back down the ladder, so
+    # leave the escalated card untouched (and skip the tier re-classification
+    # LLM call). The tier sidecar from the first spawn already persists.
+    if _field(task, "model_override"):
+        logger.debug(
+            "quality-gate: spawn hook leaving escalated card %s on model %r",
+            _field(task, "id"), _field(task, "model_override"),
+        )
+        return None
+
     title = _field(task, "title", "") or ""
     body = _field(task, "body", "") or ""
     workspace_path = _field(task, "workspace_path")
@@ -54,7 +67,7 @@ def on_pre_kanban_spawn(
             logger.warning("quality-gate: could not write tier sidecar: %s", exc)
 
     lad = ladder.load_ladder(config)
-    rung = ladder.initial_rung(lad)
+    rung = ladder.initial_rung_for_tier(lad, tier)
 
     if notify.matrix_enabled(config):
         logger.info(

@@ -53,6 +53,46 @@ def test_initial_rung_capped_one_below_top():
     assert ladder.initial_rung(["a", "b"]) == "a"
 
 
+def test_initial_rung_for_tier_spreads_on_4_rung():
+    lad = ["w", "x", "y", "z"]  # cap_idx = len-2 = 2; top "z" only via escalation
+    assert ladder.initial_rung_for_tier(lad, "quick") == "w"     # ladder[0]
+    assert ladder.initial_rung_for_tier(lad, "standard") == "x"  # ladder[min((4-1)//2=1, 2)]
+    assert ladder.initial_rung_for_tier(lad, "thorough") == "y"  # ladder[cap_idx=2]
+    # Invariant: no tier ever starts at the top rung, so an escalation remains.
+    for t in ("quick", "standard", "thorough"):
+        assert ladder.initial_rung_for_tier(lad, t) != lad[-1]
+
+
+def test_initial_rung_for_tier_compresses_on_short_ladders():
+    # Intentional: short ladders compress (documented in the function).
+    # len==2 -> all tiers collapse onto ladder[0] (cap_idx=0).
+    two = ["a", "b"]
+    assert {ladder.initial_rung_for_tier(two, t)
+            for t in ("quick", "standard", "thorough")} == {"a"}
+    # len==3 -> quick=ladder[0]; standard and thorough both collapse onto ladder[1].
+    three = ["a", "b", "c"]
+    assert ladder.initial_rung_for_tier(three, "quick") == "a"
+    assert ladder.initial_rung_for_tier(three, "standard") == "b"
+    assert ladder.initial_rung_for_tier(three, "thorough") == "b"
+
+
+def test_initial_rung_for_tier_unknown_tier_is_standard():
+    lad = ["w", "x", "y", "z"]
+    assert ladder.initial_rung_for_tier(lad, None) == ladder.initial_rung_for_tier(lad, "standard")
+    assert ladder.initial_rung_for_tier(lad, "bogus") == ladder.initial_rung_for_tier(lad, "standard")
+
+
+def test_initial_rung_for_tier_empty():
+    assert ladder.initial_rung_for_tier([], "quick") == ""
+    assert ladder.initial_rung_for_tier([], "thorough") == ""
+
+
+def test_initial_rung_delegates_to_thorough():
+    # The kept-for-compat initial_rung is exactly the 'thorough' rung.
+    for lad in (["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d"]):
+        assert ladder.initial_rung(lad) == ladder.initial_rung_for_tier(lad, "thorough")
+
+
 def test_is_retriable():
     assert ladder.is_retriable("gate_failed") is True
     assert ladder.is_retriable("timeout") is True

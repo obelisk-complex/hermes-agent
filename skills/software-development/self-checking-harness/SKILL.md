@@ -6,6 +6,43 @@ category: software-development
 
 # Self-Checking Harness — 5-Gate Validation Protocol
 
+## Development Ethos (single source of truth)
+
+This skill is the canonical statement of how code gets built here. The 5-gate
+protocol below is the *enforcement*; the principles in this section are what it
+serves. The other skills (`simplify-code`, the Superpowers software-development
+bundle) are detailed expansions of individual principles; this section is the
+index, so there is one place to update and deploy from, not several that drift.
+
+- **Less code wins.** The best change removes lines. Prefer reuse over
+  re-implementation; delete before you add. Risk-tiered application lives in
+  `simplify-code` (`../simplify-code/SKILL.md`).
+- **Chesterton's Fence.** Before removing or "fixing" anything that looks dead,
+  establish why it exists (`git log -S '<symbol>'`, `git blame`, read the
+  introducing commit). Code that looks redundant is a hypothesis, not a
+  conclusion; reactivating retired behaviour is a behaviour change, not a cleanup.
+- **No AI slop.** No comments restating the obvious code, no defensive
+  null-checks on already-validated input, no `as any` or other type-system
+  escapes, no patterns inconsistent with the surrounding file. The anti-slop
+  catalogue is `optional-skills/creative/creative-ideation/references/anti-slop.md`.
+- **Fail loud, not silent.** A swallowed exception, a silent `return False`, a
+  dropped record, an empty `except: pass` is a latent incident. Make it
+  observable (log at warning or above, or emit a metric) and flag it in review.
+- **Plan, then audit the plan, then build.** For any non-trivial behaviour
+  change, write the plan (end state, steps, rollback, success criteria), have it
+  adversarially audited (plan-soundness plus blind-spot), and loop until it
+  passes before touching code.
+- **Loop til clean.** Mechanical linters first (auto-fix), then the QA/audit
+  fleet, fixing findings until lint is green, tests are green, and every agent
+  returns a clean verdict; stop on a stall rather than spin.
+- **Name behaviour changes.** Enabling or disabling a control, changing a
+  default, tightening validation, activating a flag, removing a branch: call it
+  out as a behaviour change, keep a regression test for the prior behaviour, and
+  verify the new one. Config is the runtime source of truth, not the repo.
+- **Voice.** en-GB spelling everywhere; no em-dashes or en-dashes in user-facing
+  materials (use commas, colons, parentheses, or "8 to 12" for ranges). Code,
+  identifiers, and verbatim data are exempt.
+
 ## When to Use
 
 Every subagent invoked via `delegate_task` MUST complete these 5 gates before returning. This is mechanically enforced by the self-check-enforcer plugin which blocks ALL CLEAR claims when gates are violated.
@@ -271,6 +308,7 @@ TOOLSETS: [terminal, file, web, ...]
 
 - `verification-before-completion` — parent umbrella: the Iron Law gate protocol that this 5-gate protocol automates for subagent delegation tasks. The `self-check-enforcer` plugin (documented in this skill's `references/gate-enforcement-plugin.md`) mechanically enforces the gates. That reference covers the current (v3.7.1) hook map and features: split FAIL patterns, READY/NEEDS_WORK/BLOCKED verdict + BLOCKED escalation, `_final_validated` revalidation, done-claim bypass closure, and clearance tokens.
 - `engineering-principles` — cross-fleet verification principles and audit patterns that complement the 5-gate protocol.
+- `simplify-code`: the parallel 3-reviewer cleanup pass (reuse, quality, efficiency) that operationalises the "less code" and "no AI slop" principles from the Development Ethos above, with risk-tiered SAFE / CAREFUL / RISKY application.
 
 ## Reference Files
 

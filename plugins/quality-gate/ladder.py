@@ -68,12 +68,43 @@ def next_rung(current: Optional[str], ladder: List[str]) -> Optional[str]:
     return ladder[0]
 
 
-def initial_rung(ladder: List[str]) -> str:
-    """Starting rung, capped at len-2 so one escalation always remains."""
+def initial_rung_for_tier(ladder: List[str], tier: Optional[str]) -> str:
+    """Tier-aware starting rung, capped at len-2 so one escalation always remains.
+
+    quick    -> weakest rung   (ladder[0])
+    thorough -> near-top rung   (ladder[len-2], i.e. the cap)
+    standard -> middle rung      (ladder[min((len-1)//2, cap)])
+    Unknown / None tier         -> treated as standard.
+
+    The cap (len-2) guarantees the returned rung is never the very top when
+    len >= 2, so at least one escalation always remains.
+
+    NOTE (intentional, exercised by tests): for short ladders the tiers
+    compress. len==2 collapses all tiers onto ladder[0]; len==3 collapses
+    standard and thorough onto ladder[1]. Genuine 3-way differentiation needs
+    len >= 4.
+    """
     if not ladder:
         return ""
     cap_idx = max(0, len(ladder) - 2)
-    return ladder[cap_idx]
+    t = (tier or "").strip().lower()
+    if t == "quick":
+        idx = 0
+    elif t == "thorough":
+        idx = cap_idx
+    else:  # standard / unknown -> middle, never above the cap
+        idx = max(0, min((len(ladder) - 1) // 2, cap_idx))
+    return ladder[idx]
+
+
+def initial_rung(ladder: List[str]) -> str:
+    """Backward-compatible default starting rung (the 'thorough' rung).
+
+    Retained for existing callers/tests; delegates to ``initial_rung_for_tier``
+    so the cap logic has one source of truth. Identical ladder[len-2] semantics
+    to the pre-tier-aware version for every ladder length.
+    """
+    return initial_rung_for_tier(ladder, "thorough")
 
 
 def is_retriable(reason: Optional[str]) -> bool:

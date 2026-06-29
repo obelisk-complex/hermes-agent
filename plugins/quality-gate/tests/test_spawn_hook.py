@@ -27,7 +27,7 @@ def test_returns_initial_rung_override(tmp_workspace):
     out = spawn_hook.on_pre_kanban_spawn(
         task=_task(tmp_workspace), config=cfg, llm=_LLM("thorough"),
     )
-    assert out["model_override"] == "b"  # initial_rung capped one below top
+    assert out["model_override"] == "b"  # thorough on a 3-rung ladder: cap_idx=1 -> ladder[1]
     assert out["tier"] == "thorough"
 
 
@@ -68,3 +68,27 @@ def test_empty_ladder_returns_none_for_override(tmp_workspace):
         task=_task(tmp_workspace), config={"quality_gate": {"model_ladder": []}}, llm=_LLM("standard"),
     )
     assert "model_override" in out  # default ladder non-empty
+
+
+def test_quick_tier_starts_at_weakest_rung(tmp_workspace):
+    # Proves tier-awareness (not just the cap): quick starts at ladder[0], where
+    # thorough on the SAME 3-rung ladder starts at ladder[1] ("b").
+    cfg = {"quality_gate": {"model_ladder": ["a", "b", "c"]}}
+    out = spawn_hook.on_pre_kanban_spawn(
+        task=_task(tmp_workspace), config=cfg, llm=_LLM("quick"),
+    )
+    assert out["model_override"] == "a"
+    assert out["tier"] == "quick"
+
+
+def test_escalated_card_not_reset_on_respawn(tmp_workspace):
+    # Regression: a re-queued card that blocked_hook escalated already carries a
+    # model_override. The spawn hook must LEAVE it (returning None) rather than
+    # recompute the initial rung and reset the escalation back down, and must not
+    # re-classify (no tier sidecar written this call).
+    cfg = {"quality_gate": {"model_ladder": ["a", "b", "c"]}}
+    out = spawn_hook.on_pre_kanban_spawn(
+        task=_task(tmp_workspace, model_override="c"), config=cfg, llm=_LLM("quick"),
+    )
+    assert out is None
+    assert classify.read_tier(tmp_workspace) is None
