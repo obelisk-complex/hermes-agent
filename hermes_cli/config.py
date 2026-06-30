@@ -2416,6 +2416,18 @@ DEFAULT_CONFIG = {
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
+        # Fail CLOSED in non-interactive (cron/gateway) sessions when tirith is
+        # UNAVAILABLE (circuit breaker, missing binary, spawn failure, timeout,
+        # unexpected exit) so an unverified command is not silently allowed when
+        # no human is present to catch what the scanner missed. Interactive
+        # sessions, unsupported platforms, and tirith_enabled:false are
+        # unaffected. Trade-off: an attacker who can reliably stall tirith could
+        # trip the circuit breaker and block automation; set this false (or
+        # export TIRITH_NONINTERACTIVE_FAIL_CLOSED=0) to restore prior fail-open
+        # behaviour. NOTE: if tirith is not installed on a host, cron deny-mode
+        # jobs will block immediately after upgrade, so set this false there
+        # before upgrading.
+        "tirith_noninteractive_fail_closed": True,
         "website_blocklist": {
             "enabled": False,
             "domains": [],

@@ -1159,6 +1159,53 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+# Module-level key for the synthetic "tirith scanner unavailable" warning used
+# by the non-interactive fail-closed path. Kept as a constant so the smart-
+# approval and session-memory guards can match it exactly.
+TIRITH_UNAVAIL_KEY = "tirith:tirith-unavailable-noninteractive"
+
+
+def _noninteractive_failclosed_enabled() -> bool:
+    """Whether non-interactive (cron/gateway) sessions should fail CLOSED when
+    tirith is UNAVAILABLE. The env var wins (rollback escape hatch); otherwise
+    read config with a hardened default of True. Mirrors the config-load
+    pattern of _get_cron_approval_mode (note the ``default=`` KEYWORD — cfg_get
+    has a keyword-only ``default`` because ``*keys`` absorbs positionals)."""
+    env = os.getenv("TIRITH_NONINTERACTIVE_FAIL_CLOSED")
+    if env is not None:
+        return env.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        cfg = None
+    return bool(cfg_get(cfg, "security", "tirith_noninteractive_fail_closed", default=True))
+
+
+def _synth_tirith_unavailable_finding() -> dict:
+    """A surfaced 'warn' result standing in for an UNAVAILABLE tirith scan in a
+    non-interactive session, so the command is routed through approval instead
+    of being silently allowed. rule_id maps to TIRITH_UNAVAIL_KEY."""
+    return {
+        "action": "warn",
+        "findings": [
+            {
+                "rule_id": "tirith-unavailable-noninteractive",
+                "severity": "HIGH",
+                "title": "Tirith scanner unavailable",
+                "description": (
+                    "Tirith could not verify this command in a non-interactive "
+                    "session (scanner unavailable). Because "
+                    "security.tirith_noninteractive_fail_closed is on, it cannot "
+                    "be silently allowed. Approve only if you have verified the "
+                    "command is safe."
+                ),
+            }
+        ],
+        "summary": "Tirith unavailable (fail-closed)",
+    }
+
+
 def _strip_shell_comments(command: str) -> str:
     """Strip shell-style comments from a command before LLM assessment.
 
@@ -1627,6 +1674,34 @@ def check_all_command_guards(command: str, env_type: str,
                             "approvals.cron_mode: approve in config.yaml."
                         ),
                     }
+            # Fail CLOSED when tirith is UNAVAILABLE and cannot verify the
+            # command: no human is present in cron to catch what the scanner
+            # missed. We read ONLY the degraded flag; a genuine tirith verdict
+            # (degraded False) is intentionally left to detect_dangerous_command
+            # here (cron-side tirith blocking would be a separate change).
+            if _noninteractive_failclosed_enabled():
+                try:
+                    from tools.tirith_security import check_command_security
+                    degraded = bool(check_command_security(command).get("degraded"))
+                except ImportError:
+                    degraded = True  # module absent in a non-interactive session
+                if degraded:
+                    if _get_cron_approval_mode() == "deny":
+                        return {
+                            "approved": False,
+                            "message": (
+                                "BLOCKED: tirith scanner unavailable; this command "
+                                "could not be verified and cron has no user to "
+                                "approve it. Fix the tirith install, or set "
+                                "approvals.cron_mode: approve in config.yaml to "
+                                "allow unverified commands in cron jobs."
+                            ),
+                        }
+                    logger.warning(
+                        "tirith unavailable in cron session; allowing unverified "
+                        "command (cron_mode=approve): %s", command[:200],
+                    )
+                    # fall through to the allow below
         return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
@@ -1645,6 +1720,7 @@ def check_all_command_guards(command: str, env_type: str,
         # synthesize a warn result that will be surfaced to the user through the
         # normal approval flow.  Fixes #20733.
         _tirith_fail_open = True  # safe default if config is unreadable
+        _tirith_enabled = True    # if tirith is disabled, stay inert (no fail-closed)
         try:
             from hermes_cli.config import load_config as _load_cfg
             _sec = (_load_cfg() or {}).get("security", {}) or {}
@@ -1653,7 +1729,17 @@ def check_all_command_guards(command: str, env_type: str,
                 _tirith_fail_open = _sec.get("tirith_fail_open", True)
         except Exception:
             pass
-        if not _tirith_fail_open:
+        if (_tirith_enabled and _is_gateway_approval_context()
+                and _noninteractive_failclosed_enabled()):
+            # Non-interactive gateway, fail-closed: surface a non-memoisable
+            # "scanner unavailable" warning rather than silently allowing. The
+            # _tirith_enabled guard keeps tirith_enabled:false byte-for-byte
+            # unchanged (it would otherwise leave _tirith_fail_open True ->
+            # allow). Cron's ImportError is handled in the cron branch above.
+            tirith_result = _synth_tirith_unavailable_finding()
+        elif not _tirith_fail_open:
+            # Interactive (or knob-off) fail-closed: the EXISTING contract,
+            # left byte-for-byte unchanged.
             tirith_result = {
                 "action": "warn",
                 "findings": [
@@ -1671,7 +1757,17 @@ def check_all_command_guards(command: str, env_type: str,
                 ],
                 "summary": "Tirith unavailable (fail-closed)",
             }
-        # else: tirith_fail_open is True — allow as before (tirith_result stays "allow")
+        # else: tirith_fail_open is True (and not a fail-closed gateway) —
+        # allow as before (tirith_result stays "allow")
+
+    # Non-interactive gateway fail-closed: a degraded tirith allow (the scanner
+    # ran but could not actually verify — circuit breaker, timeout, missing
+    # path, unexpected exit) is turned into a surfaced warning so it is not
+    # silently allowed. The ImportError case is handled in the except clause
+    # above; cron is handled in the cron branch.
+    if (tirith_result.get("degraded") and _is_gateway_approval_context()
+            and _noninteractive_failclosed_enabled()):
+        tirith_result = _synth_tirith_unavailable_finding()
 
     # Dangerous command check (detection only, no approval)
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -1692,7 +1788,9 @@ def check_all_command_guards(command: str, env_type: str,
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result)
-        if not is_approved(session_key, tirith_key):
+        # The scanner-unavailable warning is never memoised: re-evaluate it on
+        # every command, even if a prior session approval exists for the key.
+        if tirith_key == TIRITH_UNAVAIL_KEY or not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
 
     if is_dangerous:
@@ -1707,7 +1805,10 @@ def check_all_command_guards(command: str, env_type: str,
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
-    if approval_mode == "smart":
+    if approval_mode == "smart" and not any(
+            key == TIRITH_UNAVAIL_KEY for key, _, _ in warnings):
+        # Never let the aux LLM auto-approve a command tirith could not verify:
+        # the scanner-unavailable warning forces a manual/gateway prompt.
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         verdict = _smart_approve(command, combined_desc_for_llm)
         if verdict == "approve":
@@ -1806,6 +1907,10 @@ def check_all_command_guards(command: str, env_type: str,
 
             # User approved — persist based on scope (same logic as CLI)
             for key, _, is_tirith in warnings:
+                if key == TIRITH_UNAVAIL_KEY:
+                    # Never memoise "scanner unavailable" — each unverifiable
+                    # command must re-prompt even after an approve.
+                    continue
                 if choice == "session" or (choice == "always" and is_tirith):
                     approve_session(session_key, key)
                 elif choice == "always":

@@ -206,6 +206,95 @@ class TestUnknownExitCode:
 
 
 # ---------------------------------------------------------------------------
+# Degraded flag — scanner UNAVAILABLE (consumed by approval.py fail-closed)
+# ---------------------------------------------------------------------------
+
+class TestDegradedFlag:
+    """When tirith cannot actually verify a command (circuit breaker, missing
+    path, spawn failure, timeout, unexpected exit) yet fail_open allows it, the
+    result must carry degraded=True so non-interactive callers can fail closed.
+    Genuine verdicts (exit 0/1/2), tirith_enabled False, and unsupported
+    platforms must NOT be flagged degraded — they are not 'scanner unavailable'."""
+
+    def test_circuit_breaker_marks_degraded(self):
+        with patch("tools.tirith_security._load_security_config",
+                   return_value={"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}):
+            _tirith_mod._circuit_open = True
+            result = check_command_security("echo hi")
+            assert result["action"] == "allow"
+            assert result.get("degraded") is True
+
+    @patch("tools.tirith_security._resolve_tirith_path", return_value=None)
+    @patch("tools.tirith_security._load_security_config")
+    def test_path_none_fail_open_marks_degraded(self, mock_cfg, mock_resolve):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        result = check_command_security("echo hi")
+        assert result["action"] == "allow"
+        assert result.get("degraded") is True
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_spawn_oserror_fail_open_marks_degraded(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        mock_run.side_effect = FileNotFoundError("No such file: tirith")
+        result = check_command_security("echo hi")
+        assert result["action"] == "allow"
+        assert result.get("degraded") is True
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_timeout_fail_open_marks_degraded(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="tirith", timeout=5)
+        result = check_command_security("slow command")
+        assert result["action"] == "allow"
+        assert result.get("degraded") is True
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_unexpected_exit_fail_open_marks_degraded(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        mock_run.return_value = _mock_run(99, "")
+        result = check_command_security("cmd")
+        assert result["action"] == "allow"
+        assert result.get("degraded") is True
+
+    # --- genuine outcomes must NOT be flagged degraded ---
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_exit_0_allow_not_degraded(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        mock_run.return_value = _mock_run(0, _json_stdout())
+        result = check_command_security("echo hi")
+        assert result["action"] == "allow"
+        assert not result.get("degraded")
+
+    @patch("tools.tirith_security._load_security_config")
+    def test_disabled_not_degraded(self, mock_cfg):
+        mock_cfg.return_value = {"tirith_enabled": False, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        result = check_command_security("rm -rf /")
+        assert result["action"] == "allow"
+        assert not result.get("degraded")
+
+    @patch("tools.tirith_security._load_security_config")
+    def test_unsupported_platform_not_degraded(self, mock_cfg):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        with patch("tools.tirith_security.is_platform_supported", return_value=False):
+            result = check_command_security("rm -rf /")
+            assert result["action"] == "allow"
+            assert not result.get("degraded")
+
+
+# ---------------------------------------------------------------------------
 # Disabled + path expansion
 # ---------------------------------------------------------------------------
 

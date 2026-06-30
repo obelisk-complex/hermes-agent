@@ -750,7 +750,7 @@ def check_command_security(command: str) -> dict:
     # → fail-open → agent retry loop, hanging the user for 20+ minutes
     # (issue #41400).
     if _circuit_open:
-        return {"action": "allow", "findings": [], "summary": "tirith disabled (circuit breaker)"}
+        return {"action": "allow", "findings": [], "summary": "tirith disabled (circuit breaker)", "degraded": True}
 
     # Unsupported platform (Windows etc.) — tirith has no binary here and
     # never will. Skip the resolver entirely so we don't even try to spawn.
@@ -768,7 +768,7 @@ def check_command_security(command: str) -> dict:
             "tirith path resolved to None; scanning disabled",
         )
         if fail_open:
-            return {"action": "allow", "findings": [], "summary": "tirith path unavailable"}
+            return {"action": "allow", "findings": [], "summary": "tirith path unavailable", "degraded": True}
         return {"action": "block", "findings": [], "summary": "tirith path unavailable (fail-closed)"}
 
     try:
@@ -791,7 +791,7 @@ def check_command_security(command: str) -> dict:
         _warn_once(spawn_key, "tirith spawn failed: %s", exc)
         _record_tirith_crash()
         if fail_open:
-            return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
+            return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}", "degraded": True}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
     except subprocess.TimeoutExpired:
         _warn_once(
@@ -801,7 +801,7 @@ def check_command_security(command: str) -> dict:
         )
         _record_tirith_crash()
         if fail_open:
-            return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
+            return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)", "degraded": True}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
 
     # Map exit code to action
@@ -820,7 +820,7 @@ def check_command_security(command: str) -> dict:
         logger.warning("tirith returned unexpected exit code %d", exit_code)
         _record_tirith_crash()
         if fail_open:
-            return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
+            return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)", "degraded": True}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}
 
     # Parse JSON for enrichment (never overrides the exit code verdict)
