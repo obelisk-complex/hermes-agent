@@ -94,3 +94,22 @@ def test_transport_exception_is_surfaced_not_swallowed():
     r = asyncio.run(client.call(SUB, "t1", "solve", "KEY", "https://gw/v1", boom,
                                 retry_on_cache_hit=False))
     assert not r.ok and "ConnectionError" in r.error
+
+
+def test_payload_merges_reasoning_extras_when_present():
+    extras = {"thinking": {"type": "enabled"}}
+    p = client.build_payload(SUB, "do x", "N", reasoning_extras=extras)
+    assert p["thinking"] == {"type": "enabled"}
+
+
+def test_payload_has_no_thinking_key_without_reasoning_extras():
+    p = client.build_payload(SUB, "do x", "N")
+    assert "thinking" not in p
+
+
+def test_payload_does_not_alias_reasoning_extras_inner_dict():
+    # M2: a future per-call mutation of the payload must not corrupt the shared registry literal.
+    extras = {"thinking": {"type": "enabled"}}
+    p = client.build_payload(SUB, "x", "n", reasoning_extras=extras)
+    p["thinking"]["mutated"] = True
+    assert extras == {"thinking": {"type": "enabled"}}  # source dict untouched (deep copy)

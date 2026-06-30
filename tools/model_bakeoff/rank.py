@@ -7,6 +7,7 @@ pinned last, matching what load_ladder()/next_rung() in the quality-gate expect.
 """
 from __future__ import annotations
 
+from math import floor
 from typing import Iterable, Optional
 
 from .models import LadderResult, ModelAggregate
@@ -21,6 +22,25 @@ def wilson_ci(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
     centre = (p + z * z / (2 * n)) / denom
     half = (z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / denom
     return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def detect_contamination(pass_counts: dict[str, int],
+                         attempted_counts: dict[str, int]) -> list[str]:
+    """Flag tasks a suspiciously large share of models passed perfectly (SPEC §4).
+
+    A task is flagged when at least ``max(2, floor(0.75 * n_attempted))`` models passed it
+    perfectly, where ``n_attempted`` is per task: the number of models with at least one
+    successful (non-error) run on THAT task. A task with fewer than 2 attempters cannot be
+    judged and is never flagged. Returned sorted for stable reports.
+    """
+    flagged = []
+    for tid, attempted in attempted_counts.items():
+        if attempted < 2:
+            continue
+        threshold = max(2, floor(0.75 * attempted))
+        if pass_counts.get(tid, 0) >= threshold:
+            flagged.append(tid)
+    return sorted(flagged)
 
 
 def _strongest_key(a: ModelAggregate):
@@ -59,12 +79,21 @@ def assemble(
     if ceiling_key:
         ladder = [k for k in ladder if k != ceiling_key] + [ceiling_key]
 
+    excluded = sorted(a.model_key for a in rows
+                      if a.model_key != ceiling_key and a.pass_fraction < bar)
+
     notes = [
         "Reasoning and non-reasoning models are ranked in separate groups; do not compare across groups.",
         "Ladder is weakest-first (pass_fraction ascending).",
     ]
     if ceiling_key:
         notes.append(f"{ceiling_key} pinned last as the declared ceiling.")
+    if excluded:
+        notes.append(f"{len(excluded)} model(s) excluded from the ladder "
+                     f"(pass_fraction < {bar:.2f}): {', '.join(excluded)}.")
+    if len(ladder) <= 1:
+        notes.append("WARNING: the ladder has <= 1 entry after bar exclusions; the quality "
+                     "gate has no escalation path below the ceiling.")
     if pairs:
         notes.append(f"{len(pairs)} pair(s) statistically indistinguishable (overlapping 95% CIs).")
 

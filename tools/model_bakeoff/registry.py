@@ -11,15 +11,20 @@ from .models import ModelSpec
 
 ROSTER: list[ModelSpec] = [
     # --- opencode-go: subscription, $0 marginal ---
+    # reasoning_extras mirrors OpenCodeGoProfile's deepseek-v* thinking payload (shared
+    # literal; do not mutate). kimi/qwen3.5 reason in-band, zen models at server default,
+    # so those carry reasoning_extras=None and rely on the gateway default.
     ModelSpec(
         key="deepseek-v4-flash", gateway="opencode-go", wire_id="deepseek-v4-flash",
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=240,
+        reasoning_extras={"thinking": {"type": "enabled"}},
     ),
     ModelSpec(
         key="deepseek-v4-pro", gateway="opencode-go", wire_id="deepseek-v4-pro",
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=240, verify_wire_id=True,
+        reasoning_extras={"thinking": {"type": "enabled"}},
     ),
     ModelSpec(
         key="glm-5.1", gateway="opencode-go", wire_id="glm-5.1",

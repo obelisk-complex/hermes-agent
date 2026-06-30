@@ -14,6 +14,7 @@ Integrity-relevant behaviour:
 """
 from __future__ import annotations
 
+import copy
 import time
 import uuid
 from typing import Awaitable, Callable, Optional
@@ -54,7 +55,7 @@ def build_payload(spec: ModelSpec, prompt: str, nonce: str,
     if not spec.omit_temp:
         payload["temperature"] = 0
     if reasoning_extras:
-        payload.update(reasoning_extras)
+        payload.update(copy.deepcopy(reasoning_extras))  # deep copy: never alias the shared registry dict
     return payload
 
 

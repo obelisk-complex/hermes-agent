@@ -5,6 +5,7 @@ from tools.model_bakeoff import scorer
 from tools.model_bakeoff.models import (
     ERR_COLLECTION,
     ERR_EXTRACTION,
+    ERR_OUTPUT_CAP,
     ERR_TEST_FAIL,
     ERR_TIMEOUT,
     ExtractionResult,
@@ -68,3 +69,15 @@ def test_missing_sandbox_is_collection_error():
     r = _score(OK_EXTRACTION, None)
     assert not r.passed
     assert r.error_type == ERR_COLLECTION
+
+
+def test_truncated_output_is_its_own_error_not_test_failure():
+    # a SIGXFSZ kill has a non-zero returncode that would otherwise read as ERR_TEST_FAIL
+    r = _score(OK_EXTRACTION, SandboxResult(returncode=-25, truncated=True, stdout="AAAA"))
+    assert not r.passed
+    assert r.error_type == ERR_OUTPUT_CAP
+
+
+def test_timeout_takes_precedence_over_truncation():
+    r = _score(OK_EXTRACTION, SandboxResult(returncode=-9, timed_out=True, truncated=True))
+    assert r.error_type == ERR_TIMEOUT

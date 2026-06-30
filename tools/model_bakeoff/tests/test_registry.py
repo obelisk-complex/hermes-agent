@@ -51,6 +51,13 @@ def test_deepseek_v4_flash_is_thinking_with_temp_omitted():
     assert m.omit_temp is True
 
 
+def test_deepseek_models_carry_thinking_reasoning_extras():
+    # SPEC §3 run-blocker B (coverage/regression): deepseek thinking models must send the
+    # thinking-enable control; guards a future refactor silently stripping the field.
+    for key in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        assert registry.by_key(key).reasoning_extras == {"thinking": {"type": "enabled"}}
+
+
 def test_minimax_m3_requires_preflight_live_test():
     # SPEC §3 PM4: zen routing for MiniMax M3 is unverified -> live-test at preflight.
     assert registry.by_key("minimax-m3").preflight_live_test is True

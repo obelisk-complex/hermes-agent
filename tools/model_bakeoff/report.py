@@ -49,6 +49,12 @@ def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0) -
         out += ["", "## Statistically indistinguishable (overlapping 95% CIs)"]
         out += [f"- {a} vs {b}" for a, b in result.indistinguishable_pairs]
 
+    out += ["", "## Contamination flags"]
+    if result.contamination_flags:
+        out += [f"- {tid}" for tid in result.contamination_flags]
+    else:
+        out += ["- none detected"]
+
     out += ["", "## Notes"] + [f"- {n}" for n in result.notes]
     return "\n".join(out) + "\n"
 
@@ -73,6 +79,7 @@ def render_summary(result: LadderResult, run_id: str = "", n_tasks: int = 0,
         ],
         "indistinguishable_pairs": [list(p) for p in result.indistinguishable_pairs],
         "notes": result.notes,
+        "contamination_flags": list(result.contamination_flags),
     }
 
 

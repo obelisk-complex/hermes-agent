@@ -12,6 +12,7 @@ from typing import Optional
 from .models import (
     ERR_COLLECTION,
     ERR_EXTRACTION,
+    ERR_OUTPUT_CAP,
     ERR_TEST_FAIL,
     ERR_TIMEOUT,
     ExtractionResult,
@@ -47,6 +48,10 @@ def score(
     if sandbox.timed_out:
         return ScoreResult(model_key, task_id, passed=False, error_type=ERR_TIMEOUT,
                            detail=f"timed out after {sandbox.duration_s:.1f}s")
+
+    if sandbox.truncated:
+        return ScoreResult(model_key, task_id, passed=False, error_type=ERR_OUTPUT_CAP,
+                           detail="output exceeded the per-stream size cap")
 
     if sandbox.returncode == 0:
         return ScoreResult(model_key, task_id, passed=True, error_type=None)

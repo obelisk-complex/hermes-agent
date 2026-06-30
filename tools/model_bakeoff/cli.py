@@ -16,6 +16,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -133,11 +134,52 @@ def _persist_raw(raw_dir, spec, tr):
         }, f, indent=2)
 
 
-async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transport):
+def _accumulate_task_counts(all_runs, pass_counts, attempted_counts):
+    """Fold one model's runs into the per-task contamination tallies (SPEC §4). The model
+    counts as having attempted a task if it produced >= 1 successful (non-error) run of it,
+    and as perfectly passing it only if EVERY run of it passed."""
+    by_task: dict = {}
+    for tr in all_runs:
+        by_task.setdefault(tr.call.task_id, []).append(tr)
+    for tid, trs in by_task.items():
+        if any(tr.call.ok for tr in trs):
+            attempted_counts[tid] = attempted_counts.get(tid, 0) + 1
+            if all(tr.score.passed for tr in trs):
+                pass_counts[tid] = pass_counts.get(tid, 0) + 1
+
+
+# A genuine in-band reasoning trace is a CLOSED block, not a bare tag in prose/code (M1): require a
+# matching </think> etc. so `# parses <think> elements` is not mistaken for reasoning.
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>[\s\S]*?</\1>", re.IGNORECASE)
+
+
+def _showed_reasoning(call) -> bool:
+    """True if a call shows reasoning as structured thinking tokens OR a CLOSED in-band
+    <think>...</think> block. deepseek reports via tokens; kimi/qwen3.5 in-band (closed tags)."""
+    if call.thinking_tokens > 0:
+        return True
+    return bool(_THINK_BLOCK.search(call.raw_response or ""))
+
+
+def _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes):
+    """Per-model post-processing run on BOTH the normal and budget-stop exit paths:
+    accumulate contamination tallies, and fail loud if a reasoning model never showed any
+    reasoning across its successful runs (covers subscription models the probe skips)."""
+    _accumulate_task_counts(all_runs, pass_counts, attempted_counts)
+    ok_runs = [tr for tr in all_runs if tr.call.ok]
+    if spec.reasoning and ok_runs and not any(_showed_reasoning(tr.call) for tr in ok_runs):
+        notes.append(f"WARNING: reasoning model {spec.key} showed no thinking tokens or "
+                     f"<think> blocks across {len(ok_runs)} successful run(s); it may not be "
+                     "reasoning. Verify the gateway reasoning controls.")
+
+
+async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transport,
+                      bar=0.8, sandbox_timeout=60):
     os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
     raw_dir = os.path.join(out_dir, "raw")
     budget = runner.BudgetTracker(budget_usd)
     aggregates, ping, notes = [], {}, []
+    pass_counts, attempted_counts = {}, {}
     for spec in models:
         conn = gateways.resolve(spec.gateway, env)
         if not conn.ok:
@@ -147,23 +189,35 @@ async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transpor
         try:
             for _ in range(repeats):
                 runs, warmups = await runner.run_model(
-                    spec, tasks, conn.api_key, conn.base_url, transport, budget=budget)
+                    spec, tasks, conn.api_key, conn.base_url, transport,
+                    budget=budget, sandbox_timeout=sandbox_timeout)
                 all_runs += runs
                 if warmups and spec.key not in ping:
                     ping[spec.key] = warmups[0].total_latency_s
         except runner.BudgetExceeded as exc:
+            all_runs += getattr(exc, "partial_runs", [])  # M3: keep the costed runs from the stopped pass
+            warmups = getattr(exc, "partial_warmups", [])
+            if warmups and spec.key not in ping:
+                ping[spec.key] = warmups[0].total_latency_s
             notes.append(f"BUDGET STOP at {spec.key}: {exc}")  # fail loud, keep partial
             for tr in all_runs:
                 _persist_raw(raw_dir, spec, tr)
             if all_runs:
                 aggregates.append(runner.aggregate(spec, all_runs))
+            _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes)
             break
         for tr in all_runs:
             _persist_raw(raw_dir, spec, tr)
         aggregates.append(runner.aggregate(spec, all_runs))
+        _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes)
 
     ceil = registry.ceiling()
-    result = rank.assemble(aggregates, ceiling_key=ceil.key if ceil else None)
+    result = rank.assemble(aggregates, ceiling_key=ceil.key if ceil else None, bar=bar)
+    result.contamination_flags = rank.detect_contamination(pass_counts, attempted_counts)
+    if result.contamination_flags:
+        notes.append("CONTAMINATION: tasks passed perfectly by >= 75% of healthy testers; "
+                     "review or exclude before trusting the ladder: "
+                     f"{', '.join(result.contamination_flags)}.")
     result.notes.extend(notes)
     run_id = os.path.basename(out_dir.rstrip("/"))
     _write(os.path.join(out_dir, "report.md"), report.render_report_md(result, run_id, len(tasks)))
@@ -185,7 +239,9 @@ def cmd_run(args, env=None, transport=None) -> int:
     tasks, models = corpus.load(), _select(args.models)
     out_dir = args.out or os.path.join(os.path.dirname(__file__), "runs", _run_id())
     os.makedirs(out_dir, exist_ok=True)
-    result, spent = asyncio.run(run_bakeoff(models, tasks, env, out_dir, args.budget, args.repeats, transport))
+    result, spent = asyncio.run(run_bakeoff(
+        models, tasks, env, out_dir, args.budget, args.repeats, transport,
+        bar=getattr(args, "bar", 0.8), sandbox_timeout=getattr(args, "sandbox_timeout", 60)))
     print(f"wrote {out_dir}  (metered spend ${spent:.4f})")
     print(f"ladder: {' -> '.join(result.ladder)}")
     return 0
@@ -201,7 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("estimate")
     e.add_argument("--models", default="")
-    e.add_argument("--repeats", type=int, default=3)
+    e.add_argument("--repeats", type=int, default=1,
+                   help="repetitions per task (default 1; use 3+ for tighter CIs at higher cost)")
     e.add_argument("--budget", type=float, default=10.0)
     e.set_defaults(func=cmd_estimate)
 
@@ -211,8 +268,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("run")
     r.add_argument("--models", default="")
-    r.add_argument("--repeats", type=int, default=3)
+    r.add_argument("--repeats", type=int, default=1,
+                   help="repetitions per task (default 1; use 3+ for tighter CIs at higher cost)")
     r.add_argument("--budget", type=float, default=10.0)
+    r.add_argument("--bar", type=float, default=0.8,
+                   help="min pass_fraction to keep a model in the ladder (SPEC §4 standard/thorough)")
+    r.add_argument("--sandbox-timeout", type=int, default=60,
+                   help="per-task sandbox wall-clock timeout in seconds")
     r.add_argument("--out", default="")
     r.set_defaults(func=cmd_run)
     return p

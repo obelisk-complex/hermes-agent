@@ -47,3 +47,24 @@ def test_summary_json_roundtrips_and_carries_ladder():
     assert data["ladder"][-1] == "opus"
     assert data["n_tasks"] == 10
     assert any(m["key"] == "strong" for m in data["models"])
+
+
+def test_report_md_renders_contamination_section_when_flagged():
+    res = _result()
+    res.contamination_flags = ["quick-rle"]
+    md = report.render_report_md(res, n_tasks=10)
+    assert "## Contamination flags" in md
+    assert "- quick-rle" in md
+
+
+def test_report_md_contamination_says_none_detected_when_empty():
+    md = report.render_report_md(_result(), n_tasks=10)
+    assert "## Contamination flags" in md
+    assert "none detected" in md
+
+
+def test_summary_json_carries_contamination_flags():
+    res = _result()
+    res.contamination_flags = ["t1"]
+    data = json.loads(report.render_summary_json(res, run_id="r", n_tasks=10, budget_spent=0.0))
+    assert data["contamination_flags"] == ["t1"]

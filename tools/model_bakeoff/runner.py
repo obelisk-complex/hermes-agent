@@ -17,7 +17,13 @@ from .models import ERR_CALL, CallResult, ModelAggregate, ModelSpec, ScoreResult
 
 
 class BudgetExceeded(Exception):
-    """Raised when cumulative metered spend would exceed the hard cap (SPEC §8)."""
+    """Raised when cumulative metered spend would exceed the hard cap (SPEC §8). Carries the
+    stopped model's already-completed runs/warmups so the caller persists them (SPEC §8, M3)."""
+
+    def __init__(self, *args, partial_runs=None, partial_warmups=None):
+        super().__init__(*args)
+        self.partial_runs = list(partial_runs or [])
+        self.partial_warmups = list(partial_warmups or [])
 
 
 class BudgetTracker:
@@ -54,7 +60,8 @@ def _read(path: str) -> str:
 async def run_one(spec: ModelSpec, task: TaskSpec, api_key: str, base_url: str,
                   transport, sandbox_timeout: Optional[int] = None) -> TaskRun:
     prompt = _read(task.prompt_path)
-    call = await client.call(spec, task.task_id, prompt, api_key, base_url, transport)
+    call = await client.call(spec, task.task_id, prompt, api_key, base_url, transport,
+                             reasoning_extras=spec.reasoning_extras)
     if not call.ok:
         return TaskRun(call, ScoreResult(spec.key, task.task_id, passed=False,
                                          error_type=ERR_CALL, detail=call.error))
@@ -64,7 +71,7 @@ async def run_one(spec: ModelSpec, task: TaskSpec, api_key: str, base_url: str,
     sb = None
     if not ext.failed:
         sb = sandbox.run(ext.code, task.oracle_path,
-                         timeout_s=sandbox_timeout or spec.api_timeout_s)
+                         timeout_s=sandbox_timeout if sandbox_timeout is not None else 60)
     return TaskRun(call, scorer.score(spec.key, task.task_id, ext, sb))
 
 
@@ -85,9 +92,14 @@ async def run_model(spec: ModelSpec, tasks: list[TaskSpec], api_key: str, base_u
     runs: list[TaskRun] = []
     for task in tasks:
         tr = await run_one(spec, task, api_key, base_url, transport, sandbox_timeout)
+        runs.append(tr)  # keep the costed run BEFORE the budget check (M3: partials survive a stop)
         if spec.is_metered and budget is not None:
-            budget.add(tr.call.cost_usd)  # may raise BudgetExceeded
-        runs.append(tr)
+            try:
+                budget.add(tr.call.cost_usd)  # may raise BudgetExceeded
+            except BudgetExceeded as exc:
+                exc.partial_runs = runs
+                exc.partial_warmups = warmups
+                raise
     return runs, warmups
 
 

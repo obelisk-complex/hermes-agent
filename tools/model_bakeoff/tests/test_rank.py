@@ -58,3 +58,27 @@ def test_bar_excludes_failing_models_from_ladder():
     res = rank.assemble(aggs, ceiling_key="ceil", bar=0.5)
     assert "bad" not in res.ladder
     assert res.ladder == ["good", "ceil"]
+
+
+def test_detect_contamination_flags_by_per_task_threshold():
+    # n_attempted=4 => threshold = max(2, floor(3.0)) = 3
+    assert rank.detect_contamination({"leaky": 3, "ok": 2}, {"leaky": 4, "ok": 4}) == ["leaky"]
+    # n_attempted=2 => threshold = 2
+    assert rank.detect_contamination({"t": 2}, {"t": 2}) == ["t"]
+    assert rank.detect_contamination({"t": 1}, {"t": 2}) == []
+    # fewer than 2 attempters can never be judged
+    assert rank.detect_contamination({"t": 1}, {"t": 1}) == []
+    assert rank.detect_contamination({}, {}) == []
+
+
+def test_detect_contamination_returns_sorted():
+    assert rank.detect_contamination({"b": 4, "a": 4}, {"b": 4, "a": 4}) == ["a", "b"]
+
+
+def test_assemble_notes_bar_exclusion_and_degenerate_ladder():
+    aggs = [agg("bad1", 1, 10), agg("bad2", 2, 10), agg("ceil", 10, 10, reasoning=False)]
+    res = rank.assemble(aggs, ceiling_key="ceil", bar=0.8)
+    assert res.ladder == ["ceil"]                       # every non-ceiling model excluded
+    joined = " ".join(res.notes)
+    assert "excluded" in joined and "bad1" in joined and "bad2" in joined
+    assert any("<= 1 entry" in n for n in res.notes)    # fail-loud degenerate-ladder warning

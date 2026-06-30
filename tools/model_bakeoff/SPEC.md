@@ -1,8 +1,24 @@
-# Model Bakeoff — spec & plan (v3, post-audit round 2)
+# Model Bakeoff — spec & plan (v4, post-build run-blocker conformance)
 
 Date: 2026-06-29. Repo: hermes-agent fork, branch `feat/model-bakeoff`.
-Status: PLAN v3 — round-1 (major) and round-2 (narrow) findings folded in. Round 2
-returned 0 CRITICAL / 0 HIGH from both auditors. Awaiting re-audit PASS before code.
+Status: BUILT. A post-build conformance re-audit (#8) found the implementation sound on the
+core but missing/weak on five run-blocking axes (A to E); those are now fixed under TDD and
+re-audited. A follow-up hardening pass then closed four correctness findings ON the fixes
+themselves (M1-M3, L1; see §15) under the same plan->audit->TDD discipline. 101 offline tests
+green. Six should-fix + five low findings are DEFERRED and tracked in §15. The v3 plan history
+is retained below for traceability.
+
+**Run-blocker fixes folded into this spec (A to E):**
+- **A — contamination detection** uses a per-task denominator (`n_attempted`, not a
+  roster-wide `n_healthy`); see §4.
+- **B — reasoning controls** are sent via a per-model `reasoning_extras` registry field
+  (DeepSeek thinking models carry `{"thinking": {"type": "enabled"}}`); a zero-reasoning run
+  by a reasoning model is flagged loud; see §3/§5.
+- **C — bar exclusion** drops sub-bar models from the ladder and warns loudly when the
+  ladder collapses to <= 1 entry; see §2/§4.
+- **D — sandbox hardening:** the in-sandbox timeout is decoupled from `api_timeout_s`
+  (default 60s), with a per-stream output cap and a best-effort child heap cap; see §6.
+- **E — `--repeats` default is 1** (was 3), matching the N=1 ladder semantics; see §5.
 
 ## 1. Goal / end state
 A reproducible dev-tool harness that runs a fixed roster of LLMs over a curated,
@@ -61,6 +77,17 @@ Explicit flags so the client never guesses. Wire ids `(verify)` confirmed at pre
   loud note** (contingency: a direct MiniMax key could be added later). No silent drop.
 - **Kimi routing (A-H7):** opencode-go (not zen); existing `_is_kimi_k2_model` +
   `OpenCodeGoProfile` carry the Moonshot thinking controls. Verified at preflight.
+- **Reasoning controls mechanism (run-blocker B):** each `ModelSpec` carries an optional
+  `reasoning_extras` dict that `client.build_payload` DEEP-copies into the request body (never
+  aliasing the shared registry literal, so a future per-call field cannot corrupt it; M2). DeepSeek
+  V4 Flash/Pro set `{"thinking": {"type": "enabled"}}`, MIRRORING `OpenCodeGoProfile`'s
+  behaviour for deepseek thinking models. It is mirrored as an explicit registry literal,
+  NOT imported, because that provider plugin lives in a hyphenated, non-importable dir
+  (`plugins/model-providers/opencode-zen/`). Kimi K2.6 and Qwen 3.5 reason IN-BAND via
+  `<think>` tags (no structured reasoning-token controls) so they carry no `reasoning_extras`;
+  the zero-reasoning guard (§5) therefore treats a CLOSED `<think>...</think>` block OR
+  `thinking_tokens > 0` as evidence of reasoning (a bare `<think>` substring in code/prose does
+  NOT count; M1) to avoid both a false alarm and a silent miss on those two.
 
 ## 4. Corpus (tasks/)
 ~20 **original** coding tasks (not copied from public benchmarks), each = `prompt.md`
@@ -73,10 +100,13 @@ thorough. Bar: quick = all pass; standard/thorough >= 0.8.
   many diverse, seeded inputs** so a hardcoded-expected-value stub cannot pass; combined
   with oracle isolation (§6) this defeats both extraction and memorisation. (Property-
   based testing noted as an optional future enhancement, gated behind an opt-in extra.)
-- **Contamination detection (B-M/PM):** after a run, flag any task where
-  **>= floor(0.75 * n_healthy) (min 2)** models score perfect — a fraction, not a fixed
-  count, so it still fires when models fail preflight. Flagged tasks -> manual review /
-  exclusion from ladder derivation.
+- **Contamination detection (B-M/PM; run-blocker A):** after a run, flag any task where
+  **>= max(2, floor(0.75 * n_attempted))** models score perfect, where `n_attempted` is the
+  count of models that produced a usable (non-call-error) run **for that specific task** — a
+  PER-TASK denominator, not a roster-wide `n_healthy`, so a model that errored on this task
+  does not dilute the threshold. Tasks with < 2 attempters are never flagged. Flagged tasks
+  -> manual review / exclusion from ladder derivation; the report always carries a
+  "Contamination flags" section ("none detected" when empty).
 
 ## 5. Components (one module each; offline unit tests, zero API calls)
 - `env_loader` — **reuse** `hermes_cli/env_loader.py:load_hermes_dotenv()` to load
@@ -92,14 +122,23 @@ thorough. Bar: quick = all pass; standard/thorough >= 0.8.
   controls (not temperature) reuse `profile.build_api_kwargs_extras`.
 - `extractor.py` — code from prose+fences: ```python -> ``` any -> whole response;
   empty => `extraction_failed=True`, score 0, flagged distinct from "wrong answer".
-- `sandbox.py` — runs extracted code vs oracle in an isolated subprocess (§6).
+- `sandbox.py` — runs extracted code vs oracle in an isolated subprocess (§6); the
+  wall-clock timeout (default 60s, run-blocker D) is decoupled from the model's
+  `api_timeout_s`; output is file-backed and per-stream capped (no in-memory balloon).
 - `scorer.py` — parses pytest; distinguishes collection/import/syntax **error**
-  (non-zero exit, no results) from genuine test failures -> `error_type`.
-- `runner.py` — orchestrates roster x corpus (N default 1); per-gateway ping baseline;
-  **per-model warm-up immediately before that model's batch** (§10); budget enforcement;
-  writes all artifacts.
-- `rank.py` — §2 formula -> report (Wilson 95% CIs) + `ladder.yaml` (weakest-first, §2/§9).
-- `cli.py` — `validate-oracles`, `preflight`, `estimate`, `run`, `report`.
+  (non-zero exit, no results) from genuine test failures -> `error_type`; a capped/truncated
+  sandbox run maps to `ERR_OUTPUT_CAP` (checked after timeout, before returncode).
+- `runner.py` — orchestrates roster x corpus (N default 1); threads each model's
+  `reasoning_extras` into the call (run-blocker B); passes a fixed `sandbox_timeout`
+  (default 60s, run-blocker D), NOT the API timeout; per-gateway ping baseline; **per-model
+  warm-up immediately before that model's batch** (§10); budget enforcement; writes artifacts.
+- `rank.py` — §2 formula -> report (Wilson 95% CIs) + `ladder.yaml` (weakest-first, §2/§9);
+  `detect_contamination` (§4) and the bar-exclusion + degenerate-ladder notes (run-blocker C).
+- `cli.py` — `validate-oracles`, `preflight`, `estimate`, `run`. `--repeats` defaults to **1**
+  (run-blocker E; N=1 ladder semantics); `run` also exposes `--bar` (default 0.8,
+  ladder-inclusion threshold) and `--sandbox-timeout` (default 60s). A zero-reasoning run by a
+  reasoning model emits a loud per-model WARNING note. (A `report` re-render subcommand is
+  deferred, §15.)
 
 ## 6. Security — untrusted model code (CRITICAL)
 Separate subprocess; fresh temp dir; `env` scrubbed to a minimal allowlist (NO
@@ -109,6 +148,18 @@ importlib`, rootdir outside the writable temp dir, `--ignore-glob` for model-aut
 `test_*.py` so only the oracle is collected. Best-effort network denial; documented as
 NOT a hard boundary (no root on WSL); tasks need no net/fs, so a solution touching either
 is itself flagged.
+- **Resource caps (run-blocker D):** child stdout/stderr go to FILES (not pipes), so a
+  runaway writer can neither deadlock the parent nor balloon parent memory; each stream is
+  read back at most `MAX_OUTPUT_BYTES` (1 MB) and flagged `truncated` (-> `ERR_OUTPUT_CAP`)
+  when capped. A POSIX `preexec_fn` sets `RLIMIT_FSIZE` (1 MB per file) and best-effort
+  `RLIMIT_AS` (1 GB child heap; verified to pass a normal pytest run, blocks a 2 GB alloc).
+  The wall-clock timeout is a fixed `sandbox_timeout` (default 60s), decoupled from the
+  per-model `api_timeout_s`.
+- **Residual limits (best-effort, NOT closed):** `RLIMIT_FSIZE` bounds a SINGLE file, not
+  total disk — a child can still write many sub-cap files. On kernels where `SIGXFSZ` is
+  ignored/handled, an oversized write surfaces as `EFBIG` (the file is capped, the process
+  continues) rather than a kill, so `truncated` may not latch on that path. `RLIMIT_AS` is
+  POSIX-only and assumes the pure-python corpus (no heavy native imports needing > 1 GB).
 
 ## 7. Auth / secrets
 Reuse `~/.hermes/.env` via `env_loader` (three keys verified present + active). No new
@@ -123,8 +174,10 @@ secrets; tokens never written to `runs/` or logs. Missing key => preflight fails
   (default 4.0)** to the completion budget (PM/BM) so projected $ and time are not a 2x
   underestimate; the multiplier is labelled and adjustable. Also report the expected
   **Wilson CI width** for the chosen N + corpus size before any spend.
-- `run` enforces a HARD cap (default $10) on Zen cost; abort loud if exceeded (partials
-  persisted). Per-model `max_tok` bounds worst-case completion.
+- `run` enforces a HARD cap (default $10) on Zen cost; abort loud if exceeded. The stopped
+  model's already-completed task runs are carried out on the `BudgetExceeded` exception
+  (`partial_runs`) and persisted + counted, so a budget-stop never silently discards partials
+  even with the repeats=1 default (M3). Per-model `max_tok` bounds worst-case completion.
 
 ## 9. Persistence (never generate-judge-discard)
 To `runs/<run-id>/`: per (model,task) raw prompt (with nonce), raw response, extracted
@@ -203,3 +256,35 @@ explicit rank formula (§2); extractor.py (§5); Kimi->go routing (§3); ladder 
 validate-oracles gate (§4/§10); api_timeout (§3); cache-busting (§5); oracle isolation (§6);
 reasoning/non-reasoning split + thinking_tokens (§2/§3/§5/§9); TTFT+ping (§5/§9); Wilson
 CIs (§8/§9/§13); ToS framing (§13); error_type vs test-fail (§5).
+
+## 15. Deferred (post-run-blocker conformance, tracked)
+The #8 conformance re-audit confirmed the core sound and flagged ten non-run-blocking items.
+Per an explicit decision, only the five run-blockers (A to E) were fixed; the following are
+DEFERRED and recorded here so a future re-audit treats them as KNOWN, not new. A later
+hardening pass then fixed four correctness findings ON the run-blocker fixes themselves
+(M1 reasoning-guard substring false-positive, M2 reasoning_extras aliasing, M3 lost partials
+on budget-stop, L1 default-bar mismatch) under plan->audit->TDD; only the cosmetic L2 below
+was deferred from that pass.
+
+**Should-fix (correctness / observability):**
+1. **Persistence gaps:** the per (model,task) pytest output and the nonce'd prompt are not
+   yet written to `runs/<id>/` (§9 lists them as the target).
+2. **Served-model field not captured:** the response's served model id is not recorded, so a
+   right-class / wrong-variant mis-route is undetectable.
+3. **Cache-hit retry double-bills:** a sub-100ms cache hit is retried once; the retry's tokens
+   are billed by the gateway but tracked once locally.
+4. **Ceiling bar-failure warning:** when the pinned ceiling itself fails the bar there is no
+   dedicated annotation. (Run-blocker C added a degenerate-ladder warning for a <= 1-entry
+   ladder, which partially overlaps but does not cover the ceiling-specific case.)
+5. **`env_loader` unused:** the run reads `BAKEOFF_GATEWAY_URL/KEY` directly rather than via
+   the shared `env_loader` path (§5/§7).
+6. **No `report` subcommand** to re-render `report.md` / `ladder.yaml` from a persisted run
+   without re-spending.
+
+**Low:**
+1. `--ignore-glob` pattern breadth (model-authored test-collection edge cases).
+2. TTFT is always None (not separately measured from total latency).
+3. Cache-hit is flagged but not logged.
+4. Ping-baseline label wording.
+5. **L2 (deferred from the hardening pass):** the report table has no per-row marker for
+   bar-excluded models; the Notes section lists the exclusions, so this is cosmetic only.

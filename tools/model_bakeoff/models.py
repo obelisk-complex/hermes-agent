@@ -18,6 +18,7 @@ ERR_COLLECTION = "collection_error"    # import/syntax error: pytest could not c
 ERR_TEST_FAIL = "test_failure"         # code ran, oracle assertions failed
 ERR_TIMEOUT = "timeout"                # hard wall-clock timeout in the sandbox
 ERR_CALL = "call_error"                # the API call itself failed (non-200 / transport error)
+ERR_OUTPUT_CAP = "output_cap_exceeded"  # sandbox output exceeded the per-stream size cap (SPEC §6)
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,12 @@ class ModelSpec:
     price_out_per_m: Optional[float] = None
     verify_wire_id: bool = False   # preflight must confirm wire_id appears in /v1/models
     preflight_live_test: bool = False  # send a minimal completion at preflight (SPEC §3 PM4)
+    # Reasoning controls merged verbatim into the request body (SPEC §3 PM1). Mirrors
+    # OpenCodeGoProfile.build_api_kwargs_extras(model=...) for reasoning_config=None; mirrored
+    # not imported because the hyphenated plugin path is not importable and the bakeoff stays
+    # decoupled/offline-testable. SHARED LITERAL: never mutate in place; build_payload DEEP-copies
+    # it into the payload (a shallow copy would leave the inner dict aliased to this registry entry).
+    reasoning_extras: Optional[dict] = None
 
     @property
     def is_metered(self) -> bool:
@@ -69,6 +76,7 @@ class SandboxResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    truncated: bool = False    # output hit the per-stream size cap; verdict unreliable (SPEC §6)
     duration_s: float = 0.0
 
 
@@ -128,3 +136,4 @@ class LadderResult:
     ladder: list[str] = field(default_factory=list)                  # weakest-first model keys
     indistinguishable_pairs: list[tuple[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    contamination_flags: list[str] = field(default_factory=list)  # flagged task_ids (SPEC §4/§9)

@@ -101,3 +101,52 @@ def test_subscription_run_costs_nothing(tmp_path):
     t = transport_returning("```python\ndef f(x):\n    return x + 1\n```", usage=huge)
     runs, _ = asyncio.run(runner.run_model(SUB, [task], "K", "https://b/v1", t, sandbox_timeout=30))
     assert runner.aggregate(SUB, runs).cost_per_task_usd == 0.0
+
+
+def test_run_one_threads_reasoning_extras_into_payload(tmp_path):
+    task = make_task(tmp_path, "tre")
+    captured = {}
+
+    async def cap(url, headers, json, timeout):
+        captured["payload"] = json
+        return 200, {"choices": [{"message": {"content": "```python\ndef f(x):\n    return x + 1\n```"}}],
+                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}, 0.2
+
+    ds = ModelSpec(key="ds", gateway="opencode-go", wire_id="deepseek-v4-pro",
+                   cost_model="subscription", reasoning=True, omit_temp=True,
+                   max_tokens=16000, api_timeout_s=240,
+                   reasoning_extras={"thinking": {"type": "enabled"}})
+    asyncio.run(runner.run_one(ds, task, "K", "https://b/v1", cap, sandbox_timeout=30))
+    assert captured["payload"].get("thinking") == {"type": "enabled"}
+
+    asyncio.run(runner.run_one(SUB, task, "K", "https://b/v1", cap, sandbox_timeout=30))
+    assert "thinking" not in captured["payload"]   # SUB carries no reasoning_extras
+
+
+def test_run_one_sandbox_timeout_defaults_to_60_not_api_timeout(tmp_path, monkeypatch):
+    from tools.model_bakeoff.models import SandboxResult
+    task = make_task(tmp_path, "tto")
+    captured = {}
+
+    def fake_sandbox_run(code, oracle_path, timeout_s=60, **kw):
+        captured["timeout_s"] = timeout_s
+        return SandboxResult(returncode=0, stdout="1 passed")
+
+    monkeypatch.setattr(runner.sandbox, "run", fake_sandbox_run)
+    t = transport_returning("```python\ndef f(x):\n    return x + 1\n```")
+    # SUB.api_timeout_s == 240; run_one with no sandbox_timeout must fall back to 60, not 240.
+    asyncio.run(runner.run_one(SUB, task, "K", "https://b/v1", t))
+    assert captured["timeout_s"] == 60
+
+
+def test_run_model_attaches_partial_runs_on_budget_stop(tmp_path):
+    # M3: a budget-stop must carry the completed task run(s) out on the exception so the caller
+    # can persist/count them (SPEC §8 partials persisted).
+    task = make_task(tmp_path, "tb")
+    huge = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+    t = transport_returning("```python\ndef f(x):\n    return x + 1\n```", usage=huge)
+    b = runner.BudgetTracker(0.01)
+    with pytest.raises(runner.BudgetExceeded) as ei:
+        asyncio.run(runner.run_model(ZEN, [task], "K", "https://b/v1", t, budget=b, sandbox_timeout=30))
+    assert len(ei.value.partial_runs) >= 1
+    assert ei.value.partial_runs[0].call.task_id == "tb"
