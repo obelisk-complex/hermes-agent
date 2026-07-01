@@ -33,6 +33,7 @@ def test_handle_complete_auto_block_reported(monkeypatch):
 
     class _Task:
         status = "blocked"
+        goal_mode = False
 
     monkeypatch.setattr(kdb, "get_task",
                         lambda conn, tid: _Task(), raising=True)
@@ -51,3 +52,12 @@ def test_handle_complete_auto_block_reported(monkeypatch):
 class _FakeConn:
     def close(self):
         pass
+
+    def execute(self, *args, **kw):
+        """Return a mock cursor whose fetchone() returns None (no task row),
+        so the goal-mode judge gate is skipped and the test reaches the
+        complete_task / not-ok path it's testing."""
+        class _Cursor:
+            def fetchone(self):
+                return None
+        return _Cursor()
