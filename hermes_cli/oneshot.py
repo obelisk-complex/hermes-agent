@@ -337,6 +337,20 @@ def _run_agent(
     # honour the same merge semantics as interactive CLI and gateway sessions.
     _fb = get_fallback_chain(cfg)
 
+    # Merge skills.always from config — same as cli.py main().
+    always_skills = cfg.get("skills", {}).get("always", [])
+    skills_prompt: Optional[str] = None
+    if always_skills:
+        try:
+            from agent.skill_commands import build_preloaded_skills_prompt
+            sp, _loaded, _missing = build_preloaded_skills_prompt(
+                list(dict.fromkeys(always_skills)),
+            )
+            if sp:
+                skills_prompt = sp
+        except Exception:
+            pass
+
     agent = AIAgent(
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -349,6 +363,7 @@ def _run_agent(
         session_db=session_db,
         credential_pool=runtime.get("credential_pool"),
         fallback_model=_fb or None,
+        ephemeral_system_prompt=skills_prompt,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction
