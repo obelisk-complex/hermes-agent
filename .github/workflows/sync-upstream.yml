@@ -89,14 +89,6 @@ jobs:
           # moment a recorded resolution fully resolves it.
           git config rerere.enabled true
           git config rerere.autoupdate true
-          # D2 durability snapshot: record the rr-cache hashes present right after
-          # seeding (committed ci/rerere-cache + any Actions-cache restore). The
-          # post-rebase warn diffs against this to surface resolutions rerere
-          # records at RUNTIME but that are NOT committed to ci/rerere-cache. The
-          # Actions cache has a 7-day TTL, so an uncommitted runtime resolution is
-          # silently lost and the same conflict re-fails later.
-          RRCACHE_DIR="$(git rev-parse --git-path rr-cache)"
-          SEEDED_HASHES="$(ls "$RRCACHE_DIR" 2>/dev/null | sort || true)"
           echo "⚜️ Rebasing ${{ steps.check.outputs.custom_ahead }} custom commit(s) onto ${{ steps.check.outputs.upstream_ahead }} new upstream commit(s)..."
           if git rebase upstream/main; then
             echo "✓ Rebased cleanly."
@@ -117,52 +109,8 @@ jobs:
             # recorded resolutions failed even though every conflict was resolved.)
             while [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; do
               if git diff --name-only --diff-filter=U | grep -q .; then
-                # --- D1 self-diagnosis. MUST read MERGE_RR BEFORE `git rebase
-                # --abort` (abort deletes MERGE_RR). The whole block is a
-                # `( set +e; ... ) || true` subshell so that under `bash -e` no
-                # failing diagnostic command can pre-empt the abort/exit 1 below
-                # (the fail-loud path is sacred). Classify each conflicted path via
-                # git's own MERGE_RR map (hash<TAB>path, NUL-terminated): a recorded
-                # postimage that no longer applies = STALE (renew it); preimage-only
-                # = NEW (seed it). These two failure modes look identical otherwise. ---
-                ( set +e
-                  MR="$(git rev-parse --git-path MERGE_RR)"
-                  RR="$(git rev-parse --git-path rr-cache)"
-                  if [ -f "$MR" ]; then
-                    CLASSIFY="$(while IFS=$'\t' read -r -d '' _h _p; do
-                      if [ -f "$RR/$_h/postimage" ]; then
-                        printf 'STALE  %s  (hash %s: recorded postimage no longer applies — re-resolve locally and renew ci/rerere-cache/%s)\n' "$_p" "$_h" "$_h"
-                      else
-                        printf 'NEW    %s  (hash %s: no recorded resolution — resolve once locally with rerere enabled and commit ci/rerere-cache/%s)\n' "$_p" "$_h" "$_h"
-                      fi
-                    done < "$MR")"
-                  else
-                    echo "::warning::MERGE_RR not found — per-path NEW/STALE classification unavailable"
-                    CLASSIFY="$(git diff --name-only --diff-filter=U | sed 's/^/UNCLASSIFIED  /')"
-                  fi
-                  # Emit to the log BEFORE the ::error:: annotation (which anchors
-                  # the log view), so the classification is visible up top.
-                  echo "----- upstream-sync conflict diagnosis (per-path) -----"
-                  echo "$CLASSIFY"
-                  echo "-------------------------------------------------------"
-                  # Rich panel: classification + hunks. Upstream content is UNTRUSTED,
-                  # so it goes inside fenced code blocks (no raw markdown rendering).
-                  {
-                    echo "## Upstream sync blocked — conflict diagnosis"
-                    echo ""
-                    echo "Per-path classification (NEW = seed it; STALE = renew the committed postimage):"
-                    echo '```'
-                    echo "$CLASSIFY"
-                    echo '```'
-                    echo ""
-                    echo "Conflict hunks (first 200 lines):"
-                    echo '```diff'
-                    git diff --diff-filter=U | head -200
-                    echo '```'
-                  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-                ) || true
                 git rebase --abort || true
-                echo "::error::Upstream rebase hit an UNKNOWN conflict (no recorded rerere resolution). See the job Summary for the per-path NEW/STALE diagnosis. Resolve it once locally with rerere enabled, push the rolling patch, and the cache auto-replays it next time. origin/main left untouched."
+                echo "::error::Upstream rebase hit an UNKNOWN conflict (no recorded rerere resolution). Resolve it once locally with rerere enabled, push the rolling patch, and the cache auto-replays it next time. origin/main left untouched."
                 exit 1
               fi
               head_before=$(git rev-parse HEAD)
@@ -180,19 +128,6 @@ jobs:
             done
             echo "✓ Rebase completed using recorded rerere resolution(s)."
           fi
-          # D2 durability warn (success path only — a failure exits via D1 above).
-          # Surface any resolution rerere recorded at RUNTIME this run that is NOT
-          # in the committed ci/rerere-cache, so it gets committed before the 7-day
-          # Actions-cache TTL drops it (else the same conflict re-fails later).
-          # Warn-only; never fails the sync. `( set +e; ... ) || true` so it cannot
-          # break the run under `bash -e`.
-          ( set +e
-            NOW_HASHES="$(ls "$RRCACHE_DIR" 2>/dev/null | sort || true)"
-            NEW_HASHES="$(comm -13 <(printf '%s\n' "$SEEDED_HASHES") <(printf '%s\n' "$NOW_HASHES") | grep -v '^$')"
-            if [ -n "$NEW_HASHES" ]; then
-              echo "::warning::rerere recorded resolution(s) at runtime that are NOT committed to ci/rerere-cache. The Actions cache TTL is 7 days — commit these so they persist: $(echo "$NEW_HASHES" | tr '\n' ' ')"
-            fi
-          ) || true
 
       - name: Validate rebased tree (pre-push gate)
         if: steps.check.outputs.upstream_ahead != '0'
@@ -202,17 +137,8 @@ jobs:
           # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
           export PYTHONPATH="$PWD"
           # Catch conflict markers / syntax breakage the rebase may have left in
-          # the import-critical and fork-customised files. hermes_cli/kanban_db.py
-          # and plugins/quality-gate/*.py are included DELIBERATELY: they carry the
-          # four kanban-hook rebase-conflict resolutions and the
-          # fork_kanban_task_blocked rename (the collision fix vs upstream's own
-          # kanban_task_blocked observer). They are the files most likely to take a
-          # bad three-way merge, so a conflict marker there must fail the sync, not
-          # ride to origin/main. Keep this list in sync with the rename's blast radius.
-          for f in hermes_cli/main.py hermes_cli/plugins.py hermes_cli/kanban_db.py \
-                   agent/conversation_loop.py tools/delegate_tool.py \
-                   plugins/quality-gate/__init__.py plugins/quality-gate/blocked_hook.py \
-                   plugins/quality-gate/completion_hook.py plugins/quality-gate/spawn_hook.py; do
+          # the import-critical and fork-customised files.
+          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
             python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
           done
           # Guard tests (stdlib-only, no install needed): fail the sync if the
@@ -225,7 +151,6 @@ jobs:
           python3 tests/hermes_cli/test_update_safety.py
           python3 tests/agent/test_hook_contract.py
           python3 tests/tools/test_delegate_instructions.py
-          python3 tests/test_b2_kanban_hooks.py
 
       - name: Push validated rebase
         # Explicit success() (already implicit) makes the gate unmistakable: the

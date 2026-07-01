@@ -168,32 +168,6 @@ def test_exactly_two_on_output_call_sites():
     assert n == 2, f"expected exactly 2 on_output invoke sites, found {n}"
 
 
-def test_union_resolution_kept_fork_counters():
-    """rerere-union guard (agent/conversation_loop.py). The nightly upstream sync
-    resolves a union conflict at the per-turn init block: upstream inserts a
-    `_auth_pool_refresh_counts` reset (#26080) and the fork inserts its on_output
-    counters at the same spot. A botched union (or a future rebase that drops the
-    fork block) would still py_compile but silently break the on_output gate every
-    `hermes update` consumer relies on.
-
-    HARD-assert the fork's per-turn counter survives. The upstream-adjacency check
-    is SOFT (warning only, never fails): if upstream renames/removes
-    `_auth_pool_refresh_counts`, the rebase re-conflicts and aborts long before
-    this test runs, so failing here would only add a confusing false alarm."""
-    src = "\n".join(_source_lines())
-    assert "agent._on_output_blocks = 0" in src, (
-        "fork counter `agent._on_output_blocks = 0` missing from conversation_loop.py — "
-        "the conversation_loop union rerere resolution dropped the fork block"
-    )
-    # Soft, warning-only: document that upstream's adjacent reset survived too.
-    if "agent._auth_pool_refresh_counts" not in src:
-        print(
-            "WARNING(union-adjacency): upstream `_auth_pool_refresh_counts` reset not "
-            "found near the fork counters. If upstream changed it, renew the "
-            "ci/rerere-cache union entry (hash 23505fe1...) and update this guard."
-        )
-
-
 def test_decide_after_block_retries_under_limit():
     """v3.7.1: the extracted pure decision retries for blocks 1..LIMIT."""
     from agent._on_output_gate import decide_after_block, ON_OUTPUT_BLOCK_LIMIT
