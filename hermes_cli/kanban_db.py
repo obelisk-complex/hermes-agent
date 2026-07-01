@@ -3975,6 +3975,38 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class CompletionBlockedError(ValueError):
+    """Raised by ``complete_task`` when a ``pre_kanban_complete`` plugin
+    returns ``{"action": "block", "message": ...}``.
+
+    The block message is the exception text; the completing task is left in
+    its prior state (no status->done write). Kept as a ``ValueError`` subclass
+    so existing tool-error handlers treat it as a recoverable user error,
+    matching ``HallucinatedCardsError``.
+
+    Bounded-retry guidance (the task stays ``running`` after a block, so an
+    unfixed gate will block every retry): a worker should treat **3+
+    consecutive ``CompletionBlockedError`` responses as a signal to call
+    ``kanban_block``** with a reason summarising the gate output, rather than
+    looping ``complete -> blocked -> complete`` indefinitely. The
+    ``pre_kanban_complete`` hook also receives ``blocked_attempt_count`` (the
+    number of prior ``completion_blocked_plugin`` events for this task) so a
+    gate plugin can escalate or back off after a threshold of its own.
+
+    Kernel backstop: this exception is NOT raised indefinitely. Once a task
+    has been blocked ``_MAX_COMPLETION_BLOCKS`` times, ``complete_task`` stops
+    raising and instead auto-transitions the task to ``blocked`` (via
+    ``block_task``) for human review, returning ``False`` - so a permanently
+    broken gate cannot drive an unbounded retry loop even when no worker or
+    plugin intervenes.
+    """
+
+    def __init__(self, message: str, completing_task_id: str):
+        self.block_message = message
+        self.completing_task_id = completing_task_id
+        super().__init__(f"completion blocked by quality gate: {message}")
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
