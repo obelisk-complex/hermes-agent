@@ -53,6 +53,8 @@ Explicit flags so the client never guesses. Wire ids `(verify)` confirmed at pre
 | GLM-5.1 | opencode-go | `glm-5.1` | subscription | no | no | 8k | 180s |
 | GLM-5.2 | opencode-go | `glm-5.2` (verify) | subscription | no | no | 8k | 180s |
 | Qwen 3.5:397b | ollama-cloud | (verify via /v1/models) | **subscription** (Ollama Pro) | yes | yes | 16k | 300s |
+| Qwen3 Coder 480B | ollama-cloud | `qwen3-coder:480b` (preflight live-test) | **subscription** (Ollama Pro) | no | no | 16k | 300s |
+| Qwen3 Coder Next | ollama-cloud | `qwen3-coder-next` (preflight live-test) | **subscription** (Ollama Pro) | no | no | 16k | 300s |
 | Qwen 3.7 Max | opencode-zen | `qwen3.7-*` (verify) | **metered** | yes | yes | 16k | 240s |
 | Kimi K2.6 | opencode-go (NOT zen) | `kimi-k2.6` (verify) | subscription | yes (server default) | yes | 16k | 240s |
 | MiniMax M3 | opencode-zen | `minimax-m3` (preflight live-test) | **metered** | yes | yes | 16k | 240s |

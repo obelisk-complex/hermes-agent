@@ -131,3 +131,19 @@ def test_judge_spec_is_cross_family_zen_priced_and_not_in_roster():
     assert js.price_in_per_m == 3.0 and js.price_out_per_m == 15.0
     assert js.verify_wire_id is True
     assert js.key not in {m.key for m in registry.ROSTER}  # judge is intentionally NOT a candidate
+
+
+# --- qwen coder models on Ollama Cloud (substitute qwen slot; qwen3.7-max/-plus unavailable) ---
+
+def test_qwen_coder_ollama_entries():
+    for key, wire in [("qwen3-coder-480b", "qwen3-coder:480b"),
+                      ("qwen3-coder-next", "qwen3-coder-next")]:
+        m = registry.by_key(key)
+        assert m.gateway == "ollama-cloud"
+        assert m.wire_id == wire
+        assert m.cost_model == "subscription"
+        assert m.reasoning is False and m.omit_temp is False
+        assert m.max_tokens == 16000 and m.api_timeout_s == 300
+        assert m.verify_wire_id is True
+        assert m.preflight_live_test is True   # Ollama Cloud correlated-outage defence
+        assert m.price_out_per_m is None       # subscription open-weight; parity with qwen3.5-397b

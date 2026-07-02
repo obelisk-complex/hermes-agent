@@ -58,6 +58,21 @@ ROSTER: list[ModelSpec] = [
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=300, verify_wire_id=True,
     ),
+    # qwen coder open-weights served on Ollama Pro. Substitute qwen slot: qwen3.7-max/-plus are
+    # Alibaba closed-API tiers reachable only via opencode-go, which was 503 across the whole 3.7
+    # tier (2026-07-02), and are not hosted on Ollama. These two are NON-reasoning (emit code
+    # directly, no reasoning field). No price: subscription open-weight, so cost_proxy stays 0
+    # (parity with qwen3.5-397b). preflight_live_test guards against Ollama Cloud correlated outages.
+    ModelSpec(
+        key="qwen3-coder-480b", gateway="ollama-cloud", wire_id="qwen3-coder:480b",
+        cost_model="subscription", reasoning=False, omit_temp=False,
+        max_tokens=16000, api_timeout_s=300, verify_wire_id=True, preflight_live_test=True,
+    ),
+    ModelSpec(
+        key="qwen3-coder-next", gateway="ollama-cloud", wire_id="qwen3-coder-next",
+        cost_model="subscription", reasoning=False, omit_temp=False,
+        max_tokens=16000, api_timeout_s=300, verify_wire_id=True, preflight_live_test=True,
+    ),
     # --- opencode-zen: metered (pay-as-you-go); the budget cap governs these ---
     ModelSpec(
         key="qwen3.7-max", gateway="opencode-zen", wire_id="qwen3.7-max",
