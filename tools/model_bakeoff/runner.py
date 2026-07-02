@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import client, extractor, sandbox, scorer
-from .models import ERR_CALL, CallResult, ModelAggregate, ModelSpec, ScoreResult, TaskSpec
+from .models import (ERR_CALL, OPERATIONAL_ERROR_TYPES, CallResult, ModelAggregate, ModelSpec,
+                     ScoreResult, TaskSpec)
 
 
 class BudgetExceeded(Exception):
@@ -122,6 +123,15 @@ def aggregate(spec: ModelSpec, runs: list[TaskRun]) -> ModelAggregate:
     # Sticker-price cost proxy averaged per task (subscription cost_usd stays 0; this is the only cost axis).
     proxy_total = sum(client.cost_proxy_usd(spec, r.call.completion_tokens, r.call.thinking_tokens)
                       for r in runs)
+    # Reliability histogram: bucket every failed run's error_type; count the operational (provider) ones.
+    error_counts: dict = {}
+    n_operational = 0
+    for r in runs:
+        et = r.score.error_type
+        if et is not None:
+            error_counts[et] = error_counts.get(et, 0) + 1
+            if et in OPERATIONAL_ERROR_TYPES:
+                n_operational += 1
     return ModelAggregate(
         model_key=spec.key, reasoning=spec.reasoning, cost_model=spec.cost_model,
         n_tasks=n, n_passed=n_pass,
@@ -131,4 +141,5 @@ def aggregate(spec: ModelSpec, runs: list[TaskRun]) -> ModelAggregate:
         mean_elegance=(statistics.mean(elegances) if elegances else None),
         n_elegance_judged=len(elegances),
         cost_proxy_per_task_usd=(proxy_total / n if n else 0.0),
+        gateway=spec.gateway, error_counts=error_counts, n_operational=n_operational,
     )

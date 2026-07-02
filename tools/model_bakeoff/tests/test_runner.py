@@ -8,7 +8,31 @@ import pytest
 
 from tools.model_bakeoff import runner
 from tools.model_bakeoff.models import (
-    ERR_CALL, CallResult, ModelSpec, ScoreResult, TaskSpec)
+    ERR_CALL, ERR_EXTRACTION, ERR_TEST_FAIL, CallResult, ModelSpec, ScoreResult, TaskSpec)
+
+
+def _rel_run(passed, error_type, ok=True):
+    return runner.TaskRun(CallResult(model_key="m", task_id="t", ok=ok),
+                          ScoreResult(model_key="m", task_id="t", passed=passed, error_type=error_type))
+
+
+def test_aggregate_splits_operational_from_wrong_answers():
+    runs = [_rel_run(True, None), _rel_run(True, None),
+            _rel_run(False, ERR_TEST_FAIL), _rel_run(False, ERR_EXTRACTION),
+            _rel_run(False, ERR_CALL, ok=False), _rel_run(False, ERR_CALL, ok=False)]
+    agg = runner.aggregate(SUB, runs)
+    assert agg.gateway == "opencode-go"
+    assert agg.n_tasks == 6 and agg.n_passed == 2
+    assert agg.n_operational == 2
+    assert agg.error_counts == {ERR_TEST_FAIL: 1, ERR_EXTRACTION: 1, ERR_CALL: 2}
+    assert agg.pass_fraction == 2 / 6
+    assert agg.completed_pass_fraction == 2 / 4          # excludes the 2 operational cells
+
+
+def test_completed_pass_fraction_none_when_all_operational():
+    agg = runner.aggregate(SUB, [_rel_run(False, ERR_CALL, ok=False) for _ in range(3)])
+    assert agg.n_operational == 3
+    assert agg.completed_pass_fraction is None           # never a fake 0%
 
 SUB = ModelSpec(key="sub", gateway="opencode-go", wire_id="deepseek-v4-flash",
                 cost_model="subscription", reasoning=True, omit_temp=True,

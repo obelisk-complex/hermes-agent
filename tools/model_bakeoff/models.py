@@ -20,6 +20,13 @@ ERR_TIMEOUT = "timeout"                # hard wall-clock timeout in the sandbox
 ERR_CALL = "call_error"                # the API call itself failed (non-200 / transport error)
 ERR_OUTPUT_CAP = "output_cap_exceeded"  # sandbox output exceeded the per-stream size cap (SPEC §6)
 
+# Operational (provider/gateway) failures: the gateway never returned a scoreable completion, so the
+# model's answer was never evaluated. This is the ONLY reliability-axis bucket (sub-project B) and the
+# per-gateway failure numerator. Every other error_type means we DID get a completion / the code DID
+# run, so it is model- or settings-attributable (a wrong answer, non-compiling code, a hung sandbox,
+# runaway output, or a truncation whose token budget sub-project C tunes) - never counted here.
+OPERATIONAL_ERROR_TYPES = frozenset({ERR_CALL})
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -128,10 +135,21 @@ class ModelAggregate:
     cost_proxy_per_task_usd: float = 0.0        # sticker-price x output-token proxy (subscription cost_usd stays 0)
     n_elegance_judged: int = 0                  # how many cells contributed to mean_elegance
     n_latency_samples: int = 0                  # cache-hit-clean latency samples behind p50 (A8 disambiguation)
+    # Reliability axis (sub-project B). Report-only; does NOT affect pass_fraction or the ladder.
+    gateway: Optional[Gateway] = None           # which gateway served this model (for per-gateway rollup)
+    error_counts: dict = field(default_factory=dict)   # {error_type: count} over this model's failed runs
+    n_operational: int = 0                      # runs whose error_type is operational (provider) - not wrong answers
 
     @property
     def pass_fraction(self) -> float:
         return self.n_passed / self.n_tasks if self.n_tasks else 0.0
+
+    @property
+    def completed_pass_fraction(self) -> Optional[float]:
+        """Pass fraction over cells that actually COMPLETED (operational/provider failures excluded).
+        None when every attempt was operational - so an all-503 model is never a fake 0%."""
+        denom = self.n_tasks - self.n_operational
+        return (self.n_passed / denom) if denom > 0 else None
 
 
 @dataclass
