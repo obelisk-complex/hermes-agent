@@ -19,12 +19,14 @@ ROSTER: list[ModelSpec] = [
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=240,
         reasoning_extras={"thinking": {"type": "enabled"}},
+        price_out_per_m=0.28,   # sticker (subscription => cost_usd still 0; drives cost_proxy only)
     ),
     ModelSpec(
         key="deepseek-v4-pro", gateway="opencode-go", wire_id="deepseek-v4-pro",
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=240, verify_wire_id=True,
         reasoning_extras={"thinking": {"type": "enabled"}},
+        price_out_per_m=3.48,   # sticker (subscription => cost_usd still 0; drives cost_proxy only)
     ),
     ModelSpec(
         key="glm-5.1", gateway="opencode-go", wire_id="glm-5.1",
@@ -34,12 +36,21 @@ ROSTER: list[ModelSpec] = [
     ModelSpec(
         key="glm-5.2", gateway="opencode-go", wire_id="glm-5.2",
         cost_model="subscription", reasoning=False, omit_temp=False,
-        max_tokens=8000, api_timeout_s=180, verify_wire_id=True,
+        max_tokens=16000, api_timeout_s=240, verify_wire_id=True,   # A2/A11: parity with the other 3 candidates
+        price_out_per_m=4.40,   # sticker (subscription => cost_usd still 0; drives cost_proxy only)
     ),
     ModelSpec(
         key="kimi-k2.6", gateway="opencode-go", wire_id="kimi-k2.6",
         cost_model="subscription", reasoning=True, omit_temp=True,
         max_tokens=16000, api_timeout_s=240, verify_wire_id=True,
+    ),
+    # Candidate qwen3.7-max served on the opencode-go SUBSCRIPTION endpoint (user-verified 2026-07-01).
+    # Distinct roster KEY from the metered zen qwen3.7-max; same wire_id, but $0 marginal here.
+    ModelSpec(
+        key="qwen3.7-max-go", gateway="opencode-go", wire_id="qwen3.7-max",
+        cost_model="subscription", reasoning=True, omit_temp=True,
+        max_tokens=16000, api_timeout_s=240, verify_wire_id=True,
+        price_out_per_m=3.75,   # sticker approx; CONFIRM AT PREFLIGHT (Task 10 Step 2)
     ),
     # --- ollama-cloud: Ollama Pro subscription, $0 marginal ---
     ModelSpec(
@@ -72,6 +83,25 @@ def by_key(key: str) -> ModelSpec:
         if m.key == key:
             return m
     raise KeyError(f"no roster model with key {key!r}")
+
+
+# The elegance judge (coding bakeoff). Deliberately NOT in ROSTER: it never competes and must not be
+# selected as a candidate. It is cross-family (Anthropic) vs the DeepSeek/Zhipu/Alibaba candidates, so
+# it cannot self-grade (judge.judge_conflicts enforces this at run time).
+# NOTE: verify_wire_id is INERT here -- preflight.run_all only iterates ROSTER via _select, and the judge
+# is not in ROSTER, so it is never preflighted through that path. The judge's wire_id is verified instead
+# by the standalone live-test in Task 10 Step 3 (a direct client.call against judge_spec()).
+_JUDGE = ModelSpec(
+    key="claude-sonnet", gateway="opencode-zen", wire_id="claude-sonnet-4-6",
+    cost_model="metered", reasoning=False, omit_temp=False,
+    max_tokens=2000, api_timeout_s=180, verify_wire_id=True,
+    price_in_per_m=3.0, price_out_per_m=15.0,   # sticker; CONFIRM AT PREFLIGHT (Task 10 Step 3)
+)
+
+
+def judge_spec() -> ModelSpec:
+    """The elegance judge (NOT a roster candidate). Callers may override key/wire_id via --judge."""
+    return _JUDGE
 
 
 def metered() -> list[ModelSpec]:

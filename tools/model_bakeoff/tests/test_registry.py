@@ -81,3 +81,53 @@ def test_all_specs_have_sane_bounds():
         assert m.max_tokens >= 4000
         assert m.api_timeout_s >= 60
         assert isinstance(m, ModelSpec)
+
+
+# --- Coding bakeoff (Task 3): qwen3.7-max-go, sticker prices, judge_spec ---
+
+CANDIDATES = ["deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "qwen3.7-max-go"]
+
+
+def test_qwen37_max_go_entry_fields():
+    m = registry.by_key("qwen3.7-max-go")
+    assert m.gateway == "opencode-go"       # subscription endpoint the user verified
+    assert m.wire_id == "qwen3.7-max"       # same served model as the zen entry
+    assert m.cost_model == "subscription"
+    assert m.reasoning is True and m.omit_temp is True
+    assert m.max_tokens == 16000 and m.api_timeout_s == 240
+    assert m.verify_wire_id is True
+    assert m.price_out_per_m == 3.75
+
+
+def test_two_qwen_keys_differ_in_gateway():
+    # The zen qwen3.7-max (metered) and the go qwen3.7-max-go (subscription) are distinct
+    # roster keys sharing one wire_id; the bakeoff uses the go one so spend stays $0.
+    assert registry.by_key("qwen3.7-max").gateway == "opencode-zen"
+    assert registry.by_key("qwen3.7-max-go").gateway == "opencode-go"
+
+
+def test_four_candidates_carry_sticker_output_prices():
+    expected = {"deepseek-v4-flash": 0.28, "deepseek-v4-pro": 3.48,
+                "glm-5.2": 4.40, "qwen3.7-max-go": 3.75}
+    for key, price in expected.items():
+        assert registry.by_key(key).price_out_per_m == price, key
+
+
+def test_four_candidates_share_output_budget_and_timeout():
+    # A2 (max_tokens parity) + A11 (timeout parity): remove fairness/timing confounds so the
+    # thorough tier is judged on equal footing.
+    for key in CANDIDATES:
+        m = registry.by_key(key)
+        assert m.max_tokens == 16000, f"{key} max_tokens"
+        assert m.api_timeout_s == 240, f"{key} api_timeout_s"
+
+
+def test_judge_spec_is_cross_family_zen_priced_and_not_in_roster():
+    js = registry.judge_spec()
+    assert js.key == "claude-sonnet"
+    assert js.gateway == "opencode-zen"
+    assert js.wire_id == "claude-sonnet-4-6"
+    assert js.cost_model == "metered" and js.is_metered
+    assert js.price_in_per_m == 3.0 and js.price_out_per_m == 15.0
+    assert js.verify_wire_id is True
+    assert js.key not in {m.key for m in registry.ROSTER}  # judge is intentionally NOT a candidate
