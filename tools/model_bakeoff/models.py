@@ -122,6 +122,11 @@ class ModelAggregate:
     # Wilson 95% CI on pass_fraction (SPEC §8/§9)
     ci_low: float = 0.0
     ci_high: float = 0.0
+    # Coding-bakeoff additive report-only fields (do NOT affect the pass_fraction ladder).
+    mean_elegance: Optional[float] = None       # mean LLM-judge elegance over judged cells, None if none judged
+    cost_proxy_per_task_usd: float = 0.0        # sticker-price x output-token proxy (subscription cost_usd stays 0)
+    n_elegance_judged: int = 0                  # how many cells contributed to mean_elegance
+    n_latency_samples: int = 0                  # cache-hit-clean latency samples behind p50 (A8 disambiguation)
 
     @property
     def pass_fraction(self) -> float:

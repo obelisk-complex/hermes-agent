@@ -50,6 +50,11 @@ def should_rewarm(first_s: Optional[float], second_s: Optional[float], factor: f
 class TaskRun:
     call: CallResult
     score: ScoreResult
+    # Coding-bakeoff additive fields (report-only; do not affect the pass_fraction ladder).
+    elegance: Optional[float] = None        # LLM-judge elegance score in [0,1], None if unjudged
+    elegance_rationale: str = ""
+    judge_cost_usd: float = 0.0             # metered judge spend attributed to this cell
+    repeat_idx: int = 0                     # which --repeats pass produced this run (A13); stamped in run_bakeoff
 
 
 def _read(path: str) -> str:
