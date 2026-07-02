@@ -11,6 +11,8 @@ here).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import statistics
 from typing import Optional
 
@@ -90,3 +92,83 @@ async def evaluate_profile(spec, profile, tasks, conn_for, transport, repeats=2,
         # "retried-after-suspected-cache-hit" annotation that must not read as a failure sample.
         sample_error=next((r.call.error for r in all_runs if not r.call.ok and r.call.error), ""),
         runs=all_runs)
+
+
+def profile_score_key(ev: ProfileEval) -> tuple:
+    """Objective, MAXIMISED: higher pass_fraction, then fewer output tokens, faster p50, fewer
+    operational failures. mean_output_tokens and p50 are guarded None -> +inf, so a candidate with no
+    measurable successful output sorts WORST on those tie-breaks (never "most efficient"); a
+    zero-pass candidate already loses on the leading pass_fraction term."""
+    toks = ev.mean_output_tokens if ev.mean_output_tokens is not None else float("inf")
+    p50 = ev.p50_latency_s if ev.p50_latency_s is not None else float("inf")
+    return (ev.pass_fraction, -toks, -p50, -ev.n_operational)
+
+
+def _signature(p: SettingsProfile) -> tuple:
+    """A hashable identity for a profile: sorted (name, value) of its non-None fields; dict values
+    are JSON-serialised so two equal reasoning_extras dicts collapse to the same signature."""
+    items = []
+    for f in dataclasses.fields(p):
+        v = getattr(p, f.name)
+        if v is not None:
+            items.append((f.name, json.dumps(v, sort_keys=True) if isinstance(v, dict) else v))
+    return tuple(sorted(items, key=lambda kv: kv[0]))
+
+
+def _sig_hash(p: SettingsProfile) -> str:
+    return hashlib.sha1(json.dumps([list(x) for x in _signature(p)], sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _neighbours(spec: ModelSpec, current: SettingsProfile, grid: dict) -> list:
+    """One-knob neighbours of `current` from `grid` ({field: [values]}). The "gateway" key is a
+    PAIRED knob: its values are (gateway, wire_id) tuples set together in one replace, so the result
+    always satisfies apply_profile's gateway+wire_id rule. Candidates identical to `current`, or that
+    apply_profile rejects (e.g. sampling under omit_temp), are skipped, so a uniform grid self-prunes
+    per model."""
+    out = []
+    for field, values in grid.items():
+        for v in values:
+            if field == "gateway":
+                gw, wid = v
+                cand = dataclasses.replace(current, gateway=gw, wire_id=wid)
+            else:
+                cand = dataclasses.replace(current, **{field: v})
+            if _signature(cand) == _signature(current):
+                continue
+            try:
+                apply_profile(spec, cand)   # validity gate; skip invalid combos for this model
+            except ValueError:
+                continue
+            out.append(cand)
+    return out
+
+
+async def hill_climb(spec, seed, grid, evaluate, max_rounds=8, on_candidate=None):
+    """Greedy coordinate ascent from `seed`. Each round evaluates every unseen one-knob neighbour and
+    moves to the best strictly-improving one; stops when a round yields no improvement or max_rounds
+    is hit (fail-safe against a non-terminating climb). on_candidate(cand, ev, trace) fires after each
+    evaluation (used for incremental persistence). Returns (best_profile, best_eval, trace)."""
+    current = seed
+    best_ev = await evaluate(current)
+    trace = [(current, best_ev)]
+    if on_candidate:
+        on_candidate(current, best_ev, trace)
+    seen = {_signature(current)}
+    for _ in range(max_rounds):
+        improved = False
+        round_best, round_best_ev = current, best_ev
+        for cand in _neighbours(spec, current, grid):
+            sig = _signature(cand)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            ev = await evaluate(cand)
+            trace.append((cand, ev))
+            if on_candidate:
+                on_candidate(cand, ev, trace)
+            if profile_score_key(ev) > profile_score_key(round_best_ev):
+                round_best, round_best_ev, improved = cand, ev, True
+        if not improved:
+            break
+        current, best_ev = round_best, round_best_ev
+    return current, best_ev, trace

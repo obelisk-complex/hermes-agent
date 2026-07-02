@@ -111,3 +111,47 @@ def test_evaluate_profile_raises_on_metered_gateway(tmp_path):
         asyncio.run(tuning.evaluate_profile(
             _spec(), SettingsProfile(gateway="opencode-zen", wire_id="x"), [task], _resolver(),
             _passing_transport(), repeats=1, sandbox_timeout=30))
+
+
+# --- Task 4: objective + neighbours (paired gateway) + hill_climb ---
+
+def _ev(profile, spec, n_runs, n_passed, n_operational, mean_output_tokens, p50, sample_error=""):
+    return tuning.ProfileEval(profile, spec, n_runs, n_passed, n_operational,
+                              mean_output_tokens, p50, sample_error, [])
+
+
+async def _fake_eval(profile):   # score rises with max_tokens; known optimum at 32000
+    mt = profile.max_tokens or 8000
+    passed = 2 if mt >= 32000 else (1 if mt >= 16000 else 0)
+    return _ev(profile, _spec(max_tokens=mt), 2, passed, 0, float(mt) / 100, 1.0)
+
+
+def test_hill_climb_finds_max_tokens_optimum():
+    grid = {"max_tokens": [8000, 16000, 32000]}
+    best, ev, trace = asyncio.run(
+        tuning.hill_climb(_spec(), SettingsProfile(max_tokens=8000), grid, _fake_eval))
+    assert best.max_tokens == 32000 and ev.pass_fraction == 1.0 and len(trace) >= 3
+
+
+def test_score_key_prefers_fewer_tokens_on_a_pass_tie():
+    a = _ev(SettingsProfile(), _spec(), 2, 2, 0, 200.0, 1.0)
+    b = _ev(SettingsProfile(), _spec(), 2, 2, 0, 100.0, 1.0)
+    assert tuning.profile_score_key(b) > tuning.profile_score_key(a)
+
+
+def test_score_key_no_crash_on_all_operational():
+    op = _ev(SettingsProfile(), _spec(), 2, 0, 2, None, None)          # no ok runs -> None token/p50
+    passing = _ev(SettingsProfile(), _spec(), 2, 2, 0, 100.0, 1.0)
+    assert tuning.profile_score_key(op) < tuning.profile_score_key(passing)   # no TypeError, ranks below
+
+
+def test_neighbours_skip_invalid_under_omit_temp():
+    ns = tuning._neighbours(_spec(omit_temp=True), SettingsProfile(), {"temperature": [0.0, 0.7]})
+    assert ns == []
+
+
+def test_neighbours_gateway_pair_sets_both_fields():
+    grid = {"gateway": [("ollama-cloud", "m:cloud")]}
+    ns = tuning._neighbours(_spec(), SettingsProfile(), grid)
+    assert len(ns) == 1 and ns[0].gateway == "ollama-cloud" and ns[0].wire_id == "m:cloud"
+    tuning.apply_profile(_spec(), ns[0])   # must NOT raise (paired knob)
