@@ -338,6 +338,65 @@ def _load_busy_input_mode() -> str:
     return raw if raw in {"queue", "steer", "interrupt"} else "interrupt"
 
 
+def _enqueue_prompt(session: dict, text: str, transport: str) -> None:
+    """Queue a prompt for a running session, merging with any already-queued text."""
+    existing = session.get("queued_prompt")
+    if existing:
+        existing["text"] = existing["text"] + "\n\n" + text
+        existing["transport"] = transport
+    else:
+        session["queued_prompt"] = {"text": text, "transport": transport}
+
+
+def _handle_busy_submit(
+    rid: str, sid: str, session: dict, text: str, transport: str
+) -> dict:
+    """Apply the busy_input_mode policy when a prompt arrives mid-turn.
+
+    Returns a JSON-RPC response dict with ``result.status``:
+    - ``"queued"`` — the prompt was queued for the next turn.
+    - ``"steered"`` — the prompt was injected as a steer (no queue).
+    """
+    mode = _load_busy_input_mode()
+    if mode == "steer":
+        agent = session.get("agent")
+        steer_fn = getattr(agent, "steer", None)
+        if steer_fn and steer_fn(text):
+            return _ok(rid, {"status": "steered"})
+        # steer rejected or unavailable — fall through to queue
+    if mode == "interrupt":
+        agent = session.get("agent")
+        interrupt_fn = getattr(agent, "interrupt", None)
+        if interrupt_fn:
+            interrupt_fn()
+    _enqueue_prompt(session, text, transport)
+    return _ok(rid, {"status": "queued"})
+
+
+def _drain_queued_prompt(rid: str, sid: str, session: dict) -> bool:
+    """If the session has a queued prompt and is not already running, fire it.
+
+    Returns True if a prompt was dispatched, False if there was nothing to do
+    (no queued prompt, or the session is already running).
+    """
+    queued = session.get("queued_prompt")
+    if not queued:
+        return False
+    if session.get("running"):
+        return False
+    text = queued["text"]
+    transport = queued.get("transport")
+    session["queued_prompt"] = None
+    session["running"] = True
+    if transport is not None:
+        session["transport"] = transport
+    try:
+        _run_prompt_submit(rid, sid, session, text)
+    except Exception:
+        session["running"] = False
+    return True
+
+
 def _notify_session_boundary(event_type: str, session_id: str | None) -> None:
     """Fire session lifecycle hooks with CLI parity."""
     try:
@@ -2931,6 +2990,23 @@ def _on_tool_progress(
         if _session_verbose(sid):
             payload["verbose"] = True
         _emit("reasoning.available", sid, payload)
+        return
+    if event_type == "moa.reference":
+        payload = {
+            "label": str(name) if name else "",
+            "text": str(preview) if preview else "",
+        }
+        if _kwargs.get("moa_index") is not None:
+            payload["index"] = int(_kwargs["moa_index"])
+        if _kwargs.get("moa_count") is not None:
+            payload["count"] = int(_kwargs["moa_count"])
+        _emit(event_type, sid, payload)
+        return
+    if event_type == "moa.aggregating":
+        payload = {
+            "aggregator": str(name) if name else "",
+        }
+        _emit(event_type, sid, payload)
         return
     if event_type.startswith("subagent."):
         payload = {
