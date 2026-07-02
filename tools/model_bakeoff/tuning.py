@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import statistics
 from typing import Optional
 
@@ -172,3 +173,138 @@ async def hill_climb(spec, seed, grid, evaluate, max_rounds=8, on_candidate=None
             break
         current, best_ev = round_best, round_best_ev
     return current, best_ev, trace
+
+
+def _default_seed(spec: ModelSpec) -> SettingsProfile:
+    return SettingsProfile(max_tokens=spec.max_tokens, api_timeout_s=spec.api_timeout_s)
+
+
+def _default_grid(spec: ModelSpec) -> dict:
+    """Every model (incl. omit_temp reasoning models) gets max_tokens + api_timeout_s neighbours;
+    non-omit models also get sampling. Gateway is searched ONLY when the caller supplies
+    extra_gateways (metered gateways are pruned)."""
+    grid = {
+        "max_tokens": sorted({spec.max_tokens, min(spec.max_tokens * 2, 48000),
+                              min(spec.max_tokens * 3, 48000)}),
+        "api_timeout_s": sorted({spec.api_timeout_s, min(spec.api_timeout_s * 2, 600)}),
+    }
+    if not spec.omit_temp:
+        grid["temperature"] = [0.2, 0.7]   # seed (temperature None -> 0) already covers effective 0
+        grid["top_p"] = [0.9]
+    return grid
+
+
+def _prune_gateways(grid: dict, conn_for, notes: list) -> dict:
+    """Drop metered (never tune with real spend) and unconfigured gateways from the grid, loudly."""
+    if "gateway" not in grid:
+        return grid
+    kept = []
+    for gw, wid in grid["gateway"]:
+        if gw in METERED_GATEWAYS:
+            notes.append(f"note: dropped metered gateway {gw} from the search (subscription-only)")
+            continue
+        try:
+            conn = conn_for(gw)
+        except KeyError:
+            notes.append(f"note: dropped unknown gateway {gw} from the search")
+            continue
+        if not getattr(conn, "ok", False):
+            notes.append(f"note: dropped unconfigured gateway {gw} from the search")
+            continue
+        kept.append((gw, wid))
+    g = dict(grid)
+    if kept:
+        g["gateway"] = kept
+    else:
+        g.pop("gateway", None)
+    return g
+
+
+def _persist_candidate(raw_dir: str, ev: ProfileEval) -> None:
+    """Write each of a candidate's TaskRuns to <raw_dir>/<sig_hash>__<task>__r<idx>.json. This is an
+    INDEPENDENT reimplementation of cli._persist_raw's JSON shape; it never imports cli (that would
+    create a cli -> tuning -> cli cycle)."""
+    os.makedirs(raw_dir, exist_ok=True)
+    sig = _sig_hash(ev.profile)
+    for i, tr in enumerate(ev.runs):
+        path = os.path.join(raw_dir, f"{sig}__{tr.call.task_id}__r{i}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"sig": sig, "task": tr.call.task_id, "passed": tr.score.passed,
+                       "error_type": tr.score.error_type, "latency_s": tr.call.total_latency_s,
+                       "completion_tokens": tr.call.completion_tokens,
+                       "thinking_tokens": tr.call.thinking_tokens,
+                       "raw_response": tr.call.raw_response,
+                       "extracted_code": tr.call.extracted_code}, f, indent=2)
+
+
+def _metrics(ev: ProfileEval) -> dict:
+    return {"pass_fraction": ev.pass_fraction, "mean_output_tokens": ev.mean_output_tokens,
+            "p50_latency_s": ev.p50_latency_s, "n_operational": ev.n_operational, "n_runs": ev.n_runs}
+
+
+def _record(spec, seed, best_profile, best_ev, trace) -> dict:
+    """The persisted best_settings.json (schema_version 1). `base` is a full ModelSpec snapshot so
+    sub-project D can reconstruct the exact tuned spec:
+    apply_profile(ModelSpec(**base), SettingsProfile(**{k:v for k,v in winner.items() if v is not None}))."""
+    seed_ev = trace[0][1]
+    margin = best_ev.n_passed - seed_ev.n_passed
+    all_op = [t for (_, t) in trace if t.n_runs > 0 and t.n_operational == t.n_runs]
+    reasons, caveats = [], []
+    if len(trace) - 1 == 0:
+        reasons.append("no_search_performed")
+        caveats.append("no valid neighbours were searched; winner is the seed")
+    if margin <= 1 and best_ev.n_runs <= 6:
+        reasons.append("small_margin")
+        caveats.append(f"winner beats seed by {margin}/{best_ev.n_runs} passed runs; may be within noise")
+    if all_op:
+        reasons.append("all_operational")
+        caveats.append(f"{len(all_op)} candidate(s) had ALL calls fail at the gateway (503 / possible "
+                       "invalid parameter); check gateway health before trusting this record")
+    return {
+        "schema_version": 1, "model_key": spec.key,
+        "base": dataclasses.asdict(spec), "seed": dataclasses.asdict(seed),
+        "winner": dataclasses.asdict(best_profile), "achieved": _metrics(best_ev),
+        "winner_margin_passed": margin, "neighbours_evaluated": len(trace) - 1,
+        "search": "coordinate-ascent, single seed; local optimum, not guaranteed global",
+        "low_confidence": bool(reasons), "reasons": reasons, "caveats": caveats,
+        "trace": [{"profile": dataclasses.asdict(p), **_metrics(t), "sample_error": t.sample_error}
+                  for (p, t) in trace],
+    }
+
+
+def _write_record(out_dir: str, record: dict) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "best_settings.json"), "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+
+
+async def tune_model(spec, tasks, conn_for, transport, out_dir, seed=None, grid=None,
+                     extra_gateways=None, repeats=2, sandbox_timeout=60) -> dict:
+    """Hill-climb `spec`'s settings on `tasks`; persist per-candidate raw runs and rewrite
+    best_settings.json after EVERY candidate (crash loses at most one candidate). Returns the record.
+    Subscription-only: metered/unconfigured gateways are pruned from the grid before the climb."""
+    os.makedirs(out_dir, exist_ok=True)
+    raw_dir = os.path.join(out_dir, "raw")
+    notes: list = []
+    seed = seed or _default_seed(spec)
+    grid = grid or _default_grid(spec)
+    if extra_gateways:
+        grid = dict(grid)
+        grid["gateway"] = [(spec.gateway, spec.wire_id)] + list(extra_gateways)
+    grid = _prune_gateways(grid, conn_for, notes)
+    best = {"profile": None, "ev": None}
+
+    async def _evaluate(profile):
+        return await evaluate_profile(spec, profile, tasks, conn_for, transport, repeats, sandbox_timeout)
+
+    def _on(cand, ev, trace):
+        _persist_candidate(raw_dir, ev)
+        if best["ev"] is None or profile_score_key(ev) > profile_score_key(best["ev"]):
+            best["profile"], best["ev"] = cand, ev
+        _write_record(out_dir, _record(spec, seed, best["profile"], best["ev"], trace))
+
+    best_profile, best_ev, trace = await hill_climb(spec, seed, grid, _evaluate, on_candidate=_on)
+    rec = _record(spec, seed, best_profile, best_ev, trace)
+    rec["notes"] = notes
+    _write_record(out_dir, rec)
+    return rec

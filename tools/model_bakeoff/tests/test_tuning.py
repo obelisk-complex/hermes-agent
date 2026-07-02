@@ -155,3 +155,49 @@ def test_neighbours_gateway_pair_sets_both_fields():
     ns = tuning._neighbours(_spec(), SettingsProfile(), grid)
     assert len(ns) == 1 and ns[0].gateway == "ollama-cloud" and ns[0].wire_id == "m:cloud"
     tuning.apply_profile(_spec(), ns[0])   # must NOT raise (paired knob)
+
+
+# --- Task 5: _default_grid + prune + tune_model + record ---
+
+def test_default_grid_gives_omit_temp_model_max_tokens_neighbours():
+    g = tuning._default_grid(_spec(omit_temp=True))
+    assert "max_tokens" in g and "api_timeout_s" in g and "temperature" not in g
+
+
+def test_default_grid_non_omit_has_sampling():
+    g = tuning._default_grid(_spec(omit_temp=False))
+    assert "temperature" in g and "top_p" in g
+
+
+def test_tune_model_writes_record_and_raw(tmp_path):
+    task = make_task(tmp_path, "t1")
+    out = tmp_path / "tuneout"
+    rec = asyncio.run(tuning.tune_model(
+        _spec(max_tokens=8000), [task], _resolver(), _maxtokens_gated_transport(16000), str(out),
+        grid={"max_tokens": [8000, 16000, 32000]}, repeats=1, sandbox_timeout=30))
+    assert rec["winner"]["max_tokens"] >= 16000
+    assert (out / "best_settings.json").exists()
+    assert rec["achieved"]["pass_fraction"] == 1.0
+    assert list((out / "raw").glob("*.json"))                      # candidate runs persisted
+    assert rec["schema_version"] == 1 and "trace" in rec
+    assert "winner_margin_passed" in rec and "neighbours_evaluated" in rec
+    ModelSpec(**rec["base"])                                        # base snapshot round-trips for D
+
+
+def test_tune_model_record_flags_all_operational_candidate(tmp_path):
+    task = make_task(tmp_path, "t2")
+    out = tmp_path / "o"
+    rec = asyncio.run(tuning.tune_model(
+        _spec(), [task], _resolver(), _http503_transport, str(out),
+        grid={"max_tokens": [8000, 16000]}, repeats=1, sandbox_timeout=30))
+    assert "all_operational" in rec["reasons"] and rec["low_confidence"] is True
+    assert (out / "best_settings.json").exists()                   # written even when nothing passed
+
+
+def test_tune_model_prunes_metered_gateway(tmp_path):
+    task = make_task(tmp_path, "t3")
+    out = tmp_path / "o"
+    rec = asyncio.run(tuning.tune_model(
+        _spec(), [task], _resolver(), _passing_transport(), str(out),
+        extra_gateways=[("opencode-zen", "x")], repeats=1, sandbox_timeout=30))
+    assert any("metered" in n.lower() for n in rec["notes"])       # dropped, no metered eval attempted
