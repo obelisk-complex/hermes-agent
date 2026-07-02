@@ -68,3 +68,41 @@ def test_summary_json_carries_contamination_flags():
     res.contamination_flags = ["t1"]
     data = json.loads(report.render_summary_json(res, run_id="r", n_tasks=10, budget_spent=0.0))
     assert data["contamination_flags"] == ["t1"]
+
+
+# --- Task 7 / A3: primary 4-axis scoreboard + elegance/cost-proxy in summary ---
+
+def _result_with_elegance():
+    a = ModelAggregate(model_key="alpha", reasoning=True, cost_model="subscription",
+                       n_tasks=10, n_passed=9, p50_latency_s=1.5,
+                       mean_elegance=0.83, n_elegance_judged=7,
+                       n_latency_samples=9, cost_proxy_per_task_usd=0.0012)
+    b = ModelAggregate(model_key="beta", reasoning=False, cost_model="subscription",
+                       n_tasks=10, n_passed=9, p50_latency_s=2.0,
+                       mean_elegance=None, n_elegance_judged=0,
+                       n_latency_samples=9, cost_proxy_per_task_usd=0.0)
+    return rank.assemble([a, b], ceiling_key=None, bar=0.0)
+
+
+def test_report_md_has_scoreboard_with_four_axes():
+    md = report.render_report_md(_result_with_elegance(), run_id="r", n_tasks=10)
+    assert "## Scoreboard" in md
+    assert "Elegance" in md and "Cost proxy" in md
+    assert "0.83 (n=7)" in md         # judged model shows score + sample count
+    assert "n/a (n=0)" in md          # unjudged model shows n/a, not a fake 0.0
+    assert "alpha" in md and "beta" in md
+    assert "| yes |" in md and "| no |" in md   # reasoning column
+    # the secondary group tables + their caveat remain
+    assert "## Reasoning models" in md and "## Non-reasoning models" in md
+    assert "—" not in md and "–" not in md      # house style
+
+
+def test_summary_carries_elegance_cost_proxy_and_latency_count():
+    data = json.loads(report.render_summary_json(
+        _result_with_elegance(), run_id="r", n_tasks=10, budget_spent=0.0))
+    m = {x["key"]: x for x in data["models"]}
+    assert m["alpha"]["mean_elegance"] == 0.83
+    assert m["alpha"]["n_elegance_judged"] == 7
+    assert m["alpha"]["cost_proxy_per_task_usd"] == 0.0012
+    assert m["alpha"]["n_latency_samples"] == 9
+    assert m["beta"]["mean_elegance"] is None
