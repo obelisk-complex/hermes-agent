@@ -77,7 +77,7 @@ def _project_judge_spend(tasks, repeats):
 
 
 def cmd_estimate(args) -> int:
-    tasks, models = corpus.load(), _select(args.models)
+    tasks, models = corpus.load(selector=getattr(args, "suite", None)), _select(args.models)
     rows, total, unpriced = estimate(models, tasks, args.repeats)
     for key, in_t, out_t, cost, is_unpriced in rows:
         cost_col = "UNPRICED" if is_unpriced else f"${cost:.4f}"
@@ -99,11 +99,38 @@ def cmd_estimate(args) -> int:
 # ---- validate-oracles -----------------------------------------------------
 
 def cmd_validate_oracles(args) -> int:
-    results = corpus.validate_oracles(corpus.load(), timeout_s=args.timeout)
+    results = corpus.validate_oracles(corpus.load(selector=getattr(args, "suite", None)),
+                                      timeout_s=args.timeout)
     for r in results:
         print(f"  {'ok  ' if r.ok else 'FAIL'} {r.task_id}" + ("" if r.ok else f"   {r.detail}"))
     bad = [r for r in results if not r.ok]
     print(f"{len(results) - len(bad)}/{len(results)} oracles valid")
+    return 1 if bad else 0
+
+
+# ---- validate-suites ------------------------------------------------------
+
+def cmd_validate_suites(args) -> int:
+    results = corpus.validate_suites()
+    for r in results:
+        print(f"[{'ok ' if r.ok else 'BAD'}] {r.task_id}: {r.detail}")
+    bad = sum(1 for r in results if not r.ok)
+    dj = getattr(args, "disjoint", None)
+    if dj:
+        parts = [s.strip() for s in dj.split(",")]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            print("error: --disjoint expects exactly A,B (two non-empty selectors)")
+            return 2
+        try:
+            corpus.assert_disjoint(parts[0], parts[1])
+            print(f"[ok ] disjoint({parts[0]}, {parts[1]})")
+        except ValueError as e:
+            print(f"[BAD] {e}")
+            bad += 1
+    if not results:
+        # fail loud vs a vacuous green: 0 suites checked must not read like "all valid".
+        print("warning: no suite manifests found; leakage checks not exercised")
+    print(f"{sum(1 for r in results if r.ok)}/{len(results)} suite(s) valid")
     return 1 if bad else 0
 
 
@@ -281,7 +308,7 @@ async def _judge_runs(models, model_runs, task_by_id, jspec, judge_conn, transpo
 
 
 async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transport,
-                      bar=0.8, sandbox_timeout=60, judge_spec=None, ceiling_on=True):
+                      bar=0.8, sandbox_timeout=60, judge_spec=None, ceiling_on=True, suite=None):
     os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
     raw_dir = os.path.join(out_dir, "raw")
     budget = runner.BudgetTracker(budget_usd)
@@ -375,11 +402,14 @@ async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transpor
                      f"{', '.join(result.contamination_flags)}.")
     result.notes.extend(notes)
     run_id = os.path.basename(out_dir.rstrip("/"))
-    _write(os.path.join(out_dir, "report.md"), report.render_report_md(result, run_id, len(tasks)))
+    suite_record = {"selector": suite, "task_ids": [t.task_id for t in tasks]}
+    _write(os.path.join(out_dir, "report.md"),
+           report.render_report_md(result, run_id, len(tasks), suite_selector=suite))
     _write(os.path.join(out_dir, "ladder.yaml"), report.render_ladder_yaml(result.ladder))
     _write(os.path.join(out_dir, "summary.json"),
            report.render_summary_json(result, run_id=run_id, n_tasks=len(tasks),
-                                       ping_baselines=ping, budget_spent=budget.spent))
+                                       ping_baselines=ping, budget_spent=budget.spent,
+                                       suite=suite_record))
     return result, budget.spent
 
 
@@ -391,7 +421,8 @@ def _write(path, text):
 def cmd_run(args, env=None, transport=None) -> int:
     env = os.environ if env is None else env
     transport = transport or http_transport
-    tasks, models = corpus.load(), _select(args.models)
+    suite = getattr(args, "suite", None)
+    tasks, models = corpus.load(selector=suite), _select(args.models)
     out_dir = args.out or os.path.join(os.path.dirname(__file__), "runs", _run_id())
     os.makedirs(out_dir, exist_ok=True)
     jspec = registry.judge_spec()
@@ -401,7 +432,7 @@ def cmd_run(args, env=None, transport=None) -> int:
     result, spent = asyncio.run(run_bakeoff(
         models, tasks, env, out_dir, args.budget, args.repeats, transport,
         bar=getattr(args, "bar", 0.8), sandbox_timeout=getattr(args, "sandbox_timeout", 60),
-        judge_spec=jspec, ceiling_on=not getattr(args, "no_ceiling", False)))
+        judge_spec=jspec, ceiling_on=not getattr(args, "no_ceiling", False), suite=suite))
     print(f"wrote {out_dir}  (metered spend ${spent:.4f})")
     print(f"ladder: {' -> '.join(result.ladder)}")
     return 0
@@ -413,13 +444,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("validate-oracles")
     v.add_argument("--timeout", type=int, default=60)
+    v.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
     v.set_defaults(func=cmd_validate_oracles)
+
+    vs = sub.add_parser("validate-suites")
+    vs.add_argument("--disjoint", default=None, metavar="A,B",
+                    help="check two selectors are disjoint; do not pass 'all' (always overlaps)")
+    vs.set_defaults(func=cmd_validate_suites)
 
     e = sub.add_parser("estimate")
     e.add_argument("--models", default="")
     e.add_argument("--repeats", type=int, default=1,
                    help="repetitions per task (default 1; use 3+ for tighter CIs at higher cost)")
     e.add_argument("--budget", type=float, default=10.0)
+    e.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
     e.set_defaults(func=cmd_estimate)
 
     pf = sub.add_parser("preflight")
@@ -439,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="elegance judge key (must be cross-family vs all candidates)")
     r.add_argument("--no-ceiling", action="store_true",
                    help="do not pin the ceiling model in the ladder (use for a candidates-only run)")
+    r.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
     r.add_argument("--out", default="")
     r.set_defaults(func=cmd_run)
     return p

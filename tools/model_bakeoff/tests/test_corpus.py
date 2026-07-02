@@ -147,3 +147,37 @@ def test_list_suites_excludes_reserved(tmp_path):
     for f in ("good.yaml", "all.yaml", "tag:x.yaml"):
         open(os.path.join(sd, f), "w").write("name: x\nchallenges: [y]\n")
     assert corpus.list_suites(sd) == ["good"]                  # reserved stems hidden, sorted
+
+
+# --- Phase 1 Task 3: validate_suites (reject, don't omit) + assert_disjoint leakage guard ---
+
+def test_validate_suites_flags_missing_and_reserved(tmp_path):
+    d = str(tmp_path)
+    _mktask(d, "quick-a")
+    sd = os.path.join(d, "suites")
+    os.makedirs(sd)
+    open(os.path.join(sd, "good.yaml"), "w").write("name: good\nchallenges: [quick-a]\n")
+    open(os.path.join(sd, "bad.yaml"), "w").write("name: bad\nchallenges: [nope]\n")
+    open(os.path.join(sd, "all.yaml"), "w").write("name: all\nchallenges: [quick-a]\n")   # reserved
+    res = {r.task_id: r.ok for r in corpus.validate_suites(tasks_dir=d, suites_dir=sd)}
+    assert res["good"] is True
+    assert res["bad"] is False
+    assert res["all"] is False        # reserved file reported, not silently omitted
+
+
+def test_validate_suites_empty_dir_returns_nothing(tmp_path):
+    assert corpus.validate_suites(tasks_dir=str(tmp_path), suites_dir=str(tmp_path / "missing")) == []
+
+
+def test_assert_disjoint_raises_on_overlap(tmp_path):
+    d = str(tmp_path)
+    for n in ("quick-a", "quick-b", "quick-c"):
+        _mktask(d, n)
+    sd = os.path.join(d, "suites")
+    os.makedirs(sd)
+    open(os.path.join(sd, "dev.yaml"), "w").write("name: dev\nchallenges: [quick-a, quick-b]\n")
+    open(os.path.join(sd, "scored.yaml"), "w").write("name: scored\nchallenges: [quick-b, quick-c]\n")
+    open(os.path.join(sd, "other.yaml"), "w").write("name: other\nchallenges: [quick-c]\n")
+    with pytest.raises(ValueError):
+        corpus.assert_disjoint("dev", "scored", tasks_dir=d, suites_dir=sd)
+    corpus.assert_disjoint("dev", "other", tasks_dir=d, suites_dir=sd)   # disjoint pair: no raise

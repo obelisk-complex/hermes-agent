@@ -44,11 +44,13 @@ def _scoreboard_row(i: int, a) -> str:
             f"{_elegance_cell(a)} | {p50} | {proxy} |")
 
 
-def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0) -> str:
+def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0,
+                     suite_selector: Optional[str] = None) -> str:
     out: list[str] = ["# Model bakeoff report", ""]
     if run_id:
         out.append(f"Run: `{run_id}`")
     out.append(f"Corpus: {n_tasks} task(s). Indicative, not authoritative (SPEC §13).")
+    out.append(f"Suite: {suite_selector or 'whole corpus'} ({n_tasks} task(s)).")
 
     # PRIMARY view (A3): one 4-axis scoreboard across ALL models, globally strongest-first.
     scoreboard = sorted(result.report_rows, key=rank._strongest_key)
@@ -90,10 +92,12 @@ def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0) -
 
 def render_summary(result: LadderResult, run_id: str = "", n_tasks: int = 0,
                    ping_baselines: Optional[dict] = None,
-                   budget_spent: Optional[float] = None) -> dict:
+                   budget_spent: Optional[float] = None,
+                   suite: Optional[dict] = None) -> dict:
     return {
         "run_id": run_id,
         "n_tasks": n_tasks,
+        "suite": suite,        # {"selector": <str|null>, "task_ids": [...]}; None => whole corpus
         "ladder": result.ladder,
         "ping_baselines_s": ping_baselines or {},
         "budget_spent_usd": budget_spent,

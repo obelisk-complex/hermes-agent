@@ -139,6 +139,44 @@ class ValidationResult:
     detail: str = ""
 
 
+def validate_suites(tasks_dir: str | None = None,
+                    suites_dir: str | None = None) -> list[ValidationResult]:
+    """Gate every manifest in suites_dir. Walks the RAW directory listing (not
+    list_suites) so a reserved-name file (all.yaml / tag:*.yaml) is flagged ok=False
+    ("reserved; can never be selected") rather than silently omitted. A manifest that
+    fails to resolve (missing/dup/unknown slug, empty) is reported ok=False, not crashed.
+    ValidationResult.task_id holds the SUITE name here."""
+    sd = suites_dir or default_suites_dir()
+    results: list[ValidationResult] = []
+    if not os.path.isdir(sd):
+        return results
+    for f in sorted(os.listdir(sd)):
+        if not f.endswith(".yaml"):
+            continue
+        name = os.path.splitext(f)[0]
+        if name == "all" or name.startswith("tag:"):
+            results.append(ValidationResult(name, False, "reserved name; can never be selected"))
+            continue
+        try:
+            tasks = load(tasks_dir, selector=name, suites_dir=sd)
+            results.append(ValidationResult(name, True, f"{len(tasks)} task(s)"))
+        except Exception as e:      # noqa: BLE001 - report the failure, don't crash the gate
+            results.append(ValidationResult(name, False, str(e)))
+    return results
+
+
+def assert_disjoint(selector_a: str, selector_b: str, tasks_dir: str | None = None,
+                    suites_dir: str | None = None) -> None:
+    """Leakage guard: raise ValueError listing the overlapping task_ids if the two
+    selectors share any challenge. Used to prove a dev suite is disjoint from a scored
+    suite before tuning (PIPELINE-DESIGN sub-project C)."""
+    a = {t.task_id for t in load(tasks_dir, selector_a, suites_dir)}
+    b = {t.task_id for t in load(tasks_dir, selector_b, suites_dir)}
+    overlap = sorted(a & b)
+    if overlap:
+        raise ValueError(f"suites {selector_a!r} and {selector_b!r} overlap: {overlap}")
+
+
 def validate_oracles(tasks: list[TaskSpec], timeout_s: int = 60) -> list[ValidationResult]:
     results: list[ValidationResult] = []
     for t in tasks:

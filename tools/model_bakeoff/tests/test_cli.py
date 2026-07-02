@@ -38,6 +38,22 @@ def test_estimate_command_returns_2_when_over_budget():
     assert cli.cmd_estimate(args) == 2
 
 
+def test_run_parser_accepts_suite():
+    args = cli.build_parser().parse_args(["run", "--suite", "tag:ai-trap"])
+    assert args.suite == "tag:ai-trap"
+
+
+def test_estimate_and_validate_oracles_parsers_accept_suite():
+    assert cli.build_parser().parse_args(["estimate", "--suite", "quick"]).suite == "quick"
+    assert cli.build_parser().parse_args(["validate-oracles", "--suite", "quick"]).suite == "quick"
+
+
+def test_validate_suites_subcommand_exists():
+    args = cli.build_parser().parse_args(["validate-suites"])
+    assert hasattr(args, "disjoint")
+    assert args.func is cli.cmd_validate_suites
+
+
 def test_run_writes_all_artefacts(tmp_path):
     async def fake(url, headers, json_body, timeout):
         return 200, {"choices": [{"message": {"content": "```python\ndef f(x):\n    return x\n```"}}],

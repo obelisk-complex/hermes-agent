@@ -106,3 +106,25 @@ def test_summary_carries_elegance_cost_proxy_and_latency_count():
     assert m["alpha"]["cost_proxy_per_task_usd"] == 0.0012
     assert m["alpha"]["n_latency_samples"] == 9
     assert m["beta"]["mean_elegance"] is None
+
+
+# --- Phase 1 Task 3: suite selector recorded in summary + report header ---
+
+def test_summary_records_suite_payload():
+    d = report.render_summary(_result(), suite={"selector": "tag:ai-trap", "task_ids": ["a", "b"]})
+    assert d["suite"] == {"selector": "tag:ai-trap", "task_ids": ["a", "b"]}
+
+
+def test_summary_suite_defaults_none():
+    assert report.render_summary(_result())["suite"] is None
+
+
+def test_report_md_shows_suite_line():
+    md = report.render_report_md(_result(), run_id="r1", n_tasks=3, suite_selector="tag:ai-trap")
+    assert "Suite: tag:ai-trap (3 task" in md
+
+
+def test_report_md_suite_line_whole_corpus_by_default():
+    md = report.render_report_md(_result(), n_tasks=10)
+    assert "Suite: whole corpus" in md
+    assert "—" not in md and "–" not in md      # house style
