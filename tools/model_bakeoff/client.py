@@ -53,7 +53,11 @@ def build_payload(spec: ModelSpec, prompt: str, nonce: str,
         "stream": False,
     }
     if not spec.omit_temp:
-        payload["temperature"] = 0
+        payload["temperature"] = spec.temperature if spec.temperature is not None else 0
+        if spec.top_p is not None:
+            payload["top_p"] = spec.top_p
+        if spec.top_k is not None:
+            payload["top_k"] = spec.top_k
     if reasoning_extras:
         payload.update(copy.deepcopy(reasoning_extras))  # deep copy: never alias the shared registry dict
     return payload

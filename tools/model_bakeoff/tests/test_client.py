@@ -129,3 +129,29 @@ def test_payload_does_not_alias_reasoning_extras_inner_dict():
     p = client.build_payload(SUB, "x", "n", reasoning_extras=extras)
     p["thinking"]["mutated"] = True
     assert extras == {"thinking": {"type": "enabled"}}  # source dict untouched (deep copy)
+
+
+# --- Sub-project C Task 1: sampling knobs (temperature/top_p/top_k) ---
+
+def _payload_spec(**kw):
+    base = dict(key="m", gateway="opencode-go", wire_id="m", cost_model="subscription",
+                reasoning=False, omit_temp=False, max_tokens=8000, api_timeout_s=180)
+    base.update(kw)
+    return ModelSpec(**base)
+
+
+def test_payload_default_sampling_unchanged():
+    p = client.build_payload(_payload_spec(), "hi", "n")
+    assert p["temperature"] == 0            # None -> 0, exactly today's behaviour
+    assert "top_p" not in p and "top_k" not in p
+
+
+def test_payload_explicit_sampling_knobs():
+    p = client.build_payload(_payload_spec(temperature=0.7, top_p=0.9, top_k=40), "hi", "n")
+    assert p["temperature"] == 0.7 and p["top_p"] == 0.9 and p["top_k"] == 40
+
+
+def test_payload_omit_temp_drops_all_sampling():
+    # a reasoning model that omits temperature must never receive any sampling key
+    p = client.build_payload(_payload_spec(omit_temp=True, temperature=0.7, top_p=0.9), "hi", "n")
+    assert "temperature" not in p and "top_p" not in p and "top_k" not in p

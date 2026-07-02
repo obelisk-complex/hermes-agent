@@ -51,6 +51,11 @@ class ModelSpec:
     # decoupled/offline-testable. SHARED LITERAL: never mutate in place; build_payload DEEP-copies
     # it into the payload (a shallow copy would leave the inner dict aliased to this registry entry).
     reasoning_extras: Optional[dict] = None
+    # Sampling knobs (sub-project C). None => inherit today's behaviour (temperature 0, no top_p/top_k).
+    # Only ever sent when omit_temp is False; reasoning models that reject sampling keep omit_temp=True.
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
 
     @property
     def is_metered(self) -> bool:
