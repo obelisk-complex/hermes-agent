@@ -58,6 +58,7 @@ class TaskSpec:
     prompt_path: str
     oracle_path: str        # hidden pytest oracle, kept outside any model-writable dir
     reference_path: str     # reference solution; must pass the oracle offline
+    tags: tuple[str, ...] = ()   # from optional meta.yaml; drives suite tag-selection (frozen -> tuple)
 
 
 @dataclass

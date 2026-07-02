@@ -10,10 +10,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import yaml
+
 from . import sandbox
 from .models import TaskSpec
 
 _TIERS = ("quick", "standard", "thorough")
+_META_KEYS = {"tier", "tags"}
 
 
 def _tier_of(task_id: str) -> str:
@@ -27,6 +30,33 @@ def default_tasks_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "tasks")
 
 
+def _read_meta(task_dir: str, task_id: str) -> tuple[str, tuple[str, ...]]:
+    """Optional tasks/<dir>/meta.yaml -> (tier, tags). Absent -> (slug tier, ()).
+
+    Fail loud (SPEC / house rule): malformed YAML, a non-mapping, an unknown key
+    (e.g. the `tag:` singular typo), or a bad tier all raise ValueError naming the
+    file, rather than silently dropping the task from its intended suite.
+    """
+    p = os.path.join(task_dir, "meta.yaml")
+    if not os.path.isfile(p):
+        return _tier_of(task_id), ()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"malformed meta.yaml in {task_id}: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"meta.yaml in {task_id} must be a mapping")
+    unknown = set(data) - _META_KEYS
+    if unknown:
+        raise ValueError(f"meta.yaml in {task_id}: unknown key(s) {sorted(unknown)}")
+    tier = data.get("tier") or _tier_of(task_id)
+    if tier not in _TIERS:
+        raise ValueError(f"meta.yaml in {task_id}: bad tier {tier!r}")
+    tags = tuple(str(t) for t in (data.get("tags") or []))
+    return tier, tags
+
+
 def load(tasks_dir: str | None = None) -> list[TaskSpec]:
     tasks_dir = tasks_dir or default_tasks_dir()
     tasks: list[TaskSpec] = []
@@ -38,8 +68,9 @@ def load(tasks_dir: str | None = None) -> list[TaskSpec]:
         oracle = os.path.join(d, "oracle.py")
         ref = os.path.join(d, "reference.py")
         if all(os.path.isfile(p) for p in (prompt, oracle, ref)):
-            tasks.append(TaskSpec(task_id=name, tier=_tier_of(name),
-                                  prompt_path=prompt, oracle_path=oracle, reference_path=ref))
+            tier, tags = _read_meta(d, name)
+            tasks.append(TaskSpec(task_id=name, tier=tier, prompt_path=prompt,
+                                  oracle_path=oracle, reference_path=ref, tags=tags))
     return tasks
 
 
