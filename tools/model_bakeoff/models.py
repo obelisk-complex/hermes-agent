@@ -161,3 +161,5 @@ class LadderResult:
     indistinguishable_pairs: list[tuple[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     contamination_flags: list[str] = field(default_factory=list)  # flagged task_ids (SPEC §4/§9)
+    # Per-gateway reliability (sub-project B): {gateway: {attempts, operational, failure_rate}}.
+    gateway_reliability: dict = field(default_factory=dict)

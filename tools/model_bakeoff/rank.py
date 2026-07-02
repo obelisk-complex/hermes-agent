@@ -57,6 +57,21 @@ def _overlap(a: ModelAggregate, b: ModelAggregate) -> bool:
     return a.ci_low <= b.ci_high and b.ci_low <= a.ci_high
 
 
+def gateway_reliability(aggregates: Iterable[ModelAggregate]) -> dict:
+    """Roll operational (provider) failures up by gateway (sub-project B). Covers scored task
+    calls only, not warm-up or judge calls. Aggregates with gateway None are skipped."""
+    out: dict = {}
+    for a in aggregates:
+        if a.gateway is None:
+            continue
+        g = out.setdefault(a.gateway, {"attempts": 0, "operational": 0})
+        g["attempts"] += a.n_tasks
+        g["operational"] += a.n_operational
+    for g in out.values():
+        g["failure_rate"] = (g["operational"] / g["attempts"]) if g["attempts"] else 0.0
+    return out
+
+
 def assemble(
     aggregates: Iterable[ModelAggregate],
     ceiling_key: Optional[str] = None,
@@ -87,6 +102,9 @@ def assemble(
     excluded = sorted(a.model_key for a in rows
                       if a.model_key != ceiling_key and a.pass_fraction < bar)
 
+    by_key = {a.model_key: a for a in rows}
+    gr = gateway_reliability(rows)
+
     notes = [
         "Reasoning and non-reasoning models are ranked in separate groups; do not compare across groups.",
         "Ladder is weakest-first (pass_fraction ascending).",
@@ -94,17 +112,34 @@ def assemble(
     if ceiling_key:
         notes.append(f"{ceiling_key} pinned last as the declared ceiling.")
     if excluded:
+        # Annotate an exclusion that was operational (provider) rather than a genuine low score, so a
+        # reader scanning "who got cut" is not misled (ladder.yaml itself carries only bare keys).
+        parts = [f"{k} ({by_key[k].n_operational}/{by_key[k].n_tasks} operational, not wrong answers)"
+                 if by_key[k].n_operational else k for k in excluded]
         notes.append(f"{len(excluded)} model(s) excluded from the ladder "
-                     f"(pass_fraction < {bar:.2f}): {', '.join(excluded)}.")
+                     f"(pass_fraction < {bar:.2f}): {', '.join(parts)}.")
     if len(ladder) <= 1:
         notes.append("WARNING: the ladder has <= 1 entry after bar exclusions; the quality "
                      "gate has no escalation path below the ceiling.")
     if pairs:
         notes.append(f"{len(pairs)} pair(s) statistically indistinguishable (overlapping 95% CIs).")
 
+    # Reliability divergence (sub-project B): flag every model whose raw and completed pass fractions
+    # differ because of operational (provider) failures. The ladder still uses raw pass_fraction;
+    # whether the accuracy axis switches to completed accuracy is a separate, unscheduled behaviour change.
+    for a in rows:
+        if a.n_operational:
+            compl = f"{a.completed_pass_fraction:.0%}" if a.completed_pass_fraction is not None else "n/a"
+            notes.append(f"RELIABILITY: {a.model_key} had {a.n_operational}/{a.n_tasks} operational "
+                         f"(provider) failures; raw pass {a.pass_fraction:.0%} vs completed {compl}; "
+                         f"the ladder still uses raw pass_fraction (re-basing is a separate decision).")
+    if gr:
+        notes.append("Per-gateway reliability counts scored task calls only, not warm-up or judge calls.")
+
     return LadderResult(
         report_rows=report_rows,
         ladder=ladder,
         indistinguishable_pairs=pairs,
         notes=notes,
+        gateway_reliability=gr,
     )

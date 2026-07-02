@@ -12,6 +12,41 @@ def agg(key, passed, n, reasoning=True, cost=0.0, p50=1.0):
     )
 
 
+# --- Sub-project B Task 2: per-gateway reliability rollup + reliability notes ---
+
+def _relagg(key, n, npass, gw, nop):
+    return ModelAggregate(model_key=key, reasoning=False, cost_model="subscription",
+                          n_tasks=n, n_passed=npass, gateway=gw, n_operational=nop)
+
+
+def test_gateway_reliability_rolls_up_by_gateway():
+    aggs = [_relagg("a", 10, 8, "opencode-go", 2), _relagg("b", 10, 9, "opencode-go", 0),
+            _relagg("c", 10, 10, "ollama-cloud", 0)]
+    gr = rank.gateway_reliability(aggs)
+    assert gr["opencode-go"] == {"attempts": 20, "operational": 2, "failure_rate": 0.1}
+    assert gr["ollama-cloud"] == {"attempts": 10, "operational": 0, "failure_rate": 0.0}
+
+
+def test_assemble_attaches_gr_and_divergence_note():
+    res = rank.assemble([_relagg("alpha", 10, 8, "opencode-go", 2)])
+    assert res.gateway_reliability["opencode-go"]["operational"] == 2
+    assert any("alpha" in n and "operational" in n.lower() for n in res.notes)
+
+
+def test_assemble_survives_all_operational_model():
+    res = rank.assemble([_relagg("dead", 6, 0, "opencode-go", 6)])   # completed_pass_fraction is None
+    note = next(n for n in res.notes if "dead" in n and "operational" in n.lower())
+    assert "n/a" in note                                             # None rendered as n/a, no crash
+    assert "—" not in note and "–" not in note                      # house style
+
+
+def test_excluded_note_flags_operational():
+    res = rank.assemble([_relagg("op", 10, 0, "opencode-go", 10),    # excluded, all operational
+                         _relagg("good", 10, 10, "ollama-cloud", 0)], bar=0.8)
+    excl = next(n for n in res.notes if "excluded" in n.lower())
+    assert "op" in excl and "operational" in excl.lower()
+
+
 def test_wilson_bounds_perfect_and_zero():
     lo, hi = rank.wilson_ci(10, 10)
     assert 0.0 < lo < 1.0 and lo < hi <= 1.0
