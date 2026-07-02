@@ -57,9 +57,52 @@ def _read_meta(task_dir: str, task_id: str) -> tuple[str, tuple[str, ...]]:
     return tier, tags
 
 
-def load(tasks_dir: str | None = None) -> list[TaskSpec]:
+def default_suites_dir() -> str:
+    return os.path.join(os.path.dirname(__file__), "suites")
+
+
+def list_suites(suites_dir: str | None = None) -> list[str]:
+    """Selectable manifest names (sorted). Reserved stems (`all`, `tag:*`) are hidden
+    because they can never be selected as a manifest; validate_suites flags them loudly."""
+    sd = suites_dir or default_suites_dir()
+    if not os.path.isdir(sd):
+        return []
+    stems = [os.path.splitext(f)[0] for f in sorted(os.listdir(sd)) if f.endswith(".yaml")]
+    return [s for s in stems if s != "all" and not s.startswith("tag:")]
+
+
+def _load_manifest(name: str, suites_dir: str | None) -> list[str]:
+    """Ordered challenge slugs from suites/<name>.yaml. Fail loud on reserved name,
+    missing file, empty challenge list, or a duplicated slug (silent double-counting
+    would skew a model's aggregates and CI)."""
+    if name == "all" or name.startswith("tag:"):
+        raise ValueError(f"suite name {name!r} is reserved")
+    sd = suites_dir or default_suites_dir()
+    p = os.path.join(sd, f"{name}.yaml")
+    if not os.path.isfile(p):
+        raise ValueError(f"unknown suite {name!r} (no {p})")
+    with open(p, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    names = list(data.get("challenges") or [])
+    if not names:
+        raise ValueError(f"suite {name!r} has no challenges")
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ValueError(f"suite {name!r} lists duplicate challenge(s): {dupes}")
+    return names
+
+
+def load(tasks_dir: str | None = None, selector: str | None = None,
+         suites_dir: str | None = None) -> list[TaskSpec]:
+    """Discover tasks; optionally narrow by a suite selector.
+
+    selector: None / "" / "all" -> whole corpus (unchanged default). "tag:<t>" ->
+    challenges whose tags include <t> (sorted). "<name>" -> the named manifest's
+    challenges in manifest order. An explicit selector resolving to 0 tasks fails
+    loud (a typo'd tag must never silently run zero tasks).
+    """
     tasks_dir = tasks_dir or default_tasks_dir()
-    tasks: list[TaskSpec] = []
+    all_tasks: list[TaskSpec] = []
     for name in sorted(os.listdir(tasks_dir)):
         d = os.path.join(tasks_dir, name)
         if not os.path.isdir(d):
@@ -69,9 +112,24 @@ def load(tasks_dir: str | None = None) -> list[TaskSpec]:
         ref = os.path.join(d, "reference.py")
         if all(os.path.isfile(p) for p in (prompt, oracle, ref)):
             tier, tags = _read_meta(d, name)
-            tasks.append(TaskSpec(task_id=name, tier=tier, prompt_path=prompt,
-                                  oracle_path=oracle, reference_path=ref, tags=tags))
-    return tasks
+            all_tasks.append(TaskSpec(task_id=name, tier=tier, prompt_path=prompt,
+                                      oracle_path=oracle, reference_path=ref, tags=tags))
+
+    if selector in (None, "", "all"):
+        return all_tasks
+    by_id = {t.task_id: t for t in all_tasks}
+    if selector.startswith("tag:"):
+        tag = selector[4:]
+        selected = [t for t in all_tasks if tag in t.tags]        # all_tasks is already sorted
+    else:
+        names = _load_manifest(selector, suites_dir)              # raises on missing/dup/reserved
+        missing = [n for n in names if n not in by_id]
+        if missing:
+            raise ValueError(f"suite {selector!r} references unknown challenges: {missing}")
+        selected = [by_id[n] for n in names]                      # manifest order
+    if not selected:
+        raise ValueError(f"suite {selector!r} resolved to 0 tasks")   # FAIL LOUD
+    return selected
 
 
 @dataclass
