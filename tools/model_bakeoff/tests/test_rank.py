@@ -82,3 +82,30 @@ def test_assemble_notes_bar_exclusion_and_degenerate_ladder():
     joined = " ".join(res.notes)
     assert "excluded" in joined and "bad1" in joined and "bad2" in joined
     assert any("<= 1 entry" in n for n in res.notes)    # fail-loud degenerate-ladder warning
+
+
+# --- Task 6: elegance breaks pass-fraction ties in the REPORT order, never in the ladder ---
+
+def test_report_order_breaks_pass_ties_by_elegance_but_ladder_ignores_it():
+    # Names chosen so an alphabetical tiebreak would put a_low first; elegance must override
+    # it in the report, while the ladder (pass_fraction, cost, name) stays name-ordered.
+    a_low = ModelAggregate(model_key="a_low", reasoning=True, cost_model="subscription",
+                           n_tasks=10, n_passed=8, cost_per_task_usd=0.0, p50_latency_s=1.0,
+                           mean_elegance=0.5)
+    z_high = ModelAggregate(model_key="z_high", reasoning=True, cost_model="subscription",
+                            n_tasks=10, n_passed=8, cost_per_task_usd=0.0, p50_latency_s=1.0,
+                            mean_elegance=0.9)
+    result = rank.assemble([a_low, z_high], ceiling_key=None, bar=0.0)
+    assert [r.model_key for r in result.report_rows] == ["z_high", "a_low"]  # elegance wins the tie
+    assert result.ladder == ["a_low", "z_high"]   # ladder unchanged: elegance did NOT leak in
+
+
+def test_uniform_none_elegance_leaves_report_order_unchanged():
+    # Regression: when nobody is judged (all mean_elegance None), the elegance term is a constant
+    # and ordering falls through to cost/p50/name exactly as before Task 6.
+    x = ModelAggregate(model_key="x", reasoning=True, cost_model="subscription",
+                       n_tasks=10, n_passed=7, cost_per_task_usd=0.0, p50_latency_s=2.0)
+    y = ModelAggregate(model_key="y", reasoning=True, cost_model="subscription",
+                       n_tasks=10, n_passed=7, cost_per_task_usd=0.0, p50_latency_s=1.0)
+    result = rank.assemble([x, y], ceiling_key=None, bar=0.0)
+    assert [r.model_key for r in result.report_rows] == ["y", "x"]  # faster p50 first, as before

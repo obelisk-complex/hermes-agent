@@ -44,8 +44,13 @@ def detect_contamination(pass_counts: dict[str, int],
 
 
 def _strongest_key(a: ModelAggregate):
+    # REPORT ordering only (report_rows + the scoreboard). The ladder is a SEPARATE sort in
+    # assemble() and deliberately does NOT consider elegance (SPEC §2 PL1). Elegance breaks a
+    # pass-fraction tie here; unjudged (None) sorts as -1.0 so a judged model outranks an
+    # unjudged one on an otherwise-equal tie, and a run with uniform None is unchanged.
     p50 = a.p50_latency_s if a.p50_latency_s is not None else float("inf")
-    return (-a.pass_fraction, a.cost_per_task_usd, p50, a.model_key)
+    eleg = a.mean_elegance if a.mean_elegance is not None else -1.0
+    return (-a.pass_fraction, -eleg, a.cost_per_task_usd, p50, a.model_key)
 
 
 def _overlap(a: ModelAggregate, b: ModelAggregate) -> bool:
