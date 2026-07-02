@@ -108,6 +108,72 @@ def test_summary_carries_elegance_cost_proxy_and_latency_count():
     assert m["beta"]["mean_elegance"] is None
 
 
+# --- Sub-project B Task 3: reliability axis in report + summary ---
+
+def _result_with_ops():
+    a = ModelAggregate(model_key="alpha", reasoning=True, cost_model="subscription",
+                       n_tasks=10, n_passed=6, gateway="opencode-go", n_operational=4,
+                       error_counts={"call_error": 4})
+    return rank.assemble([a])
+
+
+def _result_all_operational():
+    a = ModelAggregate(model_key="dead", reasoning=False, cost_model="subscription",
+                       n_tasks=6, n_passed=0, gateway="opencode-go", n_operational=6,
+                       error_counts={"call_error": 6})
+    return rank.assemble([a])
+
+
+def _result_truncation_only():   # flash-like: extraction_failed, NOT operational
+    a = ModelAggregate(model_key="flashy", reasoning=True, cost_model="subscription",
+                       n_tasks=10, n_passed=3, gateway="opencode-go", n_operational=0,
+                       error_counts={"extraction_failed": 7})
+    return rank.assemble([a])
+
+
+def _result_pure_wrong():   # only test_failure: belongs in the scoreboard, not the reliability section
+    a = ModelAggregate(model_key="purewrong", reasoning=False, cost_model="subscription",
+                       n_tasks=10, n_passed=7, gateway="ollama-cloud", n_operational=0,
+                       error_counts={"test_failure": 3})
+    return rank.assemble([a])
+
+
+def test_scoreboard_has_opfail_column():
+    md = report.render_report_md(_result_with_ops(), run_id="r", n_tasks=10)
+    assert "Op-fail" in md and "4" in md
+    assert "—" not in md and "–" not in md
+
+
+def test_all_operational_renders_na_not_crash():
+    md = report.render_report_md(_result_all_operational(), run_id="r", n_tasks=6)
+    assert "n/a" in md                                   # completed shown n/a, never a fake 0%
+    data = json.loads(report.render_summary_json(_result_all_operational(), run_id="r", n_tasks=6))
+    assert data["models"][0]["completed_pass_fraction"] is None
+
+
+def test_reliability_section_and_gateway_table():
+    md = report.render_report_md(_result_with_ops(), run_id="r", n_tasks=10)
+    assert "## Reliability" in md and "opencode-go" in md and "call_error" in md
+
+
+def test_truncation_only_model_is_visible_and_labelled():
+    md = report.render_report_md(_result_truncation_only(), run_id="r", n_tasks=10)
+    assert "flashy" in md and "extraction_failed" in md   # NOT hidden despite n_operational==0
+
+
+def test_pure_wrong_answer_model_not_in_reliability_section():
+    md = report.render_report_md(_result_pure_wrong(), run_id="r", n_tasks=10)
+    assert "- purewrong:" not in md                       # pure wrong answers stay in the scoreboard
+
+
+def test_summary_carries_reliability():
+    data = json.loads(report.render_summary_json(_result_with_ops(), run_id="r", n_tasks=10))
+    m = {x["key"]: x for x in data["models"]}["alpha"]
+    assert m["n_operational"] == 4 and m["error_counts"] == {"call_error": 4}
+    assert m["gateway"] == "opencode-go" and m["completed_pass_fraction"] == 6 / 6
+    assert data["gateway_reliability"]["opencode-go"]["operational"] == 4
+
+
 # --- Phase 1 Task 3: suite selector recorded in summary + report header ---
 
 def test_summary_records_suite_payload():

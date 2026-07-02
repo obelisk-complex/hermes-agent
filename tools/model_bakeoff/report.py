@@ -12,7 +12,11 @@ import json
 from typing import Optional
 
 from . import rank
-from .models import LadderResult
+from .models import ERR_TEST_FAIL, OPERATIONAL_ERROR_TYPES, LadderResult
+
+
+def _pct_or_na(x) -> str:
+    return f"{x:.0%}" if x is not None else "n/a"
 
 
 def render_ladder_yaml(ladder: list[str]) -> str:
@@ -40,8 +44,44 @@ def _scoreboard_row(i: int, a) -> str:
     reasoning = "yes" if a.reasoning else "no"
     p50 = f"{a.p50_latency_s:.2f}s" if a.p50_latency_s is not None else "n/a"
     proxy = f"${a.cost_proxy_per_task_usd:.4f}"
+    opfail = str(a.n_operational)
+    if a.n_operational:   # show completed accuracy when provider failures skew the raw pass
+        opfail += f" (compl {_pct_or_na(a.completed_pass_fraction)})"
     return (f"| {i} | {a.model_key} | {reasoning} | {passci} | "
-            f"{_elegance_cell(a)} | {p50} | {proxy} |")
+            f"{_elegance_cell(a)} | {p50} | {proxy} | {opfail} |")
+
+
+def _reliability_section(result) -> list[str]:
+    """Sub-project B: per-gateway operational-failure table + per-model failure attribution.
+    Only models with an operational OR a settings-artefact failure appear here; pure wrong
+    answers (test_failure only) belong in the scoreboard, not this section."""
+    out = ["", "## Reliability and error attribution"]
+    gr = result.gateway_reliability
+    if gr:
+        out += ["", "| Gateway | Attempts | Op-fail | Rate |", "|---|---|---|---|"]
+        for g in sorted(gr):
+            v = gr[g]
+            out.append(f"| {g} | {v['attempts']} | {v['operational']} | {v['failure_rate']:.0%} |")
+        out.append("Per-gateway reliability counts scored task calls only, not warm-up or judge calls.")
+
+    def _notable(a) -> bool:
+        has_op = any(k in OPERATIONAL_ERROR_TYPES for k in a.error_counts)
+        has_settings = any(k not in OPERATIONAL_ERROR_TYPES and k != ERR_TEST_FAIL for k in a.error_counts)
+        return has_op or has_settings
+
+    flagged = [a for a in result.report_rows if _notable(a)]
+    if not flagged:
+        out += ["", "- no operational or settings-attributable failures recorded"]
+        return out
+    out += ["", "Per-model failures (operational = provider fault; model/settings = the model's "
+            "output or our token/sandbox budget, see sub-project C for truncation/timeout tuning):"]
+    for a in flagged:
+        op = {k: v for k, v in a.error_counts.items() if k in OPERATIONAL_ERROR_TYPES}
+        other = {k: v for k, v in a.error_counts.items() if k not in OPERATIONAL_ERROR_TYPES}
+        out.append(f"- {a.model_key}: raw pass {a.pass_fraction:.0%}, completed "
+                   f"{_pct_or_na(a.completed_pass_fraction)}; operational {op or dict()}; "
+                   f"model/settings {other or dict()}")
+    return out
 
 
 def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0,
@@ -56,13 +96,16 @@ def render_report_md(result: LadderResult, run_id: str = "", n_tasks: int = 0,
     scoreboard = sorted(result.report_rows, key=rank._strongest_key)
     if scoreboard:
         out += ["", "## Scoreboard (all models, strongest first)", "",
-                "| Rank | Model | Reasoning | Pass (95% CI) | Elegance (n) | p50 | Cost proxy/task |",
-                "|---|---|---|---|---|---|---|"]
+                "| Rank | Model | Reasoning | Pass (95% CI) | Elegance (n) | p50 | Cost proxy/task | Op-fail |",
+                "|---|---|---|---|---|---|---|---|"]
         out += [_scoreboard_row(i, a) for i, a in enumerate(scoreboard, 1)]
         out += ["", "Note: the per-group tables below rank within the reasoning / non-reasoning "
                 "split only; do NOT compare pass fractions across the two groups (SPEC §2). Cost "
                 "proxy prices output tokens at each model's sticker rate (subscription marginal "
-                "cost is 0)."]
+                "cost is 0). Op-fail counts operational (provider) failures; see the Reliability "
+                "section for how they split from wrong answers."]
+
+    out += _reliability_section(result)
 
     reasoning = [a for a in result.report_rows if a.reasoning]
     non = [a for a in result.report_rows if not a.reasoning]
@@ -101,6 +144,7 @@ def render_summary(result: LadderResult, run_id: str = "", n_tasks: int = 0,
         "ladder": result.ladder,
         "ping_baselines_s": ping_baselines or {},
         "budget_spent_usd": budget_spent,
+        "gateway_reliability": result.gateway_reliability,   # {gateway: {attempts, operational, failure_rate}}
         "models": [
             {
                 "key": a.model_key, "reasoning": a.reasoning, "cost_model": a.cost_model,
@@ -110,6 +154,9 @@ def render_summary(result: LadderResult, run_id: str = "", n_tasks: int = 0,
                 "n_latency_samples": a.n_latency_samples,
                 "mean_elegance": a.mean_elegance, "n_elegance_judged": a.n_elegance_judged,
                 "cost_proxy_per_task_usd": a.cost_proxy_per_task_usd,
+                "gateway": a.gateway, "error_counts": a.error_counts,
+                "n_operational": a.n_operational,
+                "completed_pass_fraction": a.completed_pass_fraction,
             }
             for a in result.report_rows
         ],
