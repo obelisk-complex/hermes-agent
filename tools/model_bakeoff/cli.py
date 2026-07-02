@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from . import (
     corpus, gateways, judge as judge_mod, preflight as preflight_mod,
-    rank, registry, report, runner)
+    rank, registry, report, runner, tuning)
 from .http_transport import http_transport, list_models
 
 THINKING_BUDGET_MULTIPLIER = 4.0  # reasoning models emit ~4x output tokens (SPEC §8)
@@ -438,6 +438,74 @@ def cmd_run(args, env=None, transport=None) -> int:
     return 0
 
 
+# ---- tune (sub-project C) -------------------------------------------------
+
+def _parse_try_gateways(items):
+    """Parse repeated --try-gateway 'gateway:wire_id' into (gateway, wire_id) pairs. split(":", 1)
+    keeps colon-bearing wire_ids intact (e.g. ollama-cloud:qwen3.5:397b)."""
+    out = []
+    for it in items or []:
+        gw, wid = it.split(":", 1)
+        out.append((gw, wid))
+    return out
+
+
+def cmd_tune(args, env=None, transport=None) -> int:
+    """Subscription-only best-shot tuning (sub-project C). Refuses metered models (recorded in
+    SKIPPED.json), enforces a task-id leakage guard between the dev and scored suites, and writes a
+    per-model best_settings.json. Oracle-only: no judge is ever constructed."""
+    env = os.environ if env is None else env
+    transport = transport or http_transport
+    out = args.out or os.path.join(os.path.dirname(__file__), "runs", _run_id() + "-tune")
+    os.makedirs(out, exist_ok=True)
+    suite = getattr(args, "suite", None)
+    tasks_dir = getattr(args, "tasks_dir", None)
+    suites_dir = getattr(args, "suites_dir", None)
+    tasks = corpus.load(selector=suite, tasks_dir=tasks_dir, suites_dir=suites_dir)
+
+    against = getattr(args, "against", None)
+    if against:
+        try:
+            corpus.assert_disjoint(suite, against, tasks_dir=tasks_dir, suites_dir=suites_dir)
+        except ValueError as e:
+            print(f"error: dev and scored suites are not disjoint: {e}")
+            return 2
+
+    models = _select(args.models)
+    metered = [m for m in models if m.is_metered]
+    subscription = [m for m in models if not m.is_metered]
+    skipped = [{"key": m.key, "reason": "metered (tuning is subscription-only; no budget cap)"}
+               for m in metered]
+    if metered:
+        print(f"refusing to tune metered model(s): {', '.join(m.key for m in metered)} "
+              "(tuning is subscription-only). Recorded in SKIPPED.json.")
+
+    def conn_for(gw):
+        return gateways.resolve(gw, env)
+
+    extra_gateways = _parse_try_gateways(getattr(args, "try_gateway", None))
+    for spec in subscription:
+        if not conn_for(spec.gateway).ok:
+            print(f"skipping {spec.key}: gateway {spec.gateway} unconfigured")
+            skipped.append({"key": spec.key, "reason": f"gateway {spec.gateway} unconfigured"})
+            continue
+        rec = asyncio.run(tuning.tune_model(
+            spec, tasks, conn_for, transport, os.path.join(out, spec.key),
+            extra_gateways=extra_gateways, repeats=args.repeats))
+        print(f"tuned {spec.key}: winner pass {rec['achieved']['pass_fraction']:.0%}, "
+              f"{rec['neighbours_evaluated']} neighbours evaluated"
+              + (" [LOW CONFIDENCE: " + ", ".join(rec["reasons"]) + "]" if rec["low_confidence"] else ""))
+
+    if skipped:
+        _write(os.path.join(out, "SKIPPED.json"), json.dumps(skipped, indent=2) + "\n")
+    tuned = [m for m in subscription if not any(s["key"] == m.key for s in skipped)]
+    if not tuned:
+        print("no subscription models tuned (all selected models were metered or unconfigured).")
+        return 2
+    print(f"wrote {out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="model_bakeoff")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -480,6 +548,20 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
     r.add_argument("--out", default="")
     r.set_defaults(func=cmd_run)
+
+    t = sub.add_parser("tune")
+    t.add_argument("--models", default="")
+    t.add_argument("--suite", default=None, help="dev suite selector: tag:<t> or a manifest name")
+    t.add_argument("--against", default=None, metavar="SCORED",
+                   help="scored suite the dev suite must be disjoint from (leakage guard)")
+    t.add_argument("--tasks-dir", default=None, help="dev corpus dir (defaults to the standard tasks/)")
+    t.add_argument("--suites-dir", default=None)
+    t.add_argument("--try-gateway", action="append", default=None, metavar="GW:WIRE",
+                   help="also search this gateway:wire_id provider; repeatable; metered gateways dropped")
+    t.add_argument("--repeats", type=int, default=2,
+                   help="repetitions per candidate (2 to 3 for stochastic stability)")
+    t.add_argument("--out", default="")
+    t.set_defaults(func=cmd_tune)
     return p
 
 

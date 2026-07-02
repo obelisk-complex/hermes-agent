@@ -389,3 +389,83 @@ def test_estimate_projects_judge_spend_and_ci_width(capsys):
     assert "Wilson 95% CI half-width" in out
     m = _re.search(r"projected judge spend: \$([0-9.]+)", out)
     assert m and float(m.group(1)) > 0
+
+
+# --- Sub-project C Task 6: tune CLI (subscription-only) + leakage guard + --try-gateway ---
+
+def make_cli_task(tasks_dir, task_id="quick-dev1"):
+    # directory-per-task layout that corpus.load discovers: <tasks_dir>/<task_id>/{prompt,oracle,reference}
+    d = os.path.join(str(tasks_dir), task_id)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "prompt.md"), "w") as f:
+        f.write("Implement f(x) returning x+1 in solution.py.")
+    with open(os.path.join(d, "oracle.py"), "w") as f:
+        f.write("from solution import f\n\ndef test_f():\n    assert f(2) == 3\n")
+    with open(os.path.join(d, "reference.py"), "w") as f:
+        f.write("def f(x):\n    return x + 1\n")
+    return d
+
+
+_ENV_GO = {"BAKEOFF_OPENCODE_GO_URL": "https://go/v1", "BAKEOFF_OPENCODE_GO_KEY": "k"}
+
+
+async def _boom_transport(url, headers, json, timeout):
+    raise AssertionError("transport must not be called")
+
+
+def _tune_passing_transport():
+    async def t(url, headers, json, timeout):
+        return 200, {"choices": [{"message": {"content": "```python\ndef f(x):\n    return x + 1\n```"}}],
+                     "usage": {"prompt_tokens": 10, "completion_tokens": 50}}, 0.2
+    return t
+
+
+def _tune_args(**kw):
+    base = dict(models="", suite=None, against=None, tasks_dir=None, suites_dir=None,
+                try_gateway=None, repeats=1, out=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_tune_refuses_overlapping_dev_and_scored(tmp_path, capsys):
+    rc = cli.cmd_tune(_tune_args(models="glm-5.1", suite="tag:ai-trap", against="all",
+                                 out=str(tmp_path)), env=_ENV_GO, transport=_boom_transport)
+    assert rc == 2 and "disjoint" in capsys.readouterr().out.lower()
+
+
+def test_tune_refuses_metered_model(tmp_path, capsys):
+    rc = cli.cmd_tune(_tune_args(models="claude-opus-4-8", suite="tag:ai-trap", out=str(tmp_path)),
+                      env=_ENV_GO, transport=_boom_transport)
+    assert rc == 2 and "metered" in capsys.readouterr().out.lower()
+    assert os.path.exists(os.path.join(str(tmp_path), "SKIPPED.json"))
+
+
+def test_tune_writes_best_settings_for_subscription_model(tmp_path):
+    make_cli_task(tmp_path / "corpus")
+    out = tmp_path / "out"
+    rc = cli.cmd_tune(_tune_args(models="glm-5.1", suite=None, tasks_dir=str(tmp_path / "corpus"),
+                                 out=str(out)), env=_ENV_GO, transport=_tune_passing_transport())
+    assert rc == 0 and (out / "glm-5.1" / "best_settings.json").exists()
+
+
+def test_tune_try_gateway_metered_is_pruned(tmp_path):
+    make_cli_task(tmp_path / "corpus")
+    out = tmp_path / "out"
+    rc = cli.cmd_tune(_tune_args(models="glm-5.1", suite=None, tasks_dir=str(tmp_path / "corpus"),
+                                 try_gateway=["opencode-zen:x"], out=str(out)),
+                      env=_ENV_GO, transport=_tune_passing_transport())
+    assert rc == 0
+    rec = json.load(open(os.path.join(str(out), "glm-5.1", "best_settings.json")))
+    assert any("metered" in n.lower() for n in rec["notes"])   # metered gateway dropped, no metered call
+
+
+def test_tune_parse_try_gateways_colon_wire_id():
+    # real ollama wire_ids contain colons; split(":", 1) must keep them intact
+    assert cli._parse_try_gateways(["ollama-cloud:qwen3.5:397b"]) == [("ollama-cloud", "qwen3.5:397b")]
+
+
+def test_tune_parser_wires_flags():
+    a = cli.build_parser().parse_args(["tune", "--suite", "dev", "--against", "all",
+                                       "--try-gateway", "a:b", "--try-gateway", "c:d"])
+    assert a.suite == "dev" and a.against == "all" and a.func is cli.cmd_tune
+    assert a.try_gateway == ["a:b", "c:d"] and a.repeats == 2
