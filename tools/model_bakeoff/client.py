@@ -82,6 +82,17 @@ def cost_usd(spec: ModelSpec, prompt_t: int, completion_t: int, thinking_t: int)
     return (prompt_t * spec.price_in_per_m + out_t * spec.price_out_per_m) / 1_000_000.0
 
 
+def cost_proxy_usd(spec: ModelSpec, completion_t: int, thinking_t: int) -> float:
+    """A sticker-price comparison proxy (SPEC coding-bakeoff cost axis). All four candidates are
+    subscription, so cost_usd()==0 for every one of them and cannot rank them on cost. This prices
+    just the output (completion + thinking tokens, billed as output) at the model's LIST output rate,
+    giving an apples-to-apples "what it would cost per task at list price" figure. Returns 0.0 when
+    the model carries no sticker price_out_per_m (nothing to proxy against)."""
+    if spec.price_out_per_m is None:
+        return 0.0
+    return (completion_t + thinking_t) * spec.price_out_per_m / 1_000_000.0
+
+
 def parse_response(spec: ModelSpec, task_id: str, status: int,
                    resp, ttft_s, total_s) -> CallResult:
     if status != 200 or not isinstance(resp, dict):

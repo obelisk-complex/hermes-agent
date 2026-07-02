@@ -13,6 +13,22 @@ ZEN = ModelSpec(key="opus", gateway="opencode-zen", wire_id="claude-opus-4-8",
                 cost_model="metered", reasoning=False, omit_temp=False,
                 max_tokens=8000, api_timeout_s=180, is_ceiling=True,
                 price_in_per_m=5.0, price_out_per_m=25.0)
+# A subscription model that ALSO carries a sticker output price (Task 2/3): its marginal
+# cost_usd stays 0, but cost_proxy_usd surfaces a comparable "if you paid list" figure.
+SUB_PRICED = ModelSpec(key="subp", gateway="opencode-go", wire_id="deepseek-v4-flash",
+                       cost_model="subscription", reasoning=True, omit_temp=True,
+                       max_tokens=16000, api_timeout_s=240, price_out_per_m=4.0)
+
+
+def test_cost_proxy_usd_uses_output_tokens_even_for_subscription():
+    # subscription => real marginal cost is 0 ...
+    assert client.cost_usd(SUB_PRICED, prompt_t=1000, completion_t=1000, thinking_t=500) == 0.0
+    # ... but the proxy prices (completion + thinking) at the sticker output rate.
+    assert client.cost_proxy_usd(SUB_PRICED, completion_t=1000, thinking_t=500) == 1500 * 4.0 / 1_000_000.0
+
+
+def test_cost_proxy_usd_zero_without_sticker_price():
+    assert client.cost_proxy_usd(SUB, completion_t=1000, thinking_t=500) == 0.0
 
 
 def test_payload_omits_temperature_when_flagged():
