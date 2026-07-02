@@ -111,11 +111,24 @@ async def run_model(spec: ModelSpec, tasks: list[TaskSpec], api_key: str, base_u
 def aggregate(spec: ModelSpec, runs: list[TaskRun]) -> ModelAggregate:
     n = len(runs)
     n_pass = sum(1 for r in runs if r.score.passed)
-    lat = [r.call.total_latency_s for r in runs if r.call.total_latency_s is not None]
+    # p50 over cache-hit-CLEAN latencies only (A1): a suspected cache hit (<100ms) is not a real
+    # generation latency and would bias speed downward. n_latency_samples lets the report tell
+    # "no successful runs" apart from "all runs were cache-hit-excluded" (A8).
+    lat = [r.call.total_latency_s for r in runs
+           if r.call.total_latency_s is not None and not r.call.cache_hit]
     total_cost = sum(r.call.cost_usd for r in runs)
+    # Elegance rollup over judged cells only (unjudged r.elegance is None).
+    elegances = [r.elegance for r in runs if r.elegance is not None]
+    # Sticker-price cost proxy averaged per task (subscription cost_usd stays 0; this is the only cost axis).
+    proxy_total = sum(client.cost_proxy_usd(spec, r.call.completion_tokens, r.call.thinking_tokens)
+                      for r in runs)
     return ModelAggregate(
         model_key=spec.key, reasoning=spec.reasoning, cost_model=spec.cost_model,
         n_tasks=n, n_passed=n_pass,
         cost_per_task_usd=(total_cost / n if n else 0.0),
         p50_latency_s=(statistics.median(lat) if lat else None),
+        n_latency_samples=len(lat),
+        mean_elegance=(statistics.mean(elegances) if elegances else None),
+        n_elegance_judged=len(elegances),
+        cost_proxy_per_task_usd=(proxy_total / n if n else 0.0),
     )

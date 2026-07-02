@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 from tools.model_bakeoff import runner
-from tools.model_bakeoff.models import ERR_CALL, ModelSpec, TaskSpec
+from tools.model_bakeoff.models import (
+    ERR_CALL, CallResult, ModelSpec, ScoreResult, TaskSpec)
 
 SUB = ModelSpec(key="sub", gateway="opencode-go", wire_id="deepseek-v4-flash",
                 cost_model="subscription", reasoning=True, omit_temp=True,
@@ -150,3 +151,41 @@ def test_run_model_attaches_partial_runs_on_budget_stop(tmp_path):
         asyncio.run(runner.run_model(ZEN, [task], "K", "https://b/v1", t, budget=b, sandbox_timeout=30))
     assert len(ei.value.partial_runs) >= 1
     assert ei.value.partial_runs[0].call.task_id == "tb"
+
+
+# --- Task 5 (A1/A8): aggregate rolls up elegance, cost-proxy, cache-hit-clean p50 ---
+
+SUB_PRICED = ModelSpec(key="subp", gateway="opencode-go", wire_id="deepseek-v4-flash",
+                       cost_model="subscription", reasoning=True, omit_temp=True,
+                       max_tokens=16000, api_timeout_s=240, price_out_per_m=4.0)
+
+
+def _run(elegance, latency, cache_hit, completion_t, passed=True):
+    call = CallResult(model_key="subp", task_id="t", ok=True, total_latency_s=latency,
+                      cache_hit=cache_hit, completion_tokens=completion_t, thinking_tokens=0)
+    return runner.TaskRun(call=call,
+                          score=ScoreResult(model_key="subp", task_id="t", passed=passed),
+                          elegance=elegance)
+
+
+def test_aggregate_rolls_up_elegance_and_cost_proxy_excluding_cache_hits():
+    runs = [
+        _run(0.8, 1.0, cache_hit=False, completion_t=1000),
+        _run(0.6, 2.0, cache_hit=False, completion_t=1000),
+        _run(None, 0.05, cache_hit=True, completion_t=500),   # unjudged + cache hit
+    ]
+    agg = runner.aggregate(SUB_PRICED, runs)
+    assert agg.mean_elegance == pytest.approx(0.7)        # (0.8 + 0.6) / 2, None ignored
+    assert agg.n_elegance_judged == 2
+    # p50 excludes the sub-100ms cache hit; only [1.0, 2.0] remain -> median 1.5
+    assert agg.p50_latency_s == pytest.approx(1.5)
+    assert agg.n_latency_samples == 2
+    # cost proxy over ALL runs: (1000 + 1000 + 500) tokens * $4/M / 3 tasks
+    assert agg.cost_proxy_per_task_usd == pytest.approx((2500 * 4.0 / 1_000_000.0) / 3)
+
+
+def test_aggregate_no_elegance_leaves_mean_none():
+    runs = [_run(None, 1.0, cache_hit=False, completion_t=100)]
+    agg = runner.aggregate(SUB_PRICED, runs)
+    assert agg.mean_elegance is None
+    assert agg.n_elegance_judged == 0
