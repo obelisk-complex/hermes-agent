@@ -63,6 +63,24 @@ class ModelSpec:
 
 
 @dataclass(frozen=True)
+class SettingsProfile:
+    """A settings override layered over a ModelSpec (sub-project C). Every field is optional;
+    None means "inherit the spec default". apply_profile() (tuning.py) validates + applies it via
+    dataclasses.replace, so the roster is never edited. Note (None-sentinel limitation): None cannot
+    express "no reasoning_extras" (it means inherit); to DISABLE reasoning pass an explicit
+    gateway-specific dict, not None."""
+    max_tokens: Optional[int] = None
+    api_timeout_s: Optional[int] = None
+    omit_temp: Optional[bool] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    reasoning_extras: Optional[dict] = None
+    gateway: Optional[Gateway] = None
+    wire_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class TaskSpec:
     """One corpus task (SPEC §4): a prompt, a hidden oracle, a reference solution."""
     task_id: str
