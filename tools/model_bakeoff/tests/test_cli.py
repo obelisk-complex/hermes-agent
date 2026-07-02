@@ -168,3 +168,185 @@ def test_run_bakeoff_default_bar_excludes_sub_bar_model(tmp_path):
     result, _ = asyncio.run(cli.run_bakeoff(models, [task], env, str(tmp_path / "run"), 10.0, 1, transport))
     assert "glm-5.1" not in result.ladder            # 0% pass excluded at default bar 0.8
     assert result.ladder[-1] == "claude-opus-4-8"    # ceiling still pinned last
+
+
+# --- Task 8 (A21/A22): per-model + floored run-wide judge-outage escalation ---
+
+def _esc(att, unp):
+    notes = []
+    cli._emit_judge_escalation(att, unp, notes)
+    return notes
+
+
+def test_escalation_per_model_concentrated_outage_names_the_model():
+    # model-B all 3 dark, model-A all 3 fine: run-wide is only 50% (below floors) but B must warn.
+    notes = _esc({"A": 3, "B": 3}, {"A": 0, "B": 3})
+    assert any("UNAVAILABLE" in n and "B" in n for n in notes)
+    assert not any("UNAVAILABLE" in n and n.count("A") and "for A" in n for n in notes)
+    assert any(n.startswith("note:") and "3 of 6" in n for n in notes)   # run-wide quiet rollup
+    assert not any("run were HTTP 200" in n for n in notes)              # no run-wide WARNING
+
+
+def test_escalation_per_model_near_total_fraction_and_floor():
+    assert any("near-total" in n and "for M" in n for n in _esc({"M": 5}, {"M": 4}))   # 0.8 fraction
+    assert any("near-total" in n and "for M" in n for n in _esc({"M": 3}, {"M": 2}))   # j=1 < 2
+
+
+def test_escalation_per_model_floor_suppresses_tiny():
+    # a<3 -> no per-model WARNING (a run-wide quiet 'note:' may still appear; that is fine).
+    assert not any(n.startswith("WARNING") for n in _esc({"M": 2}, {"M": 2}))
+
+
+def test_escalation_run_wide_total_and_incidental():
+    # 2 models all dark (att=3 each) -> per-model UNAVAILABLE x2 AND run-wide UNAVAILABLE
+    notes = _esc({"A": 3, "B": 3}, {"A": 3, "B": 3})
+    assert sum("UNAVAILABLE" in n and "for" not in n and "run" in n for n in notes) == 1
+    assert sum(("elegance axis for" in n and "UNAVAILABLE" in n) for n in notes) == 2
+    # incidental tiny run (att=1 x3) -> NO warning, only the quiet note. (The quiet note itself
+    # says "WARNINGs above", so detect warnings by the 'WARNING:' prefix, not a loose substring.)
+    tiny = _esc({"A": 1, "B": 1, "C": 1}, {"A": 1, "B": 1, "C": 1})
+    assert not any(n.startswith("WARNING") for n in tiny)
+    assert any(n.startswith("note:") and "3 of 3" in n for n in tiny)
+
+
+def test_escalation_a22_call_errors_excluded_from_denominator():
+    # A22: att counts only 200-responses; call-errors are excluded upstream. At a=3 all-dark the
+    # wording must read "all 3 of its judged cells" (the true 200-response denominator), not "1 of 4".
+    assert not any(n.startswith("WARNING") for n in _esc({"M": 2}, {"M": 2}))  # below floor
+    assert any("all 3 of its judged cells" in n for n in _esc({"M": 3}, {"M": 3}))
+
+
+# --- Task 8: run_bakeoff judge wiring (integration, offline) ---
+
+def _combo_transport(judge_content='{"elegance": 0.75, "rationale": "clean"}',
+                     solution="def f():\n    return 1", judge_status=200):
+    """One transport for both roles: a judge call (prompt carries 'UNTRUSTED') returns judge JSON;
+    any other call returns a candidate solution."""
+    async def t(url, headers, json, timeout):
+        prompt = json["messages"][0]["content"]
+        if "UNTRUSTED" in prompt:
+            if judge_status != 200:
+                return judge_status, {"error": "x"}, 0.2
+            return 200, {"choices": [{"message": {"content": judge_content}}],
+                         "usage": {"prompt_tokens": 100, "completion_tokens": 20}}, 0.2
+        return 200, {"choices": [{"message": {"content": f"```python\n{solution}\n```"}}],
+                     "usage": {"prompt_tokens": 10, "completion_tokens": 5}}, 0.2
+    return t
+
+
+_FULL_ENV = {"BAKEOFF_GATEWAY_URL": "https://x/v1", "BAKEOFF_GATEWAY_KEY": "k"}
+
+
+def test_run_bakeoff_rejects_self_grading_judge(tmp_path):
+    import asyncio
+    import dataclasses
+    task = _trivial_task(tmp_path)
+    jspec = dataclasses.replace(registry.judge_spec(), key="deepseek-judge", wire_id="deepseek-judge")
+    try:
+        asyncio.run(cli.run_bakeoff([registry.by_key("deepseek-v4-flash")], [task], _FULL_ENV,
+                                    str(tmp_path / "r"), 10.0, 1, _combo_transport(),
+                                    bar=0.0, judge_spec=jspec))
+        assert False, "expected ValueError for a same-family (self-grading) judge"
+    except ValueError:
+        pass
+
+
+def test_run_bakeoff_attaches_elegance_and_patches_raw_file(tmp_path):
+    import asyncio
+    import json as _json
+    task = _trivial_task(tmp_path)
+    out = str(tmp_path / "r")
+    result, _ = asyncio.run(cli.run_bakeoff(
+        [registry.by_key("deepseek-v4-flash")], [task], _FULL_ENV, out, 10.0, 1,
+        _combo_transport(), bar=0.0))
+    rows = {r.model_key: r for r in result.report_rows}
+    assert rows["deepseek-v4-flash"].mean_elegance == 0.75
+    assert rows["deepseek-v4-flash"].n_elegance_judged == 1
+    data = _json.load(open(os.path.join(out, "raw", "deepseek-v4-flash__t__r0.json")))
+    assert data["elegance"] == 0.75 and data["repeat_idx"] == 0
+
+
+def test_run_bakeoff_judge_call_error_is_loudly_noted(tmp_path):
+    import asyncio
+    task = _trivial_task(tmp_path)
+    result, _ = asyncio.run(cli.run_bakeoff(
+        [registry.by_key("deepseek-v4-flash")], [task], _FULL_ENV, str(tmp_path / "r"), 10.0, 1,
+        _combo_transport(judge_status=500), bar=0.0))
+    assert any("gateway/wire_id" in n for n in result.notes)
+
+
+def test_run_bakeoff_elegance_skipped_when_judge_unconfigured(tmp_path):
+    # A16: judge gateway (zen) unconfigured -> judging skipped, models STILL reported, elegance None.
+    import asyncio
+    task = _trivial_task(tmp_path)
+    go_only = {"BAKEOFF_OPENCODE_GO_URL": "https://go/v1", "BAKEOFF_OPENCODE_GO_KEY": "k"}
+    result, _ = asyncio.run(cli.run_bakeoff(
+        [registry.by_key("deepseek-v4-flash")], [task], go_only, str(tmp_path / "r"), 10.0, 1,
+        _combo_transport(), bar=0.0))
+    rows = {r.model_key: r for r in result.report_rows}
+    assert rows["deepseek-v4-flash"].mean_elegance is None
+    assert rows["deepseek-v4-flash"].n_elegance_judged == 0
+    assert any("elegance skipped" in n for n in result.notes)
+
+
+def test_run_bakeoff_budget_exhausted_mid_judging_leaves_later_model_unjudged(tmp_path):
+    # A19: budget below one judge cell -> first queued model judged then budget trips; later model
+    # never reached -> still present with n_elegance_judged==0 (not dropped).
+    import asyncio
+    task = _trivial_task(tmp_path)
+    models = [registry.by_key("deepseek-v4-flash"), registry.by_key("glm-5.1")]
+    result, _ = asyncio.run(cli.run_bakeoff(models, [task], _FULL_ENV, str(tmp_path / "r"),
+                                            0.0003, 1, _combo_transport(), bar=0.0))
+    rows = {r.model_key: r for r in result.report_rows}
+    assert rows["deepseek-v4-flash"].n_elegance_judged == 1
+    assert rows["glm-5.1"].n_elegance_judged == 0
+    assert rows["glm-5.1"].mean_elegance is None
+    assert any("judge budget exhausted" in n for n in result.notes)
+
+
+def test_run_bakeoff_per_repeat_raw_files_no_collision(tmp_path):
+    # A13: repeats=2 must yield n_models*n_tasks*repeats distinct raw files (not last-write-wins).
+    import asyncio
+    from tools.model_bakeoff.models import TaskSpec
+    tasks = []
+    for tid in ("a", "b"):
+        (tmp_path / f"{tid}p.md").write_text("write f returning 1")
+        (tmp_path / f"{tid}o_test.py").write_text(
+            "from solution import f\n\ndef test_f():\n    assert f() == 1\n")
+        (tmp_path / f"{tid}r.py").write_text("def f():\n    return 1\n")
+        tasks.append(TaskSpec(tid, "quick", str(tmp_path / f"{tid}p.md"),
+                              str(tmp_path / f"{tid}o_test.py"), str(tmp_path / f"{tid}r.py")))
+    out = str(tmp_path / "r")
+    asyncio.run(cli.run_bakeoff([registry.by_key("deepseek-v4-flash")], tasks, _FULL_ENV,
+                                out, 10.0, 2, _combo_transport(), bar=0.0))
+    raw = set(os.listdir(os.path.join(out, "raw")))
+    assert len(raw) == 1 * 2 * 2
+    assert {"deepseek-v4-flash__a__r0.json", "deepseek-v4-flash__a__r1.json"} <= raw
+
+
+def test_run_bakeoff_ceiling_phantom_guard(tmp_path):
+    # A4 step 5: ceiling_on but ceiling absent from this run -> omit it + WARNING (no phantom entry).
+    import asyncio
+    task = _trivial_task(tmp_path)
+    result, _ = asyncio.run(cli.run_bakeoff([registry.by_key("deepseek-v4-flash")], [task],
+                                            _FULL_ENV, str(tmp_path / "r"), 10.0, 1,
+                                            _combo_transport(), bar=0.0, ceiling_on=True))
+    assert "claude-opus-4-8" not in result.ladder
+    assert any("ceiling" in n and "not in this run" in n for n in result.notes)
+
+
+def test_run_parser_has_judge_and_no_ceiling_flags():
+    p = cli.build_parser()
+    assert p.parse_args(["run"]).judge == registry.judge_spec().key
+    assert p.parse_args(["run"]).no_ceiling is False
+    assert p.parse_args(["run", "--no-ceiling"]).no_ceiling is True
+
+
+def test_estimate_projects_judge_spend_and_ci_width(capsys):
+    import re as _re
+    cli.cmd_estimate(SimpleNamespace(models="deepseek-v4-flash", repeats=3, budget=10.0))
+    out = capsys.readouterr().out
+    assert "projected judge spend:" in out
+    assert "Wilson 95% CI half-width" in out
+    m = _re.search(r"projected judge spend: \$([0-9.]+)", out)
+    assert m and float(m.group(1)) > 0

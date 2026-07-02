@@ -20,7 +20,9 @@ import re
 import sys
 from datetime import datetime, timezone
 
-from . import corpus, gateways, preflight as preflight_mod, rank, registry, report, runner
+from . import (
+    corpus, gateways, judge as judge_mod, preflight as preflight_mod,
+    rank, registry, report, runner)
 from .http_transport import http_transport, list_models
 
 THINKING_BUDGET_MULTIPLIER = 4.0  # reasoning models emit ~4x output tokens (SPEC §8)
@@ -61,6 +63,19 @@ def estimate(models, tasks, repeats):
     return rows, total, unpriced
 
 
+def _project_judge_spend(tasks, repeats):
+    """Worst-case (all cells pass) projected elegance-judge spend, in USD. The judge is metered and
+    counts against --budget, but is NOT in `estimate()`'s candidate total (A4)."""
+    jspec = registry.judge_spec()
+    if not (jspec.price_in_per_m and jspec.price_out_per_m):
+        return 0.0
+    n_cells = len(tasks) * repeats
+    in_per_task = (sum(_approx_prompt_tokens(t) for t in tasks) / len(tasks)) if tasks else 0
+    judge_in = in_per_task + DEFAULT_OUT_TOKENS   # task prompt + the solution being judged
+    judge_out = DEFAULT_OUT_TOKENS
+    return n_cells * (judge_in * jspec.price_in_per_m + judge_out * jspec.price_out_per_m) / 1_000_000.0
+
+
 def cmd_estimate(args) -> int:
     tasks, models = corpus.load(), _select(args.models)
     rows, total, unpriced = estimate(models, tasks, args.repeats)
@@ -68,6 +83,12 @@ def cmd_estimate(args) -> int:
         cost_col = "UNPRICED" if is_unpriced else f"${cost:.4f}"
         print(f"  {key:22} in~{in_t:>8}  out~{out_t:>8}  {cost_col}")
     print(f"projected metered spend: ${total:.2f}  (budget ${args.budget:.2f})")
+    judge_spend = _project_judge_spend(tasks, args.repeats)
+    print(f"projected judge spend: ${judge_spend:.2f}  (worst case: assumes all cells pass, judge "
+          f"emits ~{DEFAULT_OUT_TOKENS} out/cell; metered, counts against --budget)")
+    n = len(tasks) * args.repeats
+    lo, hi = rank.wilson_ci(n // 2, n) if n else (0.0, 0.0)
+    print(f"Wilson 95% CI half-width at p=0.5, n=tasks*repeats={n}: {(hi - lo) / 2:.3f}")
     if unpriced:
         # fail loud: a metered model with no price reads as free but is not.
         print(f"WARNING: {len(unpriced)} metered model(s) UNPRICED, real spend not in the "
@@ -122,15 +143,21 @@ def _run_id() -> str:
 
 
 def _persist_raw(raw_dir, spec, tr):
-    path = os.path.join(raw_dir, f"{spec.key}__{tr.call.task_id}.json")
+    # Per-(model, task, repeat) filename (A13): --repeats>1 would otherwise collide 3 files onto one
+    # path and silently drop 2/3 of the evidence trail. Idempotent: the early candidate-only write and
+    # the later judged re-persist resolve to the SAME path for the same run (A7).
+    path = os.path.join(raw_dir, f"{spec.key}__{tr.call.task_id}__r{tr.repeat_idx}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump({
-            "model": spec.key, "task": tr.call.task_id,
+            "model": spec.key, "task": tr.call.task_id, "repeat_idx": tr.repeat_idx,
             "passed": tr.score.passed, "error_type": tr.score.error_type,
-            "latency_s": tr.call.total_latency_s, "cost_usd": tr.call.cost_usd,
+            "latency_s": tr.call.total_latency_s, "cache_hit": tr.call.cache_hit,
+            "cost_usd": tr.call.cost_usd,
             "prompt_tokens": tr.call.prompt_tokens, "completion_tokens": tr.call.completion_tokens,
             "thinking_tokens": tr.call.thinking_tokens,
             "extracted_code": tr.call.extracted_code, "raw_response": tr.call.raw_response,
+            "elegance": tr.elegance, "elegance_rationale": tr.elegance_rationale,
+            "judge_cost_usd": tr.judge_cost_usd,
         }, f, indent=2)
 
 
@@ -173,46 +200,174 @@ def _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes):
                      "reasoning. Verify the gateway reasoning controls.")
 
 
+def _read_prompt(task) -> str:
+    with open(task.prompt_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _emit_judge_escalation(att, unp, notes):
+    """Fail-loud tiered summary of judge-parse failures (A21/A22). `att`/`unp` are per-model dicts of
+    200-responses dispatched / of-those-unparseable (call-errors are excluded upstream and already
+    surfaced per-cell, A10/A22). Per-model tier (floor 3) catches ONE model going dark inside an
+    otherwise-healthy run; run-wide tier (floor 5) is the rollup + home of the scattered-miss note."""
+    tot_att = sum(att.values())
+    tot_unp = sum(unp.values())
+    for m in sorted(att):
+        a = att[m]
+        u = unp.get(m, 0)
+        j = a - u
+        if a >= 3:
+            if u == a:
+                notes.append(f"WARNING: elegance axis for {m} is UNAVAILABLE -- all {a} of its "
+                             "judged cells returned HTTP 200 but unparseable (suspect this model's "
+                             "output format vs the judge parser). Its elegance scores are absent; "
+                             "do not rank it on elegance.")
+            elif u / a >= 0.8 or j < 2:
+                notes.append(f"WARNING: near-total judge-parse failure for {m} -- only {j} of {a} "
+                             "of its cells parsed; its elegance axis is UNRELIABLE.")
+    if tot_att >= 5 and tot_unp == tot_att:
+        notes.append(f"WARNING: ALL {tot_att} judge replies across the run were HTTP 200 but "
+                     "unparseable; the elegance axis is UNAVAILABLE run-wide -- suspect a judge "
+                     "prompt/template regression or a judge-model outage. Do NOT trust any elegance "
+                     "ranking.")
+    elif tot_att >= 5 and (tot_unp / tot_att >= 0.8 or (tot_att - tot_unp) < 3):
+        notes.append(f"WARNING: near-total judge-parse failure run-wide -- only {tot_att - tot_unp} "
+                     f"of {tot_att} judge replies parsed; treat the elegance axis as UNRELIABLE.")
+    elif tot_unp > 0:
+        notes.append(f"note: {tot_unp} of {tot_att} judge replies were 200 but unparseable "
+                     "(elegance omitted for those cells; see any per-model WARNINGs above for "
+                     "concentrated failures).")
+
+
+async def _judge_runs(models, model_runs, task_by_id, jspec, judge_conn, transport, budget,
+                      notes, raw_dir):
+    """Post-matrix round-robin elegance judging (A7 step 3). Judges every PASSING run, interleaved
+    by model so a budget stop truncates every model's tail equally. Attaches elegance in memory and
+    RE-PERSISTS each judged cell's file in place; tracks per-model 200-response parse stats (A22)
+    and emits the tiered escalation summary (A21). Genuine call errors get a loud per-cell note and
+    are NOT counted toward the parse-rate denominator (A10/A22)."""
+    spec_by_key = {m.key: m for m in models}
+    passing = {k: [tr for tr in runs if tr.score.passed] for k, runs in model_runs.items()}
+    maxlen = max((len(v) for v in passing.values()), default=0)
+    queue = [(k, passing[k][i]) for i in range(maxlen) for k in model_runs if i < len(passing[k])]
+    att, unp = {}, {}
+    n_total, n_judged = len(queue), 0
+    for key, tr in queue:
+        if budget.remaining() <= 0:   # pre-check: do not spend past the cap; leave the tail unjudged
+            notes.append(f"judge budget exhausted after {n_judged} of {n_total} passing cells; "
+                         "remaining elegance left None")
+            break
+        task = task_by_id[tr.call.task_id]
+        res = await judge_mod.judge_elegance(
+            jspec, _read_prompt(task), tr.call.extracted_code,
+            judge_conn.api_key, judge_conn.base_url, transport)
+        tr.elegance, tr.elegance_rationale, tr.judge_cost_usd = res.elegance, res.rationale, res.cost_usd
+        _persist_raw(raw_dir, spec_by_key[key], tr)   # patch the durable file with the verdict
+        n_judged += 1
+        if not res.call_ok:
+            notes.append(f"WARNING: judge CALL error on {key}/{tr.call.task_id} "
+                         f"(gateway/wire_id): {res.error}")
+        else:
+            att[key] = att.get(key, 0) + 1
+            if res.elegance is None:
+                unp[key] = unp.get(key, 0) + 1
+        try:
+            budget.add(res.cost_usd)
+        except runner.BudgetExceeded as exc:
+            notes.append(f"judge budget exhausted after {n_judged} of {n_total} passing cells; "
+                         f"remaining elegance left None: {exc}")
+            break
+    _emit_judge_escalation(att, unp, notes)
+
+
 async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transport,
-                      bar=0.8, sandbox_timeout=60):
+                      bar=0.8, sandbox_timeout=60, judge_spec=None, ceiling_on=True):
     os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
     raw_dir = os.path.join(out_dir, "raw")
     budget = runner.BudgetTracker(budget_usd)
-    aggregates, ping, notes = [], {}, []
+    ping, notes = {}, []
     pass_counts, attempted_counts = {}, {}
+
+    # No-self-grade guard (A4). Only COMPETITIVELY-RANKED candidates count: the ceiling is a reference
+    # bound (excluded from the real run via --no-ceiling), so a judge sharing its family does not bias
+    # the candidate ranking. This also keeps the existing opus-inclusive tests green.
+    jspec = judge_spec or registry.judge_spec()
+    contenders = [m.key for m in models if not m.is_ceiling]
+    if judge_mod.judge_conflicts(jspec.key, contenders):
+        raise ValueError(f"judge {jspec.key} shares a model family with a candidate in "
+                         f"{contenders}; that would be self-grading. Choose a cross-family judge.")
+    judge_conn = gateways.resolve(jspec.gateway, env)
+
+    # PHASE 1: run candidates per model; persist each model's raw runs IMMEDIATELY (A7) so a crash
+    # during judging never loses generated solutions. Collect in memory for judging + aggregation.
+    model_runs = {}
     for spec in models:
         conn = gateways.resolve(spec.gateway, env)
         if not conn.ok:
             notes.append(f"skipped {spec.key}: gateway {spec.gateway} unconfigured")
             continue
         all_runs = []
+        rep_idx = 0
         try:
-            for _ in range(repeats):
+            for rep_idx in range(repeats):
                 runs, warmups = await runner.run_model(
                     spec, tasks, conn.api_key, conn.base_url, transport,
                     budget=budget, sandbox_timeout=sandbox_timeout)
+                for tr in runs:
+                    tr.repeat_idx = rep_idx
                 all_runs += runs
                 if warmups and spec.key not in ping:
                     ping[spec.key] = warmups[0].total_latency_s
         except runner.BudgetExceeded as exc:
-            all_runs += getattr(exc, "partial_runs", [])  # M3: keep the costed runs from the stopped pass
+            partials = getattr(exc, "partial_runs", [])
+            for tr in partials:
+                tr.repeat_idx = rep_idx   # loop var holds the repeat that was in flight (A13)
+            all_runs += partials
             warmups = getattr(exc, "partial_warmups", [])
             if warmups and spec.key not in ping:
                 ping[spec.key] = warmups[0].total_latency_s
             notes.append(f"BUDGET STOP at {spec.key}: {exc}")  # fail loud, keep partial
+            model_runs[spec.key] = all_runs
             for tr in all_runs:
                 _persist_raw(raw_dir, spec, tr)
-            if all_runs:
-                aggregates.append(runner.aggregate(spec, all_runs))
-            _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes)
             break
+        model_runs[spec.key] = all_runs
         for tr in all_runs:
             _persist_raw(raw_dir, spec, tr)
-        aggregates.append(runner.aggregate(spec, all_runs))
-        _finalize_model(spec, all_runs, pass_counts, attempted_counts, notes)
 
+    # PHASE 2: elegance judging (patches the persisted files in place).
+    if judge_conn.ok:
+        task_by_id = {t.task_id: t for t in tasks}
+        await _judge_runs(models, model_runs, task_by_id, jspec, judge_conn, transport,
+                          budget, notes, raw_dir)
+    else:
+        notes.append("elegance skipped: judge gateway unconfigured")
+
+    # PHASE 3: aggregate + finalize per model (every model that produced runs still appears).
+    aggregates = []
+    for spec in models:
+        runs = model_runs.get(spec.key)
+        if runs is None:
+            continue
+        # A8: distinguish "no successful runs" from "all runs cache-hit-excluded" for p50.
+        agg = runner.aggregate(spec, runs)
+        if agg.p50_latency_s is None and agg.n_latency_samples == 0 and any(tr.call.ok for tr in runs):
+            notes.append(f"note: {spec.key} p50 is n/a because every successful run looked like a "
+                         "cache hit (<100ms); latency not comparable for this model.")
+        aggregates.append(agg)
+        _finalize_model(spec, runs, pass_counts, attempted_counts, notes)
+
+    # Ceiling phantom guard (A4 step 5): only pin the ceiling if it actually ran.
     ceil = registry.ceiling()
-    result = rank.assemble(aggregates, ceiling_key=ceil.key if ceil else None, bar=bar)
+    ceil_key = None
+    if ceiling_on and ceil is not None:
+        if any(a.model_key == ceil.key for a in aggregates):
+            ceil_key = ceil.key
+        else:
+            notes.append(f"WARNING: ceiling {ceil.key} requested but not in this run's models; "
+                         "omitting it from the ladder rather than pinning a phantom entry with no data.")
+
+    result = rank.assemble(aggregates, ceiling_key=ceil_key, bar=bar)
     result.contamination_flags = rank.detect_contamination(pass_counts, attempted_counts)
     if result.contamination_flags:
         notes.append("CONTAMINATION: tasks passed perfectly by >= 75% of healthy testers; "
@@ -239,9 +394,14 @@ def cmd_run(args, env=None, transport=None) -> int:
     tasks, models = corpus.load(), _select(args.models)
     out_dir = args.out or os.path.join(os.path.dirname(__file__), "runs", _run_id())
     os.makedirs(out_dir, exist_ok=True)
+    jspec = registry.judge_spec()
+    judge_key = getattr(args, "judge", None)
+    if judge_key and judge_key != jspec.key:
+        jspec = dataclasses.replace(jspec, key=judge_key, wire_id=judge_key)
     result, spent = asyncio.run(run_bakeoff(
         models, tasks, env, out_dir, args.budget, args.repeats, transport,
-        bar=getattr(args, "bar", 0.8), sandbox_timeout=getattr(args, "sandbox_timeout", 60)))
+        bar=getattr(args, "bar", 0.8), sandbox_timeout=getattr(args, "sandbox_timeout", 60),
+        judge_spec=jspec, ceiling_on=not getattr(args, "no_ceiling", False)))
     print(f"wrote {out_dir}  (metered spend ${spent:.4f})")
     print(f"ladder: {' -> '.join(result.ladder)}")
     return 0
@@ -275,6 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="min pass_fraction to keep a model in the ladder (SPEC §4 standard/thorough)")
     r.add_argument("--sandbox-timeout", type=int, default=60,
                    help="per-task sandbox wall-clock timeout in seconds")
+    r.add_argument("--judge", default=registry.judge_spec().key,
+                   help="elegance judge key (must be cross-family vs all candidates)")
+    r.add_argument("--no-ceiling", action="store_true",
+                   help="do not pin the ceiling model in the ladder (use for a candidates-only run)")
     r.add_argument("--out", default="")
     r.set_defaults(func=cmd_run)
     return p
