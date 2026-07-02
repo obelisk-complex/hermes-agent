@@ -1,0 +1,6 @@
+name: ai-traps
+description: Tasks that reliably trip up LLMs (off-by-one, half-open intervals, trunc division).
+challenges:
+  - quick-overlapping-substring-count
+  - standard-halfopen-merge-intervals
+  - thorough-expr-eval

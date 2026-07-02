@@ -1,0 +1,7 @@
+name: quick
+description: All quick-tier warmups.
+challenges:
+  - quick-balanced-brackets
+  - quick-config-flag-parse
+  - quick-overlapping-substring-count
+  - quick-rle

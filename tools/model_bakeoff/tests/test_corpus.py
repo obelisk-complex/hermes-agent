@@ -181,3 +181,22 @@ def test_assert_disjoint_raises_on_overlap(tmp_path):
     with pytest.raises(ValueError):
         corpus.assert_disjoint("dev", "scored", tasks_dir=d, suites_dir=sd)
     corpus.assert_disjoint("dev", "other", tasks_dir=d, suites_dir=sd)   # disjoint pair: no raise
+
+
+# --- Phase 1 Task 4: seeded tags + manifests resolve against the real corpus ---
+
+def test_seed_suites_resolve_expected():
+    assert [t.task_id for t in corpus.load(selector="tag:ai-trap")] == [
+        "quick-overlapping-substring-count",
+        "standard-halfopen-merge-intervals",
+        "thorough-expr-eval",
+    ]                                                        # sorted order
+    assert {t.task_id for t in corpus.load(selector="ai-traps")} == {
+        "quick-overlapping-substring-count",
+        "standard-halfopen-merge-intervals",
+        "thorough-expr-eval",
+    }
+    assert {t.task_id for t in corpus.load(selector="quick")} == {
+        "quick-balanced-brackets", "quick-config-flag-parse",
+        "quick-overlapping-substring-count", "quick-rle",
+    }

@@ -74,6 +74,29 @@ def test_run_writes_all_artefacts(tmp_path):
     summary = json.load(open(os.path.join(out, "summary.json")))
     assert summary["ladder"][-1] == "claude-opus-4-8"  # ceiling pinned last
     assert os.listdir(os.path.join(out, "raw"))  # raw model outputs persisted
+    assert summary["suite"] == {"selector": None, "task_ids": [t.task_id for t in corpus.load()]}
+
+
+def test_run_with_suite_narrows_execution_and_records_it(tmp_path):
+    # end-to-end proof that --suite narrows what actually RUNS (not just the metadata)
+    # and that the resolved task_ids are recorded. Guards the cmd_run->run_bakeoff->report seam.
+    async def fake_transport(url, headers, json, timeout):
+        return 200, {"choices": [{"message": {"content": "```python\ndef f(x):\n    return x\n```"}}],
+                     "usage": {"prompt_tokens": 10, "completion_tokens": 5}}, None
+
+    env = {"BAKEOFF_GATEWAY_URL": "https://x/v1", "BAKEOFF_GATEWAY_KEY": "k"}
+    out = str(tmp_path / "run_ai_traps")
+    args = SimpleNamespace(models="deepseek-v4-flash,claude-opus-4-8",
+                           repeats=1, budget=10.0, out=out, bar=0.8, sandbox_timeout=60,
+                           suite="tag:ai-trap")
+    rc = cli.cmd_run(args, env=env, transport=fake_transport)
+    assert rc == 0
+    summary = json.load(open(os.path.join(out, "summary.json")))
+    ai_traps = ["quick-overlapping-substring-count", "standard-halfopen-merge-intervals",
+                "thorough-expr-eval"]
+    assert summary["n_tasks"] == 3                         # only the 3 tasks ran, not all 10
+    assert summary["suite"] == {"selector": "tag:ai-trap", "task_ids": ai_traps}
+    assert "Suite: tag:ai-trap" in open(os.path.join(out, "report.md")).read()
 
 
 def test_run_and_estimate_default_repeats_is_one_and_run_has_bar_and_sandbox_timeout():
