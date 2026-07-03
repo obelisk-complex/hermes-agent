@@ -143,3 +143,10 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Model-bakeoff run outputs (matrix runs, smoke runs, tune sweeps, dual-runs).
+# These are durable-on-disk generated products kept for review but NOT committed:
+# they are large per-(model,task,repeat) raw dumps + reports, regenerable by
+# re-running the harness, and summarised in the brain wiki. Keep them untracked.
+runs/
+tools/model_bakeoff/runs/
