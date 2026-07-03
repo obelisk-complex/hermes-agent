@@ -177,6 +177,28 @@ def assert_disjoint(selector_a: str, selector_b: str, tasks_dir: str | None = No
         raise ValueError(f"suites {selector_a!r} and {selector_b!r} overlap: {overlap}")
 
 
+def assert_disjoint_dirs(dir_a: str, dir_b: str | None = None, *,
+                         ids_b: set[str] | None = None) -> None:
+    """Cross-DIRECTORY leakage guard (sub-project D): raise ValueError listing the overlapping
+    task_ids if `dir_a`'s corpus shares any id with `dir_b`'s corpus (when `dir_b` is a real dir) or
+    with the explicit `ids_b` set (the dev dir is gone; ids come from dev_corpus.json["dev_tasks"]).
+    Complements assert_disjoint (which compares two SELECTORS inside one dir): D evaluates on the
+    scored tasks/ dir while the tuner trained on a separate dev_tasks/ dir. Raises if neither dir_b nor
+    ids_b is given (nothing to compare against); the caller decides how to handle a fully-absent dev
+    corpus (D warns and does not block)."""
+    a = {t.task_id for t in load(dir_a)}
+    if dir_b is not None:
+        b = {t.task_id for t in load(dir_b)}
+    elif ids_b is not None:
+        b = set(ids_b)
+    else:
+        raise ValueError("assert_disjoint_dirs needs either dir_b (a directory) or ids_b (an id set) "
+                         "to compare against; both were None")
+    overlap = sorted(a & b)
+    if overlap:
+        raise ValueError(f"scored dir {dir_a!r} leaks into the dev corpus; shared task_id(s): {overlap}")
+
+
 def validate_oracles(tasks: list[TaskSpec], timeout_s: int = 60) -> list[ValidationResult]:
     results: list[ValidationResult] = []
     for t in tasks:

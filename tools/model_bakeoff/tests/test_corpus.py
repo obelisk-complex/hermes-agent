@@ -200,3 +200,41 @@ def test_seed_suites_resolve_expected():
         "quick-balanced-brackets", "quick-config-flag-parse",
         "quick-overlapping-substring-count", "quick-rle",
     }
+
+
+# --- Sub-project D Task 2: cross-directory leakage guard (dir-pair + id-list fallback) ---
+
+def test_assert_disjoint_dirs_passes_on_disjoint_dirs(tmp_path):
+    a = str(tmp_path / "scored")
+    b = str(tmp_path / "dev")
+    _mktask(a, "quick-scored1")
+    _mktask(b, "quick-dev1")
+    corpus.assert_disjoint_dirs(a, b)                       # disjoint dirs: no raise
+
+
+def test_assert_disjoint_dirs_raises_naming_shared_id(tmp_path):
+    a = str(tmp_path / "scored")
+    b = str(tmp_path / "dev")
+    _mktask(a, "quick-shared")
+    _mktask(a, "quick-only-a")
+    _mktask(b, "quick-shared")
+    _mktask(b, "quick-only-b")
+    with pytest.raises(ValueError) as ei:
+        corpus.assert_disjoint_dirs(a, b)
+    assert "quick-shared" in str(ei.value)                 # names the leaked id
+
+
+def test_assert_disjoint_dirs_ids_fallback_catches_overlap(tmp_path):
+    a = str(tmp_path / "scored")
+    _mktask(a, "quick-x")
+    _mktask(a, "quick-y")
+    with pytest.raises(ValueError):
+        corpus.assert_disjoint_dirs(a, None, ids_b={"quick-y", "quick-z"})
+    corpus.assert_disjoint_dirs(a, None, ids_b={"quick-p", "quick-q"})   # disjoint set: no raise
+
+
+def test_assert_disjoint_dirs_both_none_raises(tmp_path):
+    a = str(tmp_path / "scored")
+    _mktask(a, "quick-x")
+    with pytest.raises(ValueError):
+        corpus.assert_disjoint_dirs(a)                     # nothing to compare against
