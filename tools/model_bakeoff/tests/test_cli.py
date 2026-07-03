@@ -504,6 +504,46 @@ def test_run_parser_has_judge_and_no_ceiling_flags():
     assert p.parse_args(["run", "--no-ceiling"]).no_ceiling is True
 
 
+# --- Sub-project D Task 9: estimate --dualrun ---
+
+def test_dualrun_estimate_judge_spend_scales_with_policy():
+    tasks = corpus.load(selector="quick")
+    models = [registry.by_key("deepseek-v4-flash")]
+    _, jb, _, _ = cli._dualrun_estimate(models, tasks, 1, "both")
+    _, jbs, _, _ = cli._dualrun_estimate(models, tasks, 1, "bestshot")
+    _, jn, _, _ = cli._dualrun_estimate(models, tasks, 1, "none")
+    assert jn == 0.0 and jbs > 0.0 and abs(jb - 2 * jbs) < 1e-12     # both=2x, bestshot=1x, none=0
+
+
+def test_dualrun_estimate_metered_candidate_spend_doubles_and_names_metered():
+    tasks = corpus.load(selector="quick")
+    sub_total, _, sub_metered, _ = cli._dualrun_estimate([registry.by_key("glm-5.1")], tasks, 1, "none")
+    assert sub_total == 0.0 and sub_metered == []                    # subscription -> zero, none named
+    _, single_total, _ = cli.estimate([registry.by_key("claude-opus-4-8")], tasks, 1)
+    dual_total, _, metered, _ = cli._dualrun_estimate([registry.by_key("claude-opus-4-8")], tasks, 1, "none")
+    assert single_total > 0 and dual_total == 2 * single_total       # x2 phases
+    assert metered == ["claude-opus-4-8"]                            # metered candidate named
+
+
+def test_dualrun_estimate_flags_noisy_models_for_repeats():
+    tasks = corpus.load(selector="quick")
+    _, _, _, noisy = cli._dualrun_estimate([registry.by_key("deepseek-v4-flash")], tasks, 1, "bestshot")
+    assert "deepseek-v4-flash" in noisy                              # reasoning + omit_temp -> flagged
+    _, _, _, noisy2 = cli._dualrun_estimate([registry.by_key("glm-5.1")], tasks, 1, "bestshot")
+    assert noisy2 == []                                              # non-reasoning, omit_temp False
+
+
+def test_estimate_dualrun_parser_and_output(capsys):
+    a = cli.build_parser().parse_args(["estimate", "--dualrun", "--elegance", "both"])
+    assert a.dualrun is True and a.elegance == "both"
+    cli.cmd_estimate(SimpleNamespace(models="deepseek-v4-flash", repeats=1, budget=100.0,
+                                     suite="quick", dualrun=True, elegance="both"))
+    out = capsys.readouterr().out
+    assert "dual-run estimate" in out
+    assert "projected judge spend" in out and "x2" in out
+    assert "--repeats>=3" in out                                     # noisy-model guidance
+
+
 def test_estimate_projects_judge_spend_and_ci_width(capsys):
     import re as _re
     cli.cmd_estimate(SimpleNamespace(models="deepseek-v4-flash", repeats=3, budget=10.0))

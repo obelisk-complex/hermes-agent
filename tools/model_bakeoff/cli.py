@@ -78,8 +78,53 @@ def _project_judge_spend(tasks, repeats):
     return n_cells * (judge_in * jspec.price_in_per_m + judge_out * jspec.price_out_per_m) / 1_000_000.0
 
 
+def _dualrun_estimate(models, tasks, repeats, elegance_policy):
+    """Projected spend for a dual run (sub-project D): each model is evaluated TWICE (baseline +
+    best-shot), so metered CANDIDATE spend doubles; judge spend scales with how many phases are judged
+    (both=2, bestshot=1, none=0). Returns (metered_total, judge_spend, metered_models, noisy_models),
+    where metered_models are the selected metered candidates (no tuned settings; tuning is
+    subscription-only) and noisy_models are the reasoning/omit_temp models a --repeats=1 flip could be
+    sampling noise for (sampling_uncontrolled / stochastic_bestshot)."""
+    _rows, single_total, _unpriced = estimate(models, tasks, repeats)
+    judge_phases = {"both": 2, "bestshot": 1, "none": 0}[elegance_policy]
+    judge_spend = _project_judge_spend(tasks, repeats) * judge_phases
+    metered_total = single_total * 2
+    metered_models = [m.key for m in models if m.is_metered]
+    noisy = [m.key for m in models if m.omit_temp or m.reasoning]
+    return metered_total, judge_spend, metered_models, noisy
+
+
+def _cmd_estimate_dualrun(args, tasks) -> int:
+    elegance_policy = getattr(args, "elegance", "bestshot")
+    models = _dualrun_default_models(args.models)
+    rows, _single_total, unpriced = estimate(models, tasks, args.repeats)
+    metered_total, judge_spend, metered_models, noisy = _dualrun_estimate(
+        models, tasks, args.repeats, elegance_policy)
+    judge_phases = {"both": 2, "bestshot": 1, "none": 0}[elegance_policy]
+    print("dual-run estimate (each model evaluated TWICE: baseline + best-shot):")
+    for key, in_t, out_t, cost, is_unpriced in rows:
+        cost_col = "UNPRICED" if is_unpriced else f"${cost * 2:.4f}"
+        print(f"  {key:22} in~{in_t * 2:>9}  out~{out_t * 2:>9}  {cost_col}")
+    print(f"projected metered candidate spend (x2 phases): ${metered_total:.4f}  (budget ${args.budget:.2f})")
+    if metered_models:
+        print(f"  metered candidates (no tuned settings; tuning is subscription-only): "
+              f"{', '.join(metered_models)}")
+    print(f"projected judge spend ({elegance_policy}, x{judge_phases}): ${judge_spend:.4f}  "
+          "(metered; counts against the shared --budget)")
+    if noisy:
+        print(f"note: --repeats>=3 recommended for sampling-uncontrolled / stochastic model(s) "
+              f"(reasoning or omit_temp): {', '.join(noisy)} (a --repeats=1 flip may be sampling noise)")
+    if unpriced:
+        print(f"WARNING: {len(unpriced)} metered model(s) UNPRICED, real spend not in the total "
+              f"above: {', '.join(unpriced)}. Set prices or exclude before a live run.")
+    return 0 if (metered_total + judge_spend) <= args.budget else 2
+
+
 def cmd_estimate(args) -> int:
-    tasks, models = corpus.load(selector=getattr(args, "suite", None)), _select(args.models)
+    tasks = corpus.load(selector=getattr(args, "suite", None))
+    if getattr(args, "dualrun", False):
+        return _cmd_estimate_dualrun(args, tasks)
+    models = _select(args.models)
     rows, total, unpriced = estimate(models, tasks, args.repeats)
     for key, in_t, out_t, cost, is_unpriced in rows:
         cost_col = "UNPRICED" if is_unpriced else f"${cost:.4f}"
@@ -749,6 +794,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="repetitions per task (default 1; use 3+ for tighter CIs at higher cost)")
     e.add_argument("--budget", type=float, default=10.0)
     e.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
+    e.add_argument("--dualrun", action="store_true",
+                   help="estimate a sub-project D dual run (each model evaluated twice: baseline + best-shot)")
+    e.add_argument("--elegance", choices=["both", "bestshot", "none"], default="bestshot",
+                   help="dual-run: which phase(s) the judge scores (drives the doubled judge spend)")
     e.set_defaults(func=cmd_estimate)
 
     pf = sub.add_parser("preflight")
