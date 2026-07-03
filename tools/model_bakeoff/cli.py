@@ -354,22 +354,27 @@ async def _judge_runs(models, model_runs, task_by_id, jspec, judge_conn, transpo
 
 
 async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transport,
-                      bar=0.8, sandbox_timeout=60, judge_spec=None, ceiling_on=True, suite=None):
+                      bar=0.8, sandbox_timeout=60, judge_spec=None, ceiling_on=True, suite=None,
+                      judge_enabled=True):
     os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
     raw_dir = os.path.join(out_dir, "raw")
     budget = runner.BudgetTracker(budget_usd)
     ping, notes = {}, []
     pass_counts, attempted_counts = {}, {}
 
-    # No-self-grade guard (A4). Only COMPETITIVELY-RANKED candidates count: the ceiling is a reference
-    # bound (excluded from the real run via --no-ceiling), so a judge sharing its family does not bias
-    # the candidate ranking. This also keeps the existing opus-inclusive tests green.
-    jspec = judge_spec or registry.judge_spec()
-    contenders = [m.key for m in models if not m.is_ceiling]
-    if judge_mod.judge_conflicts(jspec.key, contenders):
-        raise ValueError(f"judge {jspec.key} shares a model family with a candidate in "
-                         f"{contenders}; that would be self-grading. Choose a cross-family judge.")
-    judge_conn = gateways.resolve(jspec.gateway, env)
+    # No-self-grade guard (A4) + judge gateway resolve, ONLY when judging is enabled (Task 7). Only
+    # COMPETITIVELY-RANKED candidates count: the ceiling is a reference bound (excluded from the real
+    # run via --no-ceiling), so a judge sharing its family does not bias the candidate ranking. When
+    # judge_enabled is False this is a GENUINE no-op: no guard (a same-family judge cannot raise), no
+    # gateway resolve, and Phase 2 is skipped below. Default True keeps every shipped caller byte-identical.
+    jspec, judge_conn = None, None
+    if judge_enabled:
+        jspec = judge_spec or registry.judge_spec()
+        contenders = [m.key for m in models if not m.is_ceiling]
+        if judge_mod.judge_conflicts(jspec.key, contenders):
+            raise ValueError(f"judge {jspec.key} shares a model family with a candidate in "
+                             f"{contenders}; that would be self-grading. Choose a cross-family judge.")
+        judge_conn = gateways.resolve(jspec.gateway, env)
 
     # PHASE 1: run candidates per model; persist each model's raw runs IMMEDIATELY (A7) so a crash
     # during judging never loses generated solutions. Collect in memory for judging + aggregation.
@@ -409,10 +414,12 @@ async def run_bakeoff(models, tasks, env, out_dir, budget_usd, repeats, transpor
             _persist_raw(raw_dir, spec, tr)
 
     # PHASE 2: elegance judging (patches the persisted files in place).
-    if judge_conn.ok:
+    if judge_enabled and judge_conn.ok:
         task_by_id = {t.task_id: t for t in tasks}
         await _judge_runs(models, model_runs, task_by_id, jspec, judge_conn, transport,
                           budget, notes, raw_dir)
+    elif not judge_enabled:
+        notes.append("elegance skipped (phase judging disabled)")
     else:
         notes.append("elegance skipped: judge gateway unconfigured")
 

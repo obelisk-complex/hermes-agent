@@ -411,6 +411,46 @@ def test_run_bakeoff_elegance_skipped_when_judge_unconfigured(tmp_path):
     assert any("elegance skipped" in n for n in result.notes)
 
 
+def test_run_bakeoff_judge_enabled_default_true_still_judges(tmp_path):
+    # Task 7 REGRESSION pin: the default judge_enabled=True preserves today's Phase-2 behaviour.
+    import asyncio
+    task = _trivial_task(tmp_path)
+    result, _ = asyncio.run(cli.run_bakeoff(
+        [registry.by_key("deepseek-v4-flash")], [task], _FULL_ENV, str(tmp_path / "r"), 10.0, 1,
+        _combo_transport(), bar=0.0))                # judge_enabled defaults True
+    rows = {r.model_key: r for r in result.report_rows}
+    assert rows["deepseek-v4-flash"].mean_elegance == 0.75    # Phase 2 ran by default
+
+
+def test_run_bakeoff_judge_enabled_false_is_a_genuine_noop(tmp_path):
+    # Task 7: judge_enabled=False skips the self-grade guard, the judge gateway resolve, AND Phase 2.
+    import asyncio
+    import dataclasses
+    task = _trivial_task(tmp_path)
+    # a SAME-FAMILY judge that WOULD trip the self-grade ValueError if judging were enabled
+    jspec = dataclasses.replace(registry.judge_spec(), key="deepseek-judge", wire_id="deepseek-judge")
+    judge_called = {"n": 0}
+
+    async def transport(url, headers, json, timeout):
+        prompt = json["messages"][0]["content"]
+        if "UNTRUSTED" in prompt:
+            judge_called["n"] += 1
+            return 200, {"choices": [{"message": {"content": '{"elegance":0.9,"rationale":"x"}'}}],
+                         "usage": {"prompt_tokens": 10, "completion_tokens": 5}}, 0.2
+        return 200, {"choices": [{"message": {"content": "```python\ndef f():\n    return 1\n```"}}],
+                     "usage": {"prompt_tokens": 10, "completion_tokens": 5}}, 0.2
+
+    result, _ = asyncio.run(cli.run_bakeoff(
+        [registry.by_key("deepseek-v4-flash")], [task], _FULL_ENV, str(tmp_path / "r"), 10.0, 1,
+        transport, bar=0.0, judge_spec=jspec, judge_enabled=False))   # no raise despite same family
+    rows = {r.model_key: r for r in result.report_rows}
+    assert rows["deepseek-v4-flash"].mean_elegance is None        # Phase 2 skipped
+    assert rows["deepseek-v4-flash"].n_elegance_judged == 0
+    assert judge_called["n"] == 0                                 # NO judge call made
+    assert rows["deepseek-v4-flash"].n_passed == 1               # non-elegance output intact
+    assert any("phase judging disabled" in n for n in result.notes)
+
+
 def test_run_bakeoff_budget_exhausted_mid_judging_leaves_later_model_unjudged(tmp_path):
     # A19: budget below one judge cell -> first queued model judged then budget trips; later model
     # never reached -> still present with n_elegance_judged==0 (not dropped).
