@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from tools.model_bakeoff import rank
-from tools.model_bakeoff.models import ModelAggregate
+from tools.model_bakeoff.models import ModelAggregate, ModelSpec, TaskMetric
 
 
 def agg(key, passed, n, reasoning=True, cost=0.0, p50=1.0):
@@ -185,3 +185,161 @@ def test_paired_significance_exact_small_binomial():
     r = rank.paired_significance(base, best)
     assert r.b == 1 and r.c == 5
     assert abs(r.p_value - 0.21875) < 1e-9
+
+
+# --- Sub-project D Task 5: tuning_delta (fully-paired axes + flags + empty-safe) ---
+
+def _tm(passed, latency=1.0, cost=0.0, elegance=None, pass_rate=None):
+    return TaskMetric(passed=passed, latency_s=latency, cost_proxy_usd=cost, elegance=elegance,
+                      pass_rate=(pass_rate if pass_rate is not None else (1.0 if passed else 0.0)))
+
+
+def _dagg(key="m", n=10, npass=8, gw="opencode-go", nop=0, p50=1.0, cost_proxy=0.001,
+          elegance=None, n_eleg=0, cost_per_task=0.0):
+    return ModelAggregate(model_key=key, reasoning=False, cost_model="subscription",
+                          n_tasks=n, n_passed=npass, gateway=gw, n_operational=nop,
+                          p50_latency_s=p50, cost_proxy_per_task_usd=cost_proxy,
+                          mean_elegance=elegance, n_elegance_judged=n_eleg,
+                          cost_per_task_usd=cost_per_task)
+
+
+def _dspec(key="m", omit_temp=False, reasoning=False, temperature=None, gateway="opencode-go"):
+    return ModelSpec(key=key, gateway=gateway, wire_id=key, cost_model="subscription",
+                     reasoning=reasoning, omit_temp=omit_temp, max_tokens=8000, api_timeout_s=180,
+                     temperature=temperature)
+
+
+def test_tuning_delta_paired_accuracy_over_intersection():
+    bm = {"t1": _tm(True), "t2": _tm(False), "t3": _tm(False)}
+    sm = {"t1": _tm(True), "t2": _tm(True), "t3": _tm(True)}     # t2,t3 improved, t1 unchanged
+    row = rank.tuning_delta(_dagg(n=3, npass=1), _dagg(n=3, npass=3), bm, sm,
+                            _dspec(), _dspec(), repeats=1)
+    assert row.paired.n_paired == 3 and row.paired.c == 2 and row.paired.b == 0
+    assert abs(row.baseline_pass_fraction - 1 / 3) < 1e-9
+    assert abs(row.bestshot_pass_fraction - 1.0) < 1e-9
+    assert abs(row.pass_fraction_delta - 2 / 3) < 1e-9
+
+
+def test_tuning_delta_speed_is_median_of_per_task_differences():
+    # per-task diffs [1,8,1] -> median 1; difference-of-medians would be 10-2=8 (a non-paired artefact)
+    bm = {"t1": _tm(True, latency=1.0), "t2": _tm(True, latency=2.0), "t3": _tm(True, latency=9.0)}
+    sm = {"t1": _tm(True, latency=2.0), "t2": _tm(True, latency=10.0), "t3": _tm(True, latency=10.0)}
+    row = rank.tuning_delta(_dagg(n=3, npass=3), _dagg(n=3, npass=3), bm, sm,
+                            _dspec(), _dspec(), repeats=1)
+    assert row.p50_paired_delta == 1.0
+    assert row.p50_paired_delta != 8.0             # NOT difference-of-medians
+
+
+def test_tuning_delta_paired_cost_and_elegance():
+    bm = {"t1": _tm(True, cost=0.001, elegance=0.6), "t2": _tm(True, cost=0.002, elegance=0.5)}
+    sm = {"t1": _tm(True, cost=0.003, elegance=0.8), "t2": _tm(True, cost=0.004, elegance=0.9)}
+    row = rank.tuning_delta(_dagg(n=2, npass=2), _dagg(n=2, npass=2), bm, sm,
+                            _dspec(), _dspec(), repeats=1)
+    assert abs(row.cost_proxy_paired_delta - 0.002) < 1e-9   # mean of [0.002, 0.002]
+    assert abs(row.elegance_paired_delta - 0.3) < 1e-9        # mean of [0.2, 0.4]
+
+
+def test_tuning_delta_none_safety_unjudged_and_none_latency():
+    bm = {"t1": _tm(True, latency=None, elegance=None)}
+    sm = {"t1": _tm(True, latency=None, elegance=None)}
+    row = rank.tuning_delta(_dagg(n=1, npass=1, p50=None), _dagg(n=1, npass=1, p50=None),
+                            bm, sm, _dspec(), _dspec(), repeats=1)
+    assert row.p50_paired_delta is None            # no clean latency in either phase
+    assert row.elegance_paired_delta is None        # nothing judged
+    assert row.cost_proxy_paired_delta is not None  # cost proxy is always present
+
+
+def test_tuning_delta_empty_intersection_no_crash():
+    bm = {"t1": _tm(True, latency=1.0, elegance=0.5)}
+    sm = {"t2": _tm(True, latency=2.0, elegance=0.9)}   # disjoint completed sets, both n_tasks>0
+    row = rank.tuning_delta(_dagg(n=1, npass=1), _dagg(n=1, npass=1), bm, sm,
+                            _dspec(), _dspec(), repeats=1)
+    assert row.empty_intersection is True and row.no_data is False
+    assert row.pass_fraction_delta is None
+    assert row.p50_paired_delta is None
+    assert row.elegance_paired_delta is None
+    assert row.cost_proxy_paired_delta is None
+    assert row.task_composition_mismatch is True
+
+
+def test_tuning_delta_no_data_when_phase_zero_tasks():
+    row = rank.tuning_delta(_dagg(n=0, npass=0), _dagg(n=5, npass=3), {}, {"t1": _tm(True)},
+                            _dspec(), _dspec(), repeats=1)
+    assert row.no_data is True
+    assert row.pass_fraction_delta is None and row.paired is None
+
+
+def test_tuning_delta_flags_count_and_composition_mismatch():
+    bm = {"t1": _tm(True), "t2": _tm(True)}
+    sm = {"t1": _tm(True)}
+    row = rank.tuning_delta(_dagg(n=10, npass=8), _dagg(n=9, npass=7), bm, sm,
+                            _dspec(), _dspec(), repeats=1)
+    assert row.n_tasks_mismatch is True            # 10 != 9
+    assert row.task_composition_mismatch is True    # {t1,t2} != {t1}
+
+
+def test_tuning_delta_ci_overlap_flag():
+    row = rank.tuning_delta(_dagg(n=10, npass=8), _dagg(n=10, npass=8),
+                            {"t1": _tm(True)}, {"t1": _tm(True)}, _dspec(), _dspec(), 1)
+    assert row.ci_overlap is True                  # identical CIs overlap
+    row2 = rank.tuning_delta(_dagg(n=10, npass=0), _dagg(n=10, npass=10),
+                             {"t1": _tm(False)}, {"t1": _tm(True)}, _dspec(), _dspec(), 1)
+    assert row2.ci_overlap is False                # [0,.28] vs [.72,1] do not overlap
+
+
+def test_tuning_delta_gateway_capped_and_regression():
+    capped = rank.tuning_delta(_dagg(nop=3), _dagg(nop=3), {"t": _tm(True)}, {"t": _tm(True)},
+                               _dspec(), _dspec(), 1)
+    assert capped.gateway_capped is True and capped.tuning_induced_regression is False
+    reg = rank.tuning_delta(_dagg(nop=0), _dagg(nop=2), {"t": _tm(True)}, {"t": _tm(True)},
+                            _dspec(), _dspec(), 1)
+    assert reg.tuning_induced_regression is True and reg.gateway_capped is False
+    clean = rank.tuning_delta(_dagg(nop=0), _dagg(nop=0), {"t": _tm(True)}, {"t": _tm(True)},
+                              _dspec(), _dspec(), 1)
+    assert clean.gateway_capped is False and clean.tuning_induced_regression is False
+
+
+def test_tuning_delta_gateway_capped_requires_same_gateway():
+    # different gateways -> neither capped nor tuning-induced-regression, but gateway_changed noted
+    diff = rank.tuning_delta(_dagg(nop=3, gw="opencode-go"), _dagg(nop=4, gw="ollama-cloud"),
+                             {"t": _tm(True)}, {"t": _tm(True)},
+                             _dspec(gateway="opencode-go"), _dspec(gateway="ollama-cloud"), 1)
+    assert diff.gateway_capped is False and diff.gateway_changed is True
+
+
+def test_tuning_delta_order_confound_suspect():
+    slow = rank.tuning_delta(_dagg(p50=1.0), _dagg(p50=3.0), {"t": _tm(True)}, {"t": _tm(True)},
+                             _dspec(), _dspec(), 1)
+    assert slow.order_confound_suspect is True     # p50 ratio > 2
+    safe = rank.tuning_delta(_dagg(p50=None, nop=0), _dagg(p50=None, nop=0),
+                             {"t": _tm(True)}, {"t": _tm(True)}, _dspec(), _dspec(), 1)
+    assert safe.order_confound_suspect is False     # None p50, no op delta, no crash
+    opdelta = rank.tuning_delta(_dagg(p50=1.0, nop=0), _dagg(p50=1.0, nop=2),
+                                {"t": _tm(True)}, {"t": _tm(True)}, _dspec(), _dspec(), 1)
+    assert opdelta.order_confound_suspect is True   # operational delta alone trips it
+
+
+def test_tuning_delta_stochastic_bestshot_flag():
+    hot = rank.tuning_delta(_dagg(), _dagg(), {"t": _tm(True)}, {"t": _tm(True)},
+                            _dspec(temperature=0.0), _dspec(temperature=0.7), repeats=1)
+    assert hot.stochastic_bestshot is True and hot.tuned_temperature == 0.7
+    warmreps = rank.tuning_delta(_dagg(), _dagg(), {"t": _tm(True)}, {"t": _tm(True)},
+                                 _dspec(temperature=0.0), _dspec(temperature=0.7), repeats=3)
+    assert warmreps.stochastic_bestshot is False    # repeats>1 controls the noise
+    cold = rank.tuning_delta(_dagg(), _dagg(), {"t": _tm(True)}, {"t": _tm(True)},
+                             _dspec(), _dspec(temperature=None), repeats=1)
+    assert cold.stochastic_bestshot is False
+
+
+def test_tuning_delta_sampling_uncontrolled_fires_for_reasoner_without_temperature():
+    # an omit_temp=True reasoner cannot carry a temperature, so stochastic_bestshot stays False,
+    # yet sampling_uncontrolled must fire (vendor-internal thinking-mode non-determinism).
+    row = rank.tuning_delta(_dagg(), _dagg(), {"t": _tm(True)}, {"t": _tm(True)},
+                            _dspec(omit_temp=True, reasoning=True),
+                            _dspec(omit_temp=True, reasoning=True), repeats=1)
+    assert row.sampling_uncontrolled is True
+    assert row.stochastic_bestshot is False
+    plain = rank.tuning_delta(_dagg(), _dagg(), {"t": _tm(True)}, {"t": _tm(True)},
+                              _dspec(omit_temp=False, reasoning=False),
+                              _dspec(omit_temp=False, reasoning=False), repeats=1)
+    assert plain.sampling_uncontrolled is False
