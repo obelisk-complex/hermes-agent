@@ -144,3 +144,44 @@ def test_uniform_none_elegance_leaves_report_order_unchanged():
                        n_tasks=10, n_passed=7, cost_per_task_usd=0.0, p50_latency_s=1.0)
     result = rank.assemble([x, y], ceiling_key=None, bar=0.0)
     assert [r.model_key for r in result.report_rows] == ["y", "x"]  # faster p50 first, as before
+
+
+# --- Sub-project D Task 3: paired McNemar exact significance ---
+
+def test_paired_significance_no_discordant_is_p1_not_significant():
+    r = rank.paired_significance({"t1": True, "t2": False}, {"t1": True, "t2": False})
+    assert r.b == 0 and r.c == 0 and r.n_paired == 2
+    assert r.p_value == 1.0 and r.significant is False
+
+
+def test_paired_significance_all_improvements_is_significant():
+    base = {f"t{i}": False for i in range(8)}
+    best = {f"t{i}": True for i in range(8)}
+    r = rank.paired_significance(base, best)
+    assert r.b == 0 and r.c == 8
+    assert r.p_value < 0.05 and r.significant is True
+
+
+def test_paired_significance_balanced_discordant_is_not_significant():
+    base = {f"t{i}": (i < 4) for i in range(8)}    # first 4 pass baseline, fail best-shot -> b
+    best = {f"t{i}": (i >= 4) for i in range(8)}   # last 4 fail baseline, pass best-shot -> c
+    r = rank.paired_significance(base, best)
+    assert r.b == 4 and r.c == 4
+    assert r.p_value == 1.0 and r.significant is False
+
+
+def test_paired_significance_only_shared_task_ids_are_paired():
+    base = {"shared1": True, "shared2": False, "only_base": True}
+    best = {"shared1": False, "shared2": True, "only_best": False}
+    r = rank.paired_significance(base, best)
+    assert r.n_paired == 2                          # one-sided keys excluded
+    assert r.b == 1 and r.c == 1                     # shared1 regressed, shared2 improved
+
+
+def test_paired_significance_exact_small_binomial():
+    # b=1, c=5, n=6, k=1: 2 * (C(6,0)+C(6,1)) * 0.5^6 = 2*7/64 = 0.21875
+    base = {"a": True, **{f"b{i}": False for i in range(5)}}
+    best = {"a": False, **{f"b{i}": True for i in range(5)}}
+    r = rank.paired_significance(base, best)
+    assert r.b == 1 and r.c == 5
+    assert abs(r.p_value - 0.21875) < 1e-9

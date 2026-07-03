@@ -7,7 +7,8 @@ pinned last, matching what load_ladder()/next_rung() in the quality-gate expect.
 """
 from __future__ import annotations
 
-from math import floor
+from dataclasses import dataclass
+from math import comb, floor
 from typing import Iterable, Optional
 
 from .models import LadderResult, ModelAggregate
@@ -22,6 +23,38 @@ def wilson_ci(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
     centre = (p + z * z / (2 * n)) / denom
     half = (z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / denom
     return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+@dataclass
+class PairedResult:
+    """Exact McNemar test on per-task pass/fail flips between two phases run on the SAME corpus
+    (sub-project D). n_paired = tasks completed in BOTH phases; b = passed baseline, failed best-shot
+    (a regression); c = failed baseline, passed best-shot (an improvement)."""
+    n_paired: int
+    b: int
+    c: int
+    p_value: float
+    significant: bool
+
+
+def paired_significance(baseline_passes: dict[str, bool],
+                        bestshot_passes: dict[str, bool]) -> PairedResult:
+    """PRIMARY significance for a baseline-vs-best-shot dual run (sub-project D D6a). Baseline and
+    best-shot are evaluated on the identical corpus, so this is a PAIRED binary design; the correct
+    test is the exact two-sided McNemar on the discordant per-task flips, not a Wilson-CI overlap
+    (which is unpaired). Only task_ids present in BOTH maps are paired (an operational/partial task is
+    OMITTED upstream, never a False, so it does not enter the pairing). n = b + c discordant pairs;
+    p = min(1, 2 * sum_{i=0}^{min(b,c)} C(n,i) * 0.5^n); n == 0 -> p = 1.0. Pure math.comb, no scipy."""
+    shared = set(baseline_passes) & set(bestshot_passes)
+    b = sum(1 for t in shared if baseline_passes[t] and not bestshot_passes[t])
+    c = sum(1 for t in shared if not baseline_passes[t] and bestshot_passes[t])
+    n = b + c
+    if n == 0:
+        p = 1.0
+    else:
+        k = min(b, c)
+        p = min(1.0, 2.0 * sum(comb(n, i) for i in range(k + 1)) * 0.5 ** n)
+    return PairedResult(n_paired=len(shared), b=b, c=c, p_value=p, significant=p < 0.05)
 
 
 def detect_contamination(pass_counts: dict[str, int],
