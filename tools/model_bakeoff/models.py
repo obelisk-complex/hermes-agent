@@ -175,6 +175,22 @@ class ModelAggregate:
         return (self.n_passed / denom) if denom > 0 else None
 
 
+@dataclass(frozen=True)
+class TaskMetric:
+    """Per-task outcome for ONE phase of a dual run (sub-project D), reconstructed from the persisted
+    raw by cli._phase_metrics. A task appears here ONLY IF it completed in exactly `repeats` files with
+    no operational failure; an operational or partial task is OMITTED entirely (never a False), so the
+    paired significance test's presence-based pairing cannot be contaminated. passed = all repeats
+    passed; pass_rate = passed_repeats/repeats (the D6g flakiness signal); latency_s = median of the
+    cache-hit-clean repeat latencies (None if all were excluded); cost_proxy_usd = mean per-repeat
+    sticker-price output proxy; elegance = mean judged elegance (None if none judged)."""
+    passed: bool
+    latency_s: Optional[float]
+    cost_proxy_usd: float
+    elegance: Optional[float]
+    pass_rate: float
+
+
 @dataclass
 class LadderResult:
     """Output of rank.assemble() (SPEC §2/§9): the report ordering and the

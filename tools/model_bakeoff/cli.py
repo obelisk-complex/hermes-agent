@@ -17,13 +17,15 @@ import dataclasses
 import json
 import os
 import re
+import statistics
 import sys
 from datetime import datetime, timezone
 
 from . import (
-    corpus, gateways, judge as judge_mod, preflight as preflight_mod,
-    rank, registry, report, runner, tuning)
+    client, corpus, gateways, judge as judge_mod, preflight as preflight_mod,
+    rank, registry, report, runner, settings_loader, tuning)
 from .http_transport import http_transport, list_models
+from .models import OPERATIONAL_ERROR_TYPES, ModelSpec, TaskMetric
 
 THINKING_BUDGET_MULTIPLIER = 4.0  # reasoning models emit ~4x output tokens (SPEC §8)
 DEFAULT_OUT_TOKENS = 500
@@ -186,6 +188,50 @@ def _persist_raw(raw_dir, spec, tr):
             "elegance": tr.elegance, "elegance_rationale": tr.elegance_rationale,
             "judge_cost_usd": tr.judge_cost_usd,
         }, f, indent=2)
+
+
+def _phase_metrics(raw_dir: str, repeats: int, spec: ModelSpec) -> dict:
+    """Reconstruct per-task TaskMetrics for ONE phase from run_bakeoff's persisted raw (sub-project D).
+
+    Reads every <spec.key>__<task>__r<rep>.json in raw_dir, groups by task_id, and applies the pinned
+    inclusion CONTRACT (D6): a task is a key ONLY IF it has EXACTLY `repeats` files AND none is
+    operational (error_type in OPERATIONAL_ERROR_TYPES). An operational repeat OR a partial repeat count
+    (budget truncation) OMITS the task ENTIRELY, so it never enters the paired pairing as a spurious
+    False. cost_proxy_usd is priced with the passed (drift-corrected) `spec` because the sticker price is
+    not in the raw JSON and MUST be the same spec the rest of D uses for this model."""
+    by_task: dict = {}
+    if not os.path.isdir(raw_dir):
+        return {}
+    for fn in sorted(os.listdir(raw_dir)):
+        if not fn.endswith(".json"):
+            continue
+        with open(os.path.join(raw_dir, fn), "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if rec.get("model") != spec.key:   # phase raw dirs are single-model, but stay defensive
+            continue
+        by_task.setdefault(rec["task"], []).append(rec)
+
+    out: dict = {}
+    for task, recs in by_task.items():
+        if len(recs) != repeats:
+            continue   # partial (e.g. budget-truncated) -> OMIT, never a False
+        if any(r.get("error_type") in OPERATIONAL_ERROR_TYPES for r in recs):
+            continue   # operational (provider) failure -> OMIT, never a False
+        n_passed = sum(1 for r in recs if r.get("passed"))
+        lat = [r["latency_s"] for r in recs
+               if r.get("latency_s") is not None and not r.get("cache_hit")]
+        cost_proxy = sum(client.cost_proxy_usd(spec, r.get("completion_tokens", 0) or 0,
+                                               r.get("thinking_tokens", 0) or 0)
+                         for r in recs) / repeats
+        elegs = [r["elegance"] for r in recs if r.get("elegance") is not None]
+        out[task] = TaskMetric(
+            passed=(n_passed == repeats),
+            latency_s=(statistics.median(lat) if lat else None),
+            cost_proxy_usd=cost_proxy,
+            elegance=(statistics.mean(elegs) if elegs else None),
+            pass_rate=n_passed / repeats,
+        )
+    return out
 
 
 def _accumulate_task_counts(all_runs, pass_counts, attempted_counts):

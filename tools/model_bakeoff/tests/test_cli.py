@@ -43,6 +43,89 @@ def test_run_parser_accepts_suite():
     assert args.suite == "tag:ai-trap"
 
 
+# --- Sub-project D Task 4: _phase_metrics reconstructs contract-pinned per-task metrics ---
+
+def _priced_spec(price_out=0.5):
+    from tools.model_bakeoff.models import ModelSpec
+    return ModelSpec(key="pm", gateway="opencode-go", wire_id="pm", cost_model="subscription",
+                     reasoning=False, omit_temp=False, max_tokens=8000, api_timeout_s=180,
+                     price_out_per_m=price_out)
+
+
+def _write_raw(raw_dir, model, task, rep, passed, error_type=None, latency_s=1.0,
+               cache_hit=False, completion_tokens=100, thinking_tokens=0, elegance=None):
+    """Write one raw file with the exact cli._persist_raw schema."""
+    os.makedirs(raw_dir, exist_ok=True)
+    rec = {"model": model, "task": task, "repeat_idx": rep, "passed": passed,
+           "error_type": error_type, "latency_s": latency_s, "cache_hit": cache_hit,
+           "cost_usd": 0.0, "prompt_tokens": 10, "completion_tokens": completion_tokens,
+           "thinking_tokens": thinking_tokens, "extracted_code": "", "raw_response": "",
+           "elegance": elegance, "elegance_rationale": "", "judge_cost_usd": 0.0}
+    with open(os.path.join(raw_dir, f"{model}__{task}__r{rep}.json"), "w") as f:
+        json.dump(rec, f)
+
+
+def test_phase_metrics_includes_exact_repeats_all_pass(tmp_path):
+    from tools.model_bakeoff import client
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec(price_out=0.5)
+    _write_raw(raw, spec.key, "quick-a", 0, passed=True, latency_s=2.0, completion_tokens=100)
+    m = cli._phase_metrics(raw, repeats=1, spec=spec)
+    assert set(m) == {"quick-a"}
+    tm = m["quick-a"]
+    assert tm.passed is True and tm.pass_rate == 1.0
+    assert tm.latency_s == 2.0
+    assert tm.cost_proxy_usd == client.cost_proxy_usd(spec, 100, 0)   # priced via the passed spec
+
+
+def test_phase_metrics_omits_operational_task(tmp_path):
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec()
+    _write_raw(raw, spec.key, "quick-op", 0, passed=False, error_type="call_error")
+    m = cli._phase_metrics(raw, repeats=1, spec=spec)
+    assert "quick-op" not in m                    # operational -> OMITTED entirely, never a False
+
+
+def test_phase_metrics_omits_partial_repeat_count(tmp_path):
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec()
+    _write_raw(raw, spec.key, "quick-part", 0, passed=True)   # only 1 of the 3 expected files
+    m = cli._phase_metrics(raw, repeats=3, spec=spec)
+    assert "quick-part" not in m
+
+
+def test_phase_metrics_non_operational_failure_included_as_false(tmp_path):
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec()
+    _write_raw(raw, spec.key, "quick-flaky", 0, passed=True, latency_s=1.0)
+    _write_raw(raw, spec.key, "quick-flaky", 1, passed=True, latency_s=3.0)
+    _write_raw(raw, spec.key, "quick-flaky", 2, passed=False, error_type="test_failure", latency_s=2.0)
+    m = cli._phase_metrics(raw, repeats=3, spec=spec)
+    assert "quick-flaky" in m                      # non-operational failure -> included
+    tm = m["quick-flaky"]
+    assert tm.passed is False and abs(tm.pass_rate - 2 / 3) < 1e-9
+    assert tm.latency_s == 2.0                     # median of [1,3,2]
+
+
+def test_phase_metrics_median_latency_and_elegance_mean(tmp_path):
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec()
+    _write_raw(raw, spec.key, "quick-e", 0, passed=True, latency_s=1.0, elegance=0.8)
+    _write_raw(raw, spec.key, "quick-e", 1, passed=True, latency_s=5.0, elegance=0.6)
+    tm = cli._phase_metrics(raw, repeats=2, spec=spec)["quick-e"]
+    assert tm.latency_s == 3.0                     # median of [1,5]
+    assert abs(tm.elegance - 0.7) < 1e-9           # mean of [0.8,0.6]
+
+
+def test_phase_metrics_all_cache_hit_latency_none(tmp_path):
+    raw = str(tmp_path / "raw")
+    spec = _priced_spec()
+    _write_raw(raw, spec.key, "quick-c", 0, passed=True, latency_s=0.05, cache_hit=True, elegance=None)
+    tm = cli._phase_metrics(raw, repeats=1, spec=spec)["quick-c"]
+    assert tm.latency_s is None                    # every sample cache-hit-excluded
+    assert tm.elegance is None                     # none judged
+
+
 def test_estimate_and_validate_oracles_parsers_accept_suite():
     assert cli.build_parser().parse_args(["estimate", "--suite", "quick"]).suite == "quick"
     assert cli.build_parser().parse_args(["validate-oracles", "--suite", "quick"]).suite == "quick"
