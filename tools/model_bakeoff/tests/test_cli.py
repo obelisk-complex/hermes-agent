@@ -514,6 +514,205 @@ def test_estimate_projects_judge_spend_and_ci_width(capsys):
     assert m and float(m.group(1)) > 0
 
 
+# --- Sub-project D Task 8: dualrun CLI (interleaved baseline vs best-shot, shared budget, leakage) ---
+
+def _dualrun_args(**kw):
+    base = dict(models="", suite=None, settings_dir=None, tasks_dir=None, dev_tasks_dir=None,
+                budget=10.0, elegance="bestshot", order="alternate", judge=registry.judge_spec().key,
+                no_ceiling=False, repeats=1, bar=0.0, sandbox_timeout=30, out=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _write_best_settings(settings_dir, spec, winner):
+    import dataclasses as _dc
+    d = os.path.join(str(settings_dir), spec.key)
+    os.makedirs(d, exist_ok=True)
+    rec = {"schema_version": 1, "model_key": spec.key, "base": _dc.asdict(spec),
+           "winner": _dc.asdict(winner), "low_confidence": False, "reasons": [], "caveats": []}
+    with open(os.path.join(d, "best_settings.json"), "w") as f:
+        json.dump(rec, f)
+
+
+def _dualrun_combo(solution="def f(x):\n    return x + 1",
+                   judge_content='{"elegance": 0.75, "rationale": "clean"}',
+                   in_tok=10, out_tok=5, judge_in=100, judge_out=20):
+    """One transport for both roles: a judge call (prompt carries 'UNTRUSTED') returns judge JSON; any
+    other call returns a candidate solution that passes make_cli_task's oracle (f(2)==3)."""
+    async def t(url, headers, json, timeout):
+        prompt = json["messages"][0]["content"]
+        if "UNTRUSTED" in prompt:
+            return 200, {"choices": [{"message": {"content": judge_content}}],
+                         "usage": {"prompt_tokens": judge_in, "completion_tokens": judge_out}}, 0.2
+        return 200, {"choices": [{"message": {"content": f"```python\n{solution}\n```"}}],
+                     "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok}}, 0.2
+    return t
+
+
+def test_dualrun_happy_path_writes_incremental_artefacts(tmp_path):
+    from tools.model_bakeoff.models import SettingsProfile
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    _write_best_settings(settings, registry.by_key("glm-5.1"), SettingsProfile(max_tokens=16000))
+    out = tmp_path / "out"
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1", tasks_dir=str(scored),
+                                       settings_dir=str(settings), out=str(out)),
+                         env=_FULL_ENV, transport=_dualrun_combo())
+    assert rc == 0
+    assert os.path.isdir(os.path.join(str(out), "glm-5.1", "baseline"))    # per-(model,phase) subdirs
+    assert os.path.isdir(os.path.join(str(out), "glm-5.1", "bestshot"))
+    assert os.path.exists(os.path.join(str(out), "dualrun.md"))
+    data = json.load(open(os.path.join(str(out), "dualrun_summary.json")))
+    assert data["models"][0]["model_key"] == "glm-5.1"
+    assert data["models"][0]["paired"] is not None                        # paired p-value present
+    assert "paired McNemar" in open(os.path.join(str(out), "dualrun.md")).read()
+
+
+def test_dualrun_elegance_bestshot_spends_half_of_both(tmp_path, capsys):
+    import re as _re
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+
+    def _spend(policy):
+        out = tmp_path / f"out-{policy}"
+        cli.cmd_dualrun(_dualrun_args(models="glm-5.1", tasks_dir=str(scored),
+                                      settings_dir=str(settings), elegance=policy, out=str(out)),
+                        env=_FULL_ENV, transport=_dualrun_combo())
+        return float(_re.search(r"metered spend \$([0-9.]+)", capsys.readouterr().out).group(1))
+
+    both, bestshot = _spend("both"), _spend("bestshot")
+    assert both > 0 and abs(bestshot * 2 - both) < 1e-9    # both judges 2 phases, bestshot judges 1
+
+
+def test_dualrun_leakage_dir_pair_exits_2(tmp_path, capsys):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-x")
+    dev = tmp_path / "dev"
+    make_cli_task(dev, "quick-x")                          # SAME id in dev -> leakage
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1", tasks_dir=str(scored), dev_tasks_dir=str(dev),
+                                       settings_dir=str(settings)),
+                         env=_FULL_ENV, transport=_boom_transport)
+    assert rc == 2 and "leak" in capsys.readouterr().out.lower()
+
+
+def test_dualrun_leakage_dev_corpus_json_fallback_exits_2(tmp_path):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-x")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    with open(os.path.join(str(settings), "dev_corpus.json"), "w") as f:
+        json.dump({"tree_sha": "abc", "oracle_ref_sha256": "def", "dev_tasks": ["quick-x"]}, f)
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1", tasks_dir=str(scored),
+                                       settings_dir=str(settings)),      # no dev dir -> json ids used
+                         env=_FULL_ENV, transport=_boom_transport)
+    assert rc == 2
+
+
+def test_dualrun_no_tuned_record_runs_baseline_both_phases(tmp_path):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    out = tmp_path / "out"
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1", tasks_dir=str(scored),
+                                       settings_dir=str(settings), elegance="none", out=str(out)),
+                         env=_FULL_ENV, transport=_dualrun_combo())
+    assert rc == 0
+    m = json.load(open(os.path.join(str(out), "dualrun_summary.json")))["models"][0]
+    assert m["pass_fraction_delta"] == 0.0                 # identical spec both phases -> zero delta
+    assert "no tuned record for glm-5.1" in open(os.path.join(str(out), "dualrun.md")).read()
+
+
+def test_dualrun_default_models_excludes_metered():
+    keys = {m.key for m in cli._dualrun_default_models("")}
+    assert not ({"claude-opus-4-8", "minimax-m3", "qwen3.7-max"} & keys)   # all 3 metered excluded
+    assert "glm-5.1" in keys
+
+
+def test_dualrun_explicit_metered_prints_loud_note(tmp_path, capsys):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    rc = cli.cmd_dualrun(_dualrun_args(models="minimax-m3", tasks_dir=str(scored),
+                                       settings_dir=str(settings), elegance="none",
+                                       out=str(tmp_path / "out")),
+                         env=_FULL_ENV, transport=_dualrun_combo())
+    assert rc == 0
+    assert "metered model(s) selected" in capsys.readouterr().out
+
+
+def test_dualrun_unconfigured_gateway_excludes_model_others_run(tmp_path):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    out = tmp_path / "out"
+    go_only = {"BAKEOFF_OPENCODE_GO_URL": "https://go/v1", "BAKEOFF_OPENCODE_GO_KEY": "k"}
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1,qwen3.5-397b", tasks_dir=str(scored),
+                                       settings_dir=str(settings), elegance="none", out=str(out)),
+                         env=go_only, transport=_dualrun_combo())     # ollama-cloud unconfigured
+    assert rc == 0
+    data = json.load(open(os.path.join(str(out), "dualrun_summary.json")))
+    keys = {m["model_key"] for m in data["models"]}
+    assert "glm-5.1" in keys and "qwen3.5-397b" not in keys           # unconfigured excluded, other ran
+    assert any("excluded qwen3.5-397b" in n for n in data["notes"])
+
+
+def test_dualrun_order_alternate_even_odd_differ(tmp_path):
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    out = tmp_path / "out"
+    rc = cli.cmd_dualrun(_dualrun_args(models="glm-5.1,glm-5.2", tasks_dir=str(scored),
+                                       settings_dir=str(settings), elegance="none",
+                                       order="alternate", out=str(out)),
+                         env=_FULL_ENV, transport=_dualrun_combo())
+    assert rc == 0
+    orders = {m["model_key"]: m["order"]
+              for m in json.load(open(os.path.join(str(out), "dualrun_summary.json")))["models"]}
+    assert orders["glm-5.1"] == "baseline-first"      # index 0 (even)
+    assert orders["glm-5.2"] == "bestshot-first"      # index 1 (odd)
+
+
+def test_dualrun_shared_budget_truncates_safely(tmp_path, capsys):
+    import re as _re
+    scored = tmp_path / "scored"
+    make_cli_task(scored, "quick-a")
+    make_cli_task(scored, "quick-b")                  # 2 scored tasks
+    settings = tmp_path / "settings"
+    os.makedirs(str(settings), exist_ok=True)
+    out = tmp_path / "out"
+    # claude-opus-4-8 is metered + priced (5/25); out_tok=40000 -> per-task cost = 40000*25/1e6 = $1.0
+    tx = _dualrun_combo(in_tok=0, out_tok=40000)
+    budget = 1.5
+    rc = cli.cmd_dualrun(_dualrun_args(models="claude-opus-4-8", tasks_dir=str(scored),
+                                       settings_dir=str(settings), elegance="none",
+                                       budget=budget, out=str(out)),
+                         env=_FULL_ENV, transport=tx)
+    assert rc == 0
+    spent = float(_re.search(r"metered spend \$([0-9.]+)", capsys.readouterr().out).group(1))
+    assert spent <= budget + 2 * 1.0 + 1e-9           # subtraction bounds it; each phase overshoots <= 1 op
+    data = json.load(open(os.path.join(str(out), "dualrun_summary.json")))
+    assert any("BUDGET STOP" in n for n in data["notes"])
+    m = data["models"][0]
+    assert m["no_data"] or m["task_composition_mismatch"] or m["empty_intersection"]
+    assert not (m["paired"] and m["paired"]["significant"])   # truncation must never fabricate significance
+
+
+def test_dualrun_parser_wires_flags():
+    a = cli.build_parser().parse_args(["dualrun", "--settings-dir", "/s", "--elegance", "both",
+                                       "--order", "bestshot-first", "--repeats", "3"])
+    assert a.func is cli.cmd_dualrun and a.settings_dir == "/s"
+    assert a.elegance == "both" and a.order == "bestshot-first" and a.repeats == 3
+
+
 # --- Sub-project C Task 6: tune CLI (subscription-only) + leakage guard + --try-gateway ---
 
 def make_cli_task(tasks_dir, task_id="quick-dev1"):

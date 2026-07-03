@@ -491,6 +491,176 @@ def cmd_run(args, env=None, transport=None) -> int:
     return 0
 
 
+# ---- dualrun (sub-project D) ----------------------------------------------
+
+def _dualrun_default_models(models_arg):
+    """dualrun's default model set: the SUBSCRIPTION subset. The three metered models are
+    unconditionally skipped by C's tuner, so they can never carry a tuned record; an explicit --models
+    list is honoured verbatim (a metered key then runs with a loud note and inherits the budget guards)."""
+    if models_arg:
+        return _select(models_arg)
+    return [m for m in registry.ROSTER if not m.is_metered]
+
+
+def _load_tuned_record(settings_dir, key):
+    p = os.path.join(settings_dir, key, "best_settings.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def cmd_dualrun(args, env=None, transport=None) -> int:
+    """Dual-run benchmark (sub-project D): evaluate each model on the SCORED corpus twice, at equal-
+    footing baseline settings and at C's reconstructed best-shot settings, interleaved per model. Reports
+    the per-model tuning delta on all five axes with a paired McNemar verdict, honest noise disclosure,
+    leakage attestation, order-confound control, low-confidence propagation, and crash-safe incremental
+    persistence. Offline-testable (injected transport). The two phases are two single-model run_bakeoff
+    calls sharing --budget by SUBTRACTION."""
+    env = os.environ if env is None else env
+    transport = transport or http_transport
+    suite = getattr(args, "suite", None)
+    settings_dir = args.settings_dir
+    tasks_dir = getattr(args, "tasks_dir", None)   # scored corpus dir (default: the standard tasks/)
+    out = args.out or os.path.join(os.path.dirname(__file__), "runs", _run_id() + "-dualrun")
+    os.makedirs(out, exist_ok=True)
+
+    tasks = corpus.load(selector=suite, tasks_dir=tasks_dir)
+    scored_dir = tasks_dir or corpus.default_tasks_dir()
+    n_tasks = len(tasks)
+
+    # D4 leakage attestation: scored dir vs dev dir, or vs dev_corpus.json ids when the dir is gone.
+    dev_dir = getattr(args, "dev_tasks_dir", None)
+    dev_corpus = None
+    dcp = os.path.join(settings_dir, "dev_corpus.json")
+    if os.path.isfile(dcp):
+        try:
+            with open(dcp, "r", encoding="utf-8") as f:
+                dev_corpus = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            dev_corpus = None
+    leakage_checked = False
+    try:
+        if dev_dir and os.path.isdir(dev_dir):
+            corpus.assert_disjoint_dirs(scored_dir, dev_dir)
+            leakage_checked = True
+        elif dev_corpus and dev_corpus.get("dev_tasks"):
+            corpus.assert_disjoint_dirs(scored_dir, None, ids_b=set(dev_corpus["dev_tasks"]))
+            leakage_checked = True
+    except ValueError as e:
+        print(f"error: scored corpus leaks into the dev corpus: {e}")
+        return 2
+    if not leakage_checked:
+        print("warning: no dev corpus dir or dev_corpus.json; leakage not attested (not blocking)")
+
+    models = _dualrun_default_models(args.models)
+    if getattr(args, "no_ceiling", False):
+        models = [m for m in models if not m.is_ceiling]
+    bestshot_specs, drift_notes = settings_loader.load_tuned_specs(settings_dir, models, env)
+    n_tuned_records = sum(1 for m in models if _load_tuned_record(settings_dir, m.key) is not None)
+
+    run_notes = list(drift_notes)
+    metered_selected = [m.key for m in models if m.is_metered]
+    if metered_selected:
+        note = ("note: metered model(s) selected; they run against the shared budget and have no tuned "
+                f"record (tuning is subscription-only): {', '.join(metered_selected)}")
+        print(note)
+        run_notes.append(note)
+
+    elegance_policy = getattr(args, "elegance", "bestshot")
+    order = getattr(args, "order", "alternate")
+    repeats = getattr(args, "repeats", 1)
+    bar = getattr(args, "bar", 0.8)
+    sandbox_timeout = getattr(args, "sandbox_timeout", 60)
+    total_budget = args.budget
+
+    jspec = registry.judge_spec()
+    judge_key = getattr(args, "judge", None)
+    if judge_key and judge_key != jspec.key:
+        jspec = dataclasses.replace(jspec, key=judge_key, wire_id=judge_key)
+
+    provenance = {"scored_dir": scored_dir, "dev_dir": dev_dir,
+                  "leakage_checked": leakage_checked, "dev_corpus": dev_corpus}
+    rows, phase_metrics, orders = [], {}, {}
+    budget_state = {"spent": 0.0}
+    run_id = os.path.basename(out.rstrip("/"))
+
+    def _persist_combined():
+        _write(os.path.join(out, "dualrun.md"), report.render_dualrun_md(
+            rows, run_id=run_id, suite_selector=suite, n_tasks=n_tasks, elegance_policy=elegance_policy,
+            order=order, provenance=provenance, drift_notes=drift_notes, run_notes=run_notes,
+            orders=orders, n_tuned_records=n_tuned_records))
+        _write(os.path.join(out, "dualrun_summary.json"), report.render_dualrun_summary_json(
+            rows, phase_metrics=phase_metrics, run_id=run_id, suite_selector=suite, n_tasks=n_tasks,
+            elegance_policy=elegance_policy, order=order, provenance=provenance, run_notes=run_notes,
+            orders=orders, n_tuned_records=n_tuned_records))
+
+    async def _one_phase(run_spec, phase_label, judge_this):
+        phase_out = os.path.join(out, run_spec.key, phase_label)
+        os.makedirs(phase_out, exist_ok=True)
+        remaining = max(0.0, total_budget - budget_state["spent"])   # shared budget by SUBTRACTION
+        result, spent = await run_bakeoff(
+            [run_spec], tasks, env, phase_out, remaining, repeats, transport,
+            bar=bar, sandbox_timeout=sandbox_timeout, judge_spec=jspec, ceiling_on=False,
+            suite=suite, judge_enabled=judge_this)
+        budget_state["spent"] += spent
+        run_notes.extend(f"[{run_spec.key}/{phase_label}] {n}" for n in result.notes)
+        agg = next((a for a in result.report_rows if a.model_key == run_spec.key), None)
+        metrics = _phase_metrics(os.path.join(phase_out, "raw"), repeats, run_spec)
+        return agg, metrics
+
+    async def _run_model(spec, bestshot_spec, baseline_first, judge_baseline, judge_bestshot):
+        plan = [("baseline", spec, judge_baseline), ("bestshot", bestshot_spec, judge_bestshot)]
+        if not baseline_first:
+            plan = list(reversed(plan))
+        got = {}
+        for label, run_spec, judge_this in plan:
+            got[label] = await _one_phase(run_spec, label, judge_this)
+        return got
+
+    for i, spec in enumerate(models):
+        bestshot_spec = bestshot_specs[spec.key]
+        judge_baseline = elegance_policy == "both"
+        judge_bestshot = elegance_policy in ("both", "bestshot")
+        if order == "baseline-first":
+            baseline_first = True
+        elif order == "bestshot-first":
+            baseline_first = False
+        else:                                       # alternate: even-index baseline-first, odd bestshot-first
+            baseline_first = (i % 2 == 0)
+        orders[spec.key] = "baseline-first" if baseline_first else "bestshot-first"
+
+        got = asyncio.run(_run_model(spec, bestshot_spec, baseline_first, judge_baseline, judge_bestshot))
+        baseline_agg, baseline_metrics = got["baseline"]
+        bestshot_agg, bestshot_metrics = got["bestshot"]
+        if baseline_agg is None or bestshot_agg is None:
+            missing = [lbl for lbl, (a, _m) in got.items() if a is None]
+            note = (f"note: excluded {spec.key} from the delta table; no aggregate for phase(s) "
+                    f"{missing} (gateway unconfigured or no completed runs)")
+            print(note)
+            run_notes.append(note)
+            _persist_combined()               # crash-safe: keep 1..N-1 even when N is excluded
+            continue
+
+        row = rank.tuning_delta(baseline_agg, bestshot_agg, baseline_metrics, bestshot_metrics,
+                                spec, bestshot_spec, repeats)
+        rec = _load_tuned_record(settings_dir, spec.key)
+        if rec:                                    # D7: propagate the canonical low-confidence verdict
+            row.low_confidence = bool(rec.get("low_confidence"))
+            row.low_confidence_reasons = list(rec.get("reasons", []))
+        rows.append(row)
+        phase_metrics[spec.key] = {"baseline": baseline_metrics, "bestshot": bestshot_metrics}
+        _persist_combined()
+
+    _persist_combined()
+    print(f"wrote {out}")
+    print(f"dual-run metered spend ${budget_state['spent']:.4f}  ({len(rows)} model delta(s))")
+    return 0
+
+
 # ---- tune (sub-project C) -------------------------------------------------
 
 def _parse_try_gateways(items):
@@ -601,6 +771,32 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--suite", default=None, help="restrict to a suite: tag:<t> or a manifest name")
     r.add_argument("--out", default="")
     r.set_defaults(func=cmd_run)
+
+    dr = sub.add_parser("dualrun")
+    dr.add_argument("--models", default="",
+                    help="default: the subscription subset (metered models are excluded)")
+    dr.add_argument("--suite", default=None, help="restrict the scored corpus: tag:<t> or a manifest name")
+    dr.add_argument("--settings-dir", required=True,
+                    help="dir of C's per-model best_settings.json (the tuned best-shot source)")
+    dr.add_argument("--tasks-dir", default=None,
+                    help="scored corpus dir (defaults to the standard tasks/); the dev corpus must be disjoint")
+    dr.add_argument("--dev-tasks-dir", default=None,
+                    help="the tuner's dev corpus dir (leakage guard vs the scored corpus)")
+    dr.add_argument("--budget", type=float, default=10.0, help="TOTAL metered cap across BOTH phases")
+    dr.add_argument("--elegance", choices=["both", "bestshot", "none"], default="bestshot",
+                    help="which phase(s) the elegance judge scores (default: best-shot only)")
+    dr.add_argument("--order", choices=["alternate", "baseline-first", "bestshot-first"],
+                    default="alternate", help="per-model phase order (alternate counterbalances the fleet)")
+    dr.add_argument("--judge", default=registry.judge_spec().key,
+                    help="elegance judge key (must be cross-family vs all candidates)")
+    dr.add_argument("--no-ceiling", action="store_true",
+                    help="drop the ceiling model if it was explicitly selected (moot under the default)")
+    dr.add_argument("--repeats", type=int, default=1,
+                    help="repetitions per task per phase (default 1; use 3+ for stochastic models)")
+    dr.add_argument("--bar", type=float, default=0.8)
+    dr.add_argument("--sandbox-timeout", type=int, default=60)
+    dr.add_argument("--out", default="")
+    dr.set_defaults(func=cmd_dualrun)
 
     t = sub.add_parser("tune")
     t.add_argument("--models", default="")
