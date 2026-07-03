@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 
 from tools.model_bakeoff import rank, report
-from tools.model_bakeoff.models import ModelAggregate
+from tools.model_bakeoff.models import ModelAggregate, TaskMetric
+from tools.model_bakeoff.rank import DeltaRow, PairedResult
 
 
 def agg(key, passed, n, reasoning=True, cost=0.0, cm="subscription", p50=1.0):
@@ -194,3 +195,149 @@ def test_report_md_suite_line_whole_corpus_by_default():
     md = report.render_report_md(_result(), n_tasks=10)
     assert "Suite: whole corpus" in md
     assert "—" not in md and "–" not in md      # house style
+
+
+# --- Sub-project D Task 6: dual-run report + summary renderers ---
+
+def _drow(key="m", **kw):
+    row = DeltaRow(model_key=key)
+    for k, v in kw.items():
+        setattr(row, k, v)
+    return row
+
+
+def test_dualrun_md_primary_paired_stats_and_ci_disagreement():
+    # p=0.0625 -> not significant; ci_overlap False while significant False -> they AGREE (both "same"),
+    # so to force a disagreement we make ci_overlap True with significant False? that agrees too.
+    # Disagreement fires when ci_overlap == significant. Here significant=False, ci_overlap=False -> agree.
+    # Use a significant improvement with overlapping CIs to force disagreement.
+    row = _drow("glm-5.2",
+                paired=PairedResult(n_paired=8, b=0, c=6, p_value=0.03125, significant=True),
+                baseline_pass_fraction=0.5, bestshot_pass_fraction=0.75, pass_fraction_delta=0.25,
+                ci_overlap=True)
+    md = report.render_dualrun_md([row], run_id="r", n_tasks=10)
+    assert "accuracy (paired McNemar, PRIMARY): 8 paired, 0 regressed / 6 improved" in md
+    assert "significant at n=8" in md
+    assert "CI-overlap (descriptive secondary)" in md
+    assert "the paired McNemar p-value is authoritative" in md   # D6h disagreement note
+    assert "glm-5.2" in md
+    assert "—" not in md and "–" not in md
+
+
+def test_dualrun_md_min_discordant_fact_present():
+    md = report.render_dualrun_md([], run_id="r", n_tasks=10)
+    assert "6 all-one-directional discordant pairs are required" in md   # exact-McNemar floor at 0.05
+
+
+def test_dualrun_md_elegance_baseline_unjudged_policy():
+    row = _drow("m", bestshot_mean_elegance=0.82, bestshot_n_elegance_judged=7)
+    md = report.render_dualrun_md([row], n_tasks=10, elegance_policy="bestshot")
+    assert "baseline unjudged (--elegance bestshot policy)" in md
+    assert "best-shot mean 0.820 (n=7)" in md
+
+
+def test_dualrun_md_elegance_partial_coverage_under_both():
+    # both-policy but the paired delta is None (partial coverage) -> the partial-coverage wording
+    row = _drow("m", elegance_paired_delta=None, baseline_n_elegance_judged=1,
+                bestshot_n_elegance_judged=2)
+    md = report.render_dualrun_md([row], n_tasks=10, elegance_policy="both")
+    assert "partial judge coverage" in md
+
+
+def test_dualrun_md_cost_proxy_caption_and_context_labels():
+    row = _drow("m", paired=PairedResult(2, 0, 0, 1.0, False), cost_proxy_paired_delta=0.0001,
+                baseline_p50_s=1.0, bestshot_p50_s=1.2)
+    md = report.render_dualrun_md([row], n_tasks=10)
+    assert "Cost proxy = token-volume x sticker price" in md and "NOT real spend" in md
+    assert "context only" in md                              # corpus-wide phase aggregates labelled
+
+
+def test_dualrun_md_two_tier_sampling_caveat():
+    cited = _drow("deepseek-v4-flash", paired=PairedResult(1, 0, 0, 1.0, False),
+                  sampling_uncontrolled=True)
+    md_c = report.render_dualrun_md([cited], n_tasks=10)
+    assert "VENDOR-DOCUMENTED" in md_c and "coding-inference-settings.md" in md_c
+    assert "--repeats>=3" in md_c
+    noncited = _drow("kimi-k2.6", paired=PairedResult(1, 0, 0, 1.0, False), sampling_uncontrolled=True)
+    md_n = report.render_dualrun_md([noncited], n_tasks=10)
+    assert "UNDOCUMENTED for kimi-k2.6" in md_n and "heuristic caution" in md_n
+    assert "--repeats>=3" in md_n
+
+
+def test_dualrun_md_stochastic_bestshot_caveat():
+    row = _drow("glm-5.2", paired=PairedResult(1, 0, 0, 1.0, False),
+                stochastic_bestshot=True, tuned_temperature=0.7)
+    md = report.render_dualrun_md([row], n_tasks=10)
+    assert "stochastic_bestshot: best-shot enables sampling temperature=0.7" in md
+    assert "--repeats>=3" in md
+
+
+def test_dualrun_md_causal_and_composition_flags():
+    row = _drow("m", paired=PairedResult(1, 0, 0, 1.0, False), gateway_capped=True,
+                tuning_induced_regression=False, order_confound_suspect=True,
+                task_composition_mismatch=True, n_tasks_mismatch=True)
+    md = report.render_dualrun_md([row], n_tasks=10)
+    assert "gateway_capped: reliability gap persists on the SAME gateway" in md
+    assert "order_confound_suspect" in md and "cannot fully separate" in md   # residual-limitation line
+    assert "task_composition_mismatch" in md and "n_tasks_mismatch" in md
+
+
+def test_dualrun_md_no_data_and_empty_intersection():
+    nd = _drow("dead", no_data=True, no_data_reason="a phase produced zero completed tasks")
+    md = report.render_dualrun_md([nd], n_tasks=10)
+    assert "NO DATA" in md and "no paired delta computed" in md
+    ei = _drow("split", paired=PairedResult(0, 0, 0, 1.0, False), empty_intersection=True)
+    md2 = report.render_dualrun_md([ei], n_tasks=10)
+    assert "empty_intersection" in md2
+
+
+def test_dualrun_md_low_confidence_banner_over_half():
+    rows = [_drow("a", paired=PairedResult(1, 0, 0, 1.0, False), low_confidence=True,
+                  low_confidence_reasons=["small_margin"]),
+            _drow("b", paired=PairedResult(1, 0, 0, 1.0, False), low_confidence=True,
+                  low_confidence_reasons=["all_operational"]),
+            _drow("c", paired=PairedResult(1, 0, 0, 1.0, False), low_confidence=False)]
+    md = report.render_dualrun_md(rows, n_tasks=10, n_tuned_records=3)
+    assert "tuned settings are LOW-CONFIDENCE for 2 of 3 models" in md
+    assert "treat this delta as indicative" in md              # per-row annotation too
+
+
+def test_dualrun_md_corpus_power_and_multiplicity_caveat():
+    md = report.render_dualrun_md([_drow("a", paired=PairedResult(1, 0, 0, 1.0, False))],
+                                  n_tasks=10, n_tuned_records=1)
+    assert "N_tuned_models=1" in md
+    assert "do not vote-count" in md and "cross-model" in md
+
+
+def test_dualrun_md_leakage_and_drift_blocks():
+    prov = {"scored_dir": "/x/tasks", "dev_dir": None, "leakage_checked": True,
+            "dev_corpus": {"tree_sha": "abc123", "oracle_ref_sha256": "def456",
+                           "dev_tasks": ["quick-a", "quick-b"]}}
+    md = report.render_dualrun_md([_drow("m", paired=PairedResult(1, 0, 0, 1.0, False))],
+                                  n_tasks=10, provenance=prov,
+                                  drift_notes=["WARNING: tuned record base for m drifted"])
+    assert "## Leakage and provenance" in md
+    assert "leakage check: disjoint (verified)" in md
+    assert "tree_sha=abc123" in md
+    assert "## Tuned-spec reconstruction notes" in md and "drifted" in md
+
+
+def test_dualrun_summary_json_records_deltas_pass_rates_and_provenance():
+    row = _drow("m", paired=PairedResult(n_paired=3, b=1, c=2, p_value=0.5, significant=False),
+                pass_fraction_delta=0.33, ci_overlap=True, order_confound_suspect=True,
+                tuned_temperature=0.7)
+    pm = {"m": {"baseline": {"t1": TaskMetric(True, 1.0, 0.0, None, 1.0),
+                             "t2": TaskMetric(False, 1.0, 0.0, None, 1 / 3)},
+                "bestshot": {"t1": TaskMetric(True, 1.0, 0.0, None, 1.0),
+                             "t2": TaskMetric(True, 1.0, 0.0, None, 1.0)}}}
+    data = json.loads(report.render_dualrun_summary_json(
+        [row], phase_metrics=pm, run_id="r", n_tasks=10, order="alternate",
+        provenance={"scored_dir": "/x"}, orders={"m": "baseline-first"}, n_tuned_records=1))
+    m = data["models"][0]
+    assert m["paired"] == {"n_paired": 3, "b": 1, "c": 2, "p_value": 0.5, "significant": False}
+    assert m["ci_overlap"] is True and m["order_confound_suspect"] is True
+    assert m["baseline_pass_rates"] == {"t1": 1.0, "t2": 1 / 3}   # D6g flakiness recorded
+    assert m["bestshot_pass_rates"] == {"t1": 1.0, "t2": 1.0}
+    assert m["order"] == "baseline-first"
+    assert data["order"] == "alternate" and data["provenance"] == {"scored_dir": "/x"}
+    assert data["n_tuned_records"] == 1
