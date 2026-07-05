@@ -1,3 +1,39 @@
+## ⚜️ Obelisk Complex Fork: Customisations
+
+[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx) - Ghostwritten. AI generated all code in this fork; a human operator briefed, reviewed, and signed off on every change (catching security issues, challenging design decisions, directing rework). No code was written directly by human hands.
+
+-----
+
+This fork adds a **self-check enforcement system**: it stops the agent reporting a task as done when a sub-task or validation actually failed.
+
+**Full install and technical details:** [`self-check-enforcement-system-v15.md`](self-check-enforcement-system-v15.md).
+
+### What you get
+
+- **No false 'done'.** When a subagent reports a failure, the agent is mechanically blocked from sending or printing an 'all clear' until the failure is fixed or explicitly acknowledged. It cannot slip past the block via another channel, plain text, or a no-op subagent dispatch.
+- **A verification protocol on every subagent.** Subagents load a 5-gate harness (evidence, confidence score, contradiction check, alternatives, threshold) and must run their acceptance checks before they can report `READY`.
+- **Escalation instead of silent failure.** After repeated blocked attempts the turn ends with an explicit 'BLOCKED, needs a human', never a quiet 'done'.
+- **Stays current with upstream, safely.** A GitHub Action rebases the fork onto `NousResearch/hermes-agent` daily and force-pushes server-side, so it tracks upstream with no local machine involved. Your local `hermes update` only pulls from `origin`, so no clone can force-push by accident.
+
+### How to get it
+
+- **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
+- **Add it to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
+
+### Private-by-default image generation
+
+Separate from the self-check system above, and unrelated to the `on_output` hook. Image generation (`tools/image_generation_tool.py`) is hardened on two fronts:
+
+- **No payload retention.** Every request sends the `X-Fal-Store-IO: 0` header, on both the direct fal.ai path and the managed Nous gateway path, so fal does not keep the request/response JSON (prompt, parameters, result metadata) in its request history.
+- **No public CDN image, where fal supports it.** Every model whose fal schema accepts `sync_mode` is sent it, so the image is returned inline as a data URI and is never written to fal's public CDN. This is the part the header does **not** cover: fal's docs are explicit that `X-Fal-Store-IO` only suppresses payload history, and that any file already on the CDN "will still be accessible".
+
+  Verified `sync_mode`-capable (private): flux-2 klein/pro, z-image, nano-banana-pro, gpt-image-1.5/2, ideogram v3, qwen. **Exceptions that serve from the public CDN:** `recraft/v4/pro` and the `krea/v2` models (no `sync_mode` in their fal schema; selecting one logs a warning), and the `clarity-upscaler` upscale pass. Upscaling is therefore **off by default**; enable it with `image_gen.upscale: true` in config only if you accept the upscaled result transiting fal's CDN. For fully private output, stay on a `sync_mode`-capable model (the default set) with upscaling off.
+
+**Principle:** data retention should be **opt-in**, off by default and enabled only if the user explicitly chooses it, never **opt-out**, where the provider keeps your data unless you remember to turn it off.
+
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
