@@ -302,7 +302,6 @@ from hermes_cli.subcommands.debug import build_debug_parser
 from hermes_cli.subcommands.backup import build_backup_parser
 from hermes_cli.subcommands.import_cmd import build_import_cmd_parser
 from hermes_cli.subcommands.config import build_config_parser
-from hermes_cli.subcommands.console import build_console_parser
 from hermes_cli.subcommands.version import build_version_parser
 from hermes_cli.subcommands.update import build_update_parser
 from hermes_cli.subcommands.uninstall import build_uninstall_parser
@@ -633,7 +632,6 @@ from hermes_cli.model_setup_flows import (
     _model_flow_stepfun,
     _model_flow_bedrock_api_key,
     _model_flow_bedrock,
-    _model_flow_vertex,
     _model_flow_api_key_provider,
     _model_flow_anthropic,
     _model_flow_moa,
@@ -3160,8 +3158,6 @@ def select_provider_and_model(args=None):
         _model_flow_stepfun(config, current_model)
     elif selected_provider == "bedrock":
         _model_flow_bedrock(config, current_model)
-    elif selected_provider == "vertex":
-        _model_flow_vertex(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
     elif selected_provider in {
@@ -4510,6 +4506,13 @@ _UPDATE_CRITICAL_FILES = (
     "model_tools.py",
     "toolsets.py",
     "hermes_constants.py",
+    # Fork customisation (self-check enforcement) edits these upstream-owned
+    # files; include them so a conflict marker left by the daily upstream
+    # rebase is caught by the post-pull syntax guard and rolled back, rather
+    # than bricking the agent at the first turn after a "successful" update.
+    "agent/conversation_loop.py",
+    "tools/delegate_tool.py",
+    "hermes_cli/plugins.py",
 )
 
 
@@ -6810,7 +6813,7 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
         return False
 
 
-def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
+def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
     """Check if fork is behind upstream and sync if safe.
 
     This implements the fork upstream sync logic:
@@ -6818,13 +6821,18 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
     - Compare origin/main with upstream/main
     - If origin/main is strictly behind upstream/main, pull from upstream
     - Try to sync fork back to origin if possible
+    - If our fork has custom commits AND upstream has advanced, rebase
+      custom commits onto upstream/main and force-push to origin
+
+    Returns True if any changes were pulled or rebased (caller should
+    continue to dependency updates). Returns False if nothing changed.
     """
     has_upstream = _has_upstream_remote(git_cmd, cwd)
 
     if not has_upstream:
         # Check if user previously declined
         if _should_skip_upstream_prompt():
-            return
+            return False
 
         # Ask user if they want to add upstream
         print()
@@ -6848,13 +6856,13 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
-                return
+                return False
         else:
             print(
                 "  Skipped. Run 'git remote add upstream https://github.com/NousResearch/hermes-agent.git' to add later."
             )
             _mark_skip_upstream_prompt()
-            return
+            return False
 
     # Fetch upstream main only. This sync compares upstream/main with
     # origin/main, so there's no reason to pull every upstream ref — and a bare
@@ -6870,7 +6878,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         )
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
-        return
+        return False
 
     # Compare origin/main with upstream/main
     origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
@@ -6880,21 +6888,61 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
 
     if origin_ahead < 0 or upstream_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
-        return
+        return False
 
-    # If origin/main has commits not on upstream, don't trample
+    # If origin/main has commits not on upstream
     if origin_ahead > 0:
+        if upstream_ahead == 0:
+            # Upstream hasn't moved — nothing to sync
+            print()
+            print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
+            print("  ✓ Upstream is at the same point — nothing to sync.")
+            return True  # We're current; caller should continue to dep updates
+
+        # Both origin and upstream have advanced — rebase custom commits
         print()
         print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
-        print("  Skipping upstream sync to preserve your changes.")
-        print("  If you want to merge upstream changes, run:")
-        print("    git pull upstream main")
-        return
+        print(f"→ Upstream has {upstream_ahead} new commit(s). Rebasing...")
+        # Stash uncommitted changes before rebase (if any) so working tree is clean
+        try:
+            subprocess.run(
+                git_cmd + ["rebase", "upstream/main"],
+                cwd=cwd,
+                check=True,
+            )
+            print("  ✓ Rebased custom commits onto upstream/main")
+        except subprocess.CalledProcessError:
+            print("  ✗ Rebase failed. Resolve conflicts manually:")
+            print("    git rebase --continue")
+            print("    git rebase --abort  # to cancel")
+            sys.exit(1)
+
+        # Push is separate from rebase — if the lease fails we need an
+        # accurate message (not "rebase failed").
+        try:
+            subprocess.run(
+                git_cmd + ["push", "--force-with-lease", "origin", "main"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            print("  ✓ Pushed rebased changes to origin/main")
+        except subprocess.CalledProcessError as _push_err:
+            print("  ✗ Failed to push rebased changes to origin/main.")
+            if _push_err.stderr:
+                print(f"    {_push_err.stderr.strip().splitlines()[0]}")
+            print()
+            print("  Your local repo has been rebased but the fork on GitHub")
+            print("  could not be updated. Push manually with:")
+            print("    git push --force-with-lease origin main")
+            sys.exit(1)
+        return True
 
     # If upstream is not ahead, fork is up to date
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
-        return
+        return False
 
     # origin/main is strictly behind upstream/main (can fast-forward)
     print()
@@ -6911,7 +6959,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         print(
             "  ✗ Failed to pull from upstream. You may need to resolve conflicts manually."
         )
-        return
+        return False
 
     print("  ✓ Updated from upstream")
 
@@ -6924,6 +6972,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
             "  ℹ Got updates from upstream but couldn't push to fork (no write access?)"
         )
         print("    Your local repo is updated, but your fork on GitHub may be behind.")
+
+    return True
 
 
 def _invalidate_update_cache():
@@ -8842,13 +8892,13 @@ def _wait_for_windows_update_gateway_exit(
 def _venv_core_imports_healthy() -> tuple[bool, str]:
     """Probe the project venv for the core imports the backend needs to boot.
 
-    Runs a tiny import check inside the venv interpreter (NOT this process —
+    Runs a tiny import check inside the venv interpreter (NOT this process --
     ``hermes update`` may be driven by a different Python). Catches the
     half-updated-venv state: git checkout current but a dependency sync that
     failed or was killed partway (e.g. Windows access-denied on a loaded
     .pyd), leaving imports like ``fastapi``'s new transitive deps missing.
     Without this probe, ``hermes update`` on a current checkout prints
-    "Already up to date!" and returns without ever re-syncing dependencies —
+    "Already up to date!" and returns without ever re-syncing dependencies --
     the user's install stays broken no matter how many times they update
     (ryanc's incident, July 2026).
 
@@ -8865,7 +8915,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
         # avoid forcing reinstalls. But on a MANAGED install (the Windows
         # installer / desktop bootstrap stamps `.hermes-bootstrap-complete`,
         # and an interrupted update leaves `.update-incomplete`), the venv
-        # IS the install — its absence means a repair got interrupted after
+        # IS the install -- its absence means a repair got interrupted after
         # the old venv was moved aside, and "Already up to date!" would
         # gaslight the user while nothing can run.
         managed_markers = (
@@ -8877,7 +8927,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
         return True, ""
 
     # Core web/serve imports plus their newest transitive deps. Import (not
-    # just metadata) — a package can have intact dist-info but a missing
+    # just metadata) -- a package can have intact dist-info but a missing
     # module after an interrupted uninstall/install cycle.
     check = (
         "import importlib\n"
@@ -8886,7 +8936,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
         "for m in mods:\n"
         "    try: importlib.import_module(m)\n"
         "    except Exception as e: missing.append(f'{m}: {e}')\n"
-        "print('\\n'.join(missing))\n"
+        "print('\\\\n'.join(missing))\n"
     )
     try:
         result = subprocess.run(
@@ -8902,7 +8952,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
 
     missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if result.returncode != 0 and not missing:
-        # Interpreter itself is broken (e.g. deleted stdlib) — that IS unhealthy.
+        # Interpreter itself is broken (e.g. deleted stdlib) -- that IS unhealthy.
         detail = (result.stderr or "").strip().splitlines()
         return False, detail[0] if detail else "venv python failed to run"
     if missing:
@@ -8922,8 +8972,8 @@ def _detect_venv_python_processes(
     dependency sync mid-update dies with access-denied and strands the venv
     half-updated (ryanc's brotlicffi/_sodium.pyd incidents, July 2026).
 
-    Killing them from here is pointless — the Desktop app supervises its
-    backend and respawns it within seconds — so the caller should refuse and
+    Killing them from here is pointless -- the Desktop app supervises its
+    backend and respawns it within seconds -- so the caller should refuse and
     tell the user to close the app instead. Returns ``(pid, name, cmdline)``
     tuples; empty off-Windows / without psutil / when nothing matches. The
     calling process and its ancestors are always excluded (a CLI ``hermes
@@ -8977,7 +9027,7 @@ def _detect_venv_python_processes(
         cwd_low = str(info.get("cwd") or "").lower().rstrip(os.sep) + os.sep
 
         # Primary match: the executable itself lives under this venv
-        # (venv\Scripts\python(w).exe — the desktop backend / gateway case).
+        # (venv\\Scripts\\python(w).exe -- the desktop backend / gateway case).
         is_holder = exe_norm.startswith(venv_prefix)
         # Fallback: uv/base-interpreter trampolines run a python whose exe is
         # OUTSIDE the venv but which still imports from it and holds its .pyd
@@ -9496,23 +9546,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _windows_gateway_resume,
         )
 
-    # With gateways paused, anything still running from the venv interpreter
-    # (most commonly the Desktop app's `hermes serve` backend) will keep .pyd
-    # files locked and corrupt the dependency sync below. Refuse rather than
-    # race: killing the desktop backend is futile (the app supervises and
-    # respawns it), so the user must close the app. Deliberately NOT bypassed
-    # by plain --force: the desktop bootstrap updater passes --force to skip
-    # the hermes.exe shim guard above, but its lock probe only checks the shim
-    # and app.asar — a non-desktop venv python holding a .pyd would sail
-    # through and corrupt the sync (the exact failure this guard exists for).
-    # --force-venv is the explicit escape hatch.
-    if _is_windows() and not getattr(args, "force_venv", False):
-        _venv_holders = _detect_venv_python_processes()
-        if _venv_holders:
-            print(_format_venv_python_holders_message(_venv_holders))
-            _resume_windows_gateways_after_update(_windows_gateway_resume)
-            sys.exit(2)
-
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
     use_zip_update = False
@@ -9689,13 +9722,15 @@ def _cmd_update_impl(args, gateway_mode: bool):
             check=True,
         )
         commit_count = int(result.stdout.strip())
+        _rebase_sync_done = False
 
         if commit_count == 0:
             _invalidate_update_cache()
 
-            # Even if origin is up to date, the fork may be behind upstream
-            if is_fork and branch == "main":
-                _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+            # The GitHub Actions Sync Upstream workflow (run daily at 0400
+            # Pacific) is the sole mechanism for merging upstream changes
+            # into the fork. Local `hermes update` does NOT fetch upstream
+            # or force-push — it only pulls from origin.
 
             # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
@@ -9706,6 +9741,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     prompt_user=prompt_for_restore,
                     input_fn=gw_input_fn,
                 )
+                auto_stash_ref = None  # Already restored — don't double-restore
             if current_branch not in {branch, "HEAD"}:
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
@@ -9719,7 +9755,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # dependency sync may have failed partway (classic on Windows,
             # where a running gateway/desktop backend keeps .pyd files locked
             # and uv/pip dies with access-denied, stranding the venv between
-            # versions). Probe the venv's core imports and repair if broken —
+            # versions). Probe the venv's core imports and repair if broken --
             # otherwise "Already up to date!" gaslights the user while their
             # install stays bricked.
             healthy, detail = _venv_core_imports_healthy()
@@ -9768,130 +9804,131 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _resume_windows_gateways_after_update(_windows_gateway_resume)
             return
 
-        print(f"→ Found {commit_count} new commit(s)")
-
-        # Snapshot critical state (state.db, config, pairing JSONs, etc.)
-        # before pulling so a user can recover if something goes wrong.
-        # Issue #15733 reported missing pairing data after an update; even
-        # though `git pull` can't touch $HERMES_HOME, this is cheap
-        # belt-and-suspenders insurance and gives the user something to
-        # restore from via `/snapshot list` / `/snapshot restore <id>`.
         pre_update_snapshot_id = None
-        try:
-            from hermes_cli.backup import create_quick_snapshot
 
-            pre_update_snapshot_id = create_quick_snapshot(label="pre-update", keep=1)
-            if pre_update_snapshot_id:
-                print(f"  ✓ Pre-update snapshot: {pre_update_snapshot_id}")
-        except Exception as exc:
-            # Never let a snapshot failure block an update.
-            logger.debug("Pre-update snapshot failed: %s", exc)
+        if not _rebase_sync_done:
+            print(f"→ Found {commit_count} new commit(s)")
 
-        print("→ Pulling updates...")
-        update_succeeded = False
-        # Capture the pre-pull SHA so we can auto-roll-back if the new code
-        # has a syntax error in a critical-path file (PR #28452 incident:
-        # orphan merge-conflict markers in hermes_cli/config.py bricked
-        # every user who ran ``hermes update`` for the 7 minutes between
-        # the bad commit and the fix landing).
-        pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
-        try:
-            pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-            )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
-                print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
-                )
-                reset_result = subprocess.run(
-                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
+            # Snapshot critical state ...
+            pre_update_snapshot_id = None
+            try:
+                from hermes_cli.backup import create_quick_snapshot
+
+                pre_update_snapshot_id = create_quick_snapshot(label="pre-update", keep=1)
+                if pre_update_snapshot_id:
+                    print(f"  ✓ Pre-update snapshot: {pre_update_snapshot_id}")
+            except Exception as exc:
+                # Never let a snapshot failure block an update.
+                logger.debug("Pre-update snapshot failed: %s", exc)
+
+            print("→ Pulling updates...")
+            update_succeeded = False
+            # Capture the pre-pull SHA so we can auto-roll-back if the new code
+            # has a syntax error in a critical-path file (PR #28452 incident:
+            # orphan merge-conflict markers in hermes_cli/config.py bricked
+            # every user who ran ``hermes update`` for the 7 minutes between
+            # the bad commit and the fix landing).
+            pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
+            try:
+                pull_result = subprocess.run(
+                    git_cmd + ["pull", "--ff-only", "origin", branch],
                     cwd=PROJECT_ROOT,
                     capture_output=True,
                     text=True,
                 )
-                if reset_result.returncode != 0:
-                    print(f"✗ Failed to reset to origin/{branch}.")
-                    if reset_result.stderr.strip():
-                        print(f"  {reset_result.stderr.strip()}")
+                if pull_result.returncode != 0:
+                    # ff-only failed — local and remote have diverged (e.g. upstream
+                    # force-pushed or rebase).  Since local changes are already
+                    # stashed, reset to match the remote exactly.
                     print(
-                        f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
+                        "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
                     )
-                    sys.exit(1)
-
-            # Post-pull syntax guard: validate critical-path files actually
-            # parse before declaring the update successful. If a bad commit
-            # made it through CI (e.g. admin-merge bypass of a failing
-            # ruff check), this catches it on the user side and rolls back
-            # so the CLI stays bootable. The user can then retry ``hermes
-            # update`` later once a fix lands upstream.
-            syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
-                PROJECT_ROOT
-            )
-            if not syntax_ok:
-                print()
-                print("✗ Pulled code has a syntax error in a critical file:")
-                print(f"  {failing_path}")
-                if syntax_error:
-                    # py_compile errors can be multi-line; show the first
-                    # ~6 lines so the user sees the actual SyntaxError text.
-                    for line in str(syntax_error).splitlines()[:6]:
-                        print(f"    {line}")
-                if pre_pull_sha:
-                    print()
-                    print(f"→ Rolling back to {pre_pull_sha[:10]}...")
-                    rollback_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", pre_pull_sha],
+                    reset_result = subprocess.run(
+                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
                         cwd=PROJECT_ROOT,
                         capture_output=True,
                         text=True,
                     )
-                    if rollback_result.returncode == 0:
-                        print("  ✓ Rollback complete — your install is unchanged.")
-                        print("  Try ``hermes update`` again later once a fix lands.")
-                    else:
-                        print("  ✗ Rollback failed. Recover manually with:")
-                        print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
-                        if rollback_result.stderr.strip():
-                            print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
-                else:
-                    print()
-                    print("  Could not capture pre-pull SHA — recover manually with:")
-                    print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
-                sys.exit(1)
+                    if reset_result.returncode != 0:
+                        print(f"✗ Failed to reset to origin/{branch}.")
+                        if reset_result.stderr.strip():
+                            print(f"  {reset_result.stderr.strip()}")
+                        print(
+                            f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
+                        )
+                        sys.exit(1)
 
+                # Post-pull syntax guard: validate critical-path files actually
+                # parse before declaring the update successful. If a bad commit
+                # made it through CI (e.g. admin-merge bypass of a failing
+                # ruff check), this catches it on the user side and rolls back
+                # so the CLI stays bootable. The user can then retry ``hermes
+                # update`` later once a fix lands upstream.
+                syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
+                    PROJECT_ROOT
+                )
+                if not syntax_ok:
+                    print()
+                    print("✗ Pulled code has a syntax error in a critical file:")
+                    print(f"  {failing_path}")
+                    if syntax_error:
+                        # py_compile errors can be multi-line; show the first
+                        # ~6 lines so the user sees the actual SyntaxError text.
+                        for line in str(syntax_error).splitlines()[:6]:
+                            print(f"    {line}")
+                    if pre_pull_sha:
+                        print()
+                        print(f"→ Rolling back to {pre_pull_sha[:10]}...")
+                        rollback_result = subprocess.run(
+                            git_cmd + ["reset", "--hard", pre_pull_sha],
+                            cwd=PROJECT_ROOT,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if rollback_result.returncode == 0:
+                            print("  ✓ Rollback complete — your install is unchanged.")
+                            print("  Try ``hermes update`` again later once a fix lands.")
+                        else:
+                            print("  ✗ Rollback failed. Recover manually with:")
+                            print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
+                            if rollback_result.stderr.strip():
+                                print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
+                    else:
+                        print()
+                        print("  Could not capture pre-pull SHA — recover manually with:")
+                        print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
+                    sys.exit(1)
+
+                update_succeeded = True
+            finally:
+                if auto_stash_ref is not None:
+                    # Don't attempt stash restore if the code update itself failed —
+                    # working tree is in an unknown state.
+                    if not update_succeeded:
+                        print(
+                            f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
+                        )
+                        print(f"  Restore manually with: git stash apply")
+                    elif discard_local_changes:
+                        # Non-interactive update + user opted into discarding local
+                        # source edits (updates.non_interactive_local_changes:
+                        # discard). Throw the stash away instead of re-applying it.
+                        _discard_stashed_changes(
+                            git_cmd,
+                            PROJECT_ROOT,
+                            auto_stash_ref,
+                        )
+                    else:
+                        _restore_stashed_changes(
+                            git_cmd,
+                            PROJECT_ROOT,
+                            auto_stash_ref,
+                            prompt_user=prompt_for_restore,
+                            input_fn=gw_input_fn,
+                        )
+        else:
+            # Rebase-sync path: git operations already handled; stash restored above.
             update_succeeded = True
-        finally:
-            if auto_stash_ref is not None:
-                # Don't attempt stash restore if the code update itself failed —
-                # working tree is in an unknown state.
-                if not update_succeeded:
-                    print(
-                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                    )
-                    print("  Restore manually with: git stash apply")
-                elif discard_local_changes:
-                    # Non-interactive update + user opted into discarding local
-                    # source edits (updates.non_interactive_local_changes:
-                    # discard). Throw the stash away instead of re-applying it.
-                    _discard_stashed_changes(
-                        git_cmd,
-                        PROJECT_ROOT,
-                        auto_stash_ref,
-                    )
-                else:
-                    _restore_stashed_changes(
-                        git_cmd,
-                        PROJECT_ROOT,
-                        auto_stash_ref,
-                        prompt_user=prompt_for_restore,
-                        input_fn=gw_input_fn,
-                    )
 
         _invalidate_update_cache()
 
@@ -9904,9 +9941,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
-            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+        # Fork upstream sync is handled solely by the GitHub Actions
+        # Sync Upstream workflow (daily at 0400 Pacific). Local
+        # hermes update only pulls from origin.
+        pass
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras
@@ -10316,23 +10354,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # predictable cadence (matches when they pull new agent code) without
         # adding startup latency or a per-launch GitHub API call.
         try:
-            refresh_cua_driver = True
-            try:
-                from hermes_cli.config import load_config
-
-                _update_cfg = (load_config() or {}).get("updates", {})
-                if isinstance(_update_cfg, dict):
-                    refresh_cua_driver = bool(
-                        _update_cfg.get("refresh_cua_driver", True)
-                    )
-            except Exception as cfg_exc:
-                logger.debug("Could not read updates.refresh_cua_driver: %s", cfg_exc)
-
-            if (
-                refresh_cua_driver
-                and sys.platform in ("darwin", "win32", "linux")
-                and shutil.which("cua-driver")
-            ):
+            if sys.platform in ("darwin", "win32", "linux") and shutil.which("cua-driver"):
                 from hermes_cli.tools_config import install_cua_driver
 
                 print()
@@ -12269,13 +12291,6 @@ def cmd_logs(args):
     )
 
 
-def cmd_console(args):
-    """Open the safe Hermes command console."""
-    from hermes_cli.console_engine import run_console_repl
-
-    return run_console_repl()
-
-
 def _build_provider_choices() -> list[str]:
     """Build the --provider choices list from CANONICAL_PROVIDERS + 'auto'."""
     try:
@@ -12285,7 +12300,7 @@ def _build_provider_choices() -> list[str]:
         # Fallback: static list guarantees the CLI always works
         return [
             "auto", "openrouter", "nous", "openai-codex", "xai-oauth", "copilot-acp", "copilot",
-            "anthropic", "gemini", "vertex", "xai", "bedrock", "azure-foundry",
+            "anthropic", "gemini", "xai", "bedrock", "azure-foundry",
             "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn",
             "stepfun", "minimax", "minimax-cn", "kilocode", "novita", "xiaomi", "arcee",
             "nvidia", "deepseek", "alibaba", "qwen-oauth", "opencode-zen", "opencode-go",
@@ -12305,7 +12320,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
@@ -13159,11 +13174,6 @@ def main():
     # config command  (parser built in hermes_cli/subcommands/config.py)
     # =========================================================================
     build_config_parser(subparsers, cmd_config=cmd_config)
-
-    # =========================================================================
-    # console command  (parser built in hermes_cli/subcommands/console.py)
-    # =========================================================================
-    build_console_parser(subparsers, cmd_console=cmd_console)
 
     # =========================================================================
     # pairing command  (parser built in hermes_cli/subcommands/pairing.py)

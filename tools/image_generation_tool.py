@@ -425,6 +425,35 @@ DEFAULT_MODEL = "fal-ai/flux-2/klein/9b"
 DEFAULT_ASPECT_RATIO = "landscape"
 VALID_ASPECT_RATIOS = ("landscape", "square", "portrait")
 
+# Models whose fal input schema accepts `sync_mode` (verified against fal's
+# per-model API schemas, 2026-06-15). For these, generation forces sync_mode so
+# the image is returned inline as a data URI and is never written to fal's
+# public CDN. Models NOT in this set (recraft/v4, the krea/v2 models, and the
+# clarity-upscaler) have no sync_mode in their schema, so their output is served
+# from the CDN. Do NOT add a model here without first checking its fal schema —
+# sending sync_mode to a model that does not support it risks rejection.
+SYNC_MODE_MODELS = frozenset({
+    "fal-ai/flux-2/klein/9b",
+    "fal-ai/flux-2-pro",
+    "fal-ai/z-image/turbo",
+    "fal-ai/nano-banana-pro",
+    "fal-ai/gpt-image-1.5",
+    "fal-ai/gpt-image-2",
+    "fal-ai/ideogram/v3",
+    "fal-ai/qwen-image",
+})
+
+# Catalog models whose fal schema has NO sync_mode (verified 2026-06-15), so
+# their output is served from fal's public CDN: recraft/v4 and the krea/v2
+# models (krea's schema is gated/unverifiable, treated as unsupported). Kept as
+# an explicit companion set so the test suite forces every NEW catalog model to
+# be classified sync vs non-sync (see test_every_catalog_model_is_classified).
+NON_SYNC_MODE_MODELS = frozenset({
+    "fal-ai/recraft/v4/pro/text-to-image",
+    "fal-ai/krea/v2/medium/text-to-image",
+    "fal-ai/krea/v2/large/text-to-image",
+})
+
 
 # ---------------------------------------------------------------------------
 # Upscaler (Clarity Upscaler — unchanged from previous implementation)
@@ -485,7 +514,9 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
     """Submit a FAL request using direct credentials or the managed queue gateway."""
     # Trigger the lazy import on first call. Idempotent.
     _load_fal_client()
-    request_headers = {"x-idempotency-key": str(uuid.uuid4())}
+    # Opt out of FAL storing/indexing request IO on every FAL submission,
+    # both the direct fal.ai path and the managed Nous gateway path.
+    request_headers = {"x-idempotency-key": str(uuid.uuid4()), "X-Fal-Store-IO": "0"}
     managed_gateway = _resolve_managed_fal_gateway()
     if managed_gateway is None:
         return fal_client.submit(model, arguments=arguments, headers=request_headers)
@@ -562,6 +593,35 @@ def _resolve_fal_model() -> tuple:
     return model_id, FAL_MODELS[model_id]
 
 
+def _upscale_enabled() -> bool:
+    """Whether the optional Clarity Upscaler pass is enabled (default OFF).
+
+    The upscaler (fal-ai/clarity-upscaler) has no sync_mode in its fal schema,
+    so its output is served from fal's PUBLIC CDN. Keeping it opt-in means
+    generation stays private-by-default; set ``image_gen.upscale: true`` in
+    config.yaml only if you accept the upscaled result transiting the CDN.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        img_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if isinstance(img_cfg, dict):
+            val = img_cfg.get("upscale", False)
+            # Fail CLOSED: bool("false") is True in Python, so a quoted-string
+            # config like `upscale: "false"` must NOT silently enable the
+            # CDN-leaking upscaler. Accept only real booleans / explicit tokens.
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(val, (int, float)):
+                return val == 1
+            return False
+    except Exception as exc:
+        logger.debug("Could not load image_gen.upscale from config: %s", exc)
+    return False
+
+
 def _build_fal_payload(
     model_id: str,
     prompt: str,
@@ -605,10 +665,19 @@ def _build_fal_payload(
     # ``prompt`` is required by every FAL text-to-image endpoint; keep it even
     # if a model's ``supports`` whitelist omits it, so a missing whitelist entry
     # can't silently strip the prompt and send an empty request.
-    return {
+    filtered = {
         k: v for k, v in payload.items()
         if k in supports or k == "prompt"
     }
+    # Force inline (data URI) delivery so the image is returned in-band and
+    # never written to fal's public CDN. Only for models whose fal schema
+    # accepts sync_mode (see SYNC_MODE_MODELS); sending it to a model that does
+    # not support it risks rejection. Note: the X-Fal-Store-IO header only
+    # suppresses payload history, NOT CDN files. See README "Private-by-default
+    # image generation".
+    if model_id in SYNC_MODE_MODELS:
+        filtered["sync_mode"] = True
+    return filtered
 
 
 def _build_fal_edit_payload(
@@ -681,6 +750,10 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         logger.info("Upscaling image with Clarity Upscaler...")
 
         upscaler_arguments = {
+            # The source image may arrive as an inline data URI (sync_mode
+            # output from a sync_mode-capable model); fal accepts data URIs as
+            # file inputs. NOTE: clarity-upscaler has no sync_mode in its fal
+            # schema, so its UPSCALED output is still served from fal's CDN.
             "image_url": image_url,
             "prompt": f"{UPSCALER_DEFAULT_PROMPT}, {original_prompt}",
             "upscale_factor": UPSCALER_FACTOR,
@@ -863,6 +936,15 @@ def image_generate_tool(
     """
     model_id, meta = _resolve_fal_model()
 
+    if model_id not in SYNC_MODE_MODELS:
+        logger.warning(
+            "Image model %s has no sync_mode in its fal schema: its output will "
+            "be served from fal's PUBLIC CDN, not returned privately inline. Use "
+            "a sync_mode-capable model for private generation (see README, "
+            "'Private-by-default image generation').",
+            model_id,
+        )
+
     # Collect any source images (primary + references) into one ordered list.
     source_images: list = []
     if isinstance(image_url, str) and image_url.strip():
@@ -969,9 +1051,15 @@ def image_generate_tool(
         if not images:
             raise ValueError("No images were generated")
 
-        # Edit endpoints already return the final composition; the Clarity
-        # upscaler is a text-to-image quality pass, so skip it for edits.
-        should_upscale = bool(meta.get("upscale", False)) and not use_edit
+        # Upscaling is opt-in (default OFF): clarity-upscaler has no sync_mode,
+        # so an upscaled result transits fal's public CDN (see _upscale_enabled).
+        # Edit endpoints already return the final composition, so skip the pass
+        # for edits regardless.
+        should_upscale = (
+            bool(meta.get("upscale", False))
+            and _upscale_enabled()
+            and not use_edit
+        )
 
         formatted_images = []
         for img in images:

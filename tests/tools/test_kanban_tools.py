@@ -311,6 +311,26 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def test_complete_redacts_secret_in_summary(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_complete({
+        "summary": "got the thing done, my key is sk-abc123def456ghi789",
+        "metadata": {"files": 2},
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        run = kb.latest_run(conn, worker_env)
+        assert run.outcome == "completed"
+        assert "sk-abc123def456ghi789" not in (run.summary or "")
+        # The token should be masked: first 6 + "..." + last 4
+        assert "sk-abc...i789" in (run.summary or "")
+    finally:
+        conn.close()
+
+
 def test_complete_metadata_round_trips_through_show(worker_env):
     """Structured completion metadata should be visible to downstream agents."""
     from tools import kanban_tools as kt
@@ -693,6 +713,246 @@ def test_complete_goal_mode_allows_when_judge_unavailable(monkeypatch, tmp_path)
         conn2.close()
 
 
+def test_complete_goal_mode_accepts_when_judge_approves(monkeypatch, tmp_path):
+    """When a judge is available and returns 'done', completion must proceed."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # Judge is available and approves.
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        "tools.kanban_tools.judge_goal",
+        lambda goal, last_response, *, timeout=30.0, subgoals=None: ("done", "all criteria met", []),
+    )
+
+    out = kt._handle_complete({"summary": "done enough"})
+    d = json.loads(out)
+    assert d.get("ok") is True, f"expected ok, got: {d}"
+
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status == "done"
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_rejects_when_judge_disapproves(monkeypatch, tmp_path):
+    """When a judge is available and returns 'continue', completion must be rejected."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # Judge is available and says "not done yet".
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        "tools.kanban_tools.judge_goal",
+        lambda goal, last_response, *, timeout=30.0, subgoals=None: ("continue", "evidence insufficient", []),
+    )
+
+    out = kt._handle_complete({"summary": "not quite done"})
+    d = json.loads(out)
+    assert d.get("error"), f"expected error, got: {d}"
+    assert "rejected by judge" in d["error"]
+
+    # Task must still be in-flight (not done, not terminal).
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status != "done"
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_fails_open_when_judge_raises(monkeypatch, tmp_path):
+    """When judge_goal raises, the gate must fail open (allow completion)."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # Judge is available but raises.
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        "tools.kanban_tools.judge_goal",
+        lambda goal, last_response, *, timeout=30.0, subgoals=None: (_ for _ in ()).throw(RuntimeError("judge crashed")),
+    )
+
+    out = kt._handle_complete({"summary": "done despite judge crash"})
+    d = json.loads(out)
+    assert d.get("ok") is True, f"expected ok (fail-open), got: {d}"
+
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status == "done"
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_auto_pauses_on_consecutive_parse_failures(monkeypatch, tmp_path):
+    """After 3 consecutive unparseable judge outputs, the gate must block
+    with a config-pointer message instead of a generic rejection."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="goal-mode-test", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    # Judge is available but always returns unparseable output.
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        "tools.kanban_tools.judge_goal",
+        lambda goal, last_response, *, timeout=30.0, subgoals=None: (
+            "continue", "judge reply was not JSON: {garbage}", True
+        ),
+    )
+
+    # First two calls: rejected by judge (normal path).
+    for i in range(2):
+        out = kt._handle_complete({"summary": f"attempt {i}"})
+        d = json.loads(out)
+        assert d.get("error"), f"expected error on attempt {i}, got: {d}"
+        assert "rejected by judge" in d["error"]
+
+    # Third call: auto-pause triggers with config-pointer message.
+    out = kt._handle_complete({"summary": "attempt 3"})
+    d = json.loads(out)
+    assert d.get("error"), f"expected error on auto-pause, got: {d}"
+    assert "unparseable output" in d["error"].lower()
+    assert "goal_judge" in d["error"]
+
+    # Task must still be in-flight.
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status != "done"
+    finally:
+        conn2.close()
+
+
+# ---------------------------------------------------------------------------
+# _goal_judge_available — real function, no monkeypatching
+# ---------------------------------------------------------------------------
+
+
+def test_goal_judge_available_no_config(monkeypatch, tmp_path):
+    """With no auxiliary.goal_judge config and no API keys, returns False."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    # Clear all env vars that the auto-detection chain might check so the
+    # test is hermetic regardless of the developer's shell environment.
+    for var in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "NOUS_API_KEY",
+                "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    from tools.kanban_tools import _goal_judge_available
+
+    assert _goal_judge_available() is False
+
+
+def test_goal_judge_available_with_config(monkeypatch, tmp_path):
+    """With auxiliary.goal_judge configured, returns True."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    # Write a minimal config that creates a custom OpenAI client.
+    # The OpenAI SDK does NOT make network calls during construction —
+    # only when .chat.completions.create() is called — so this is safe.
+    import yaml
+    config = {
+        "auxiliary": {
+            "goal_judge": {
+                "provider": "custom",
+                "base_url": "http://localhost:9999/v1",
+                "api_key": "test-key",
+                "model": "test-model",
+            }
+        }
+    }
+    (home / "config.yaml").write_text(yaml.dump(config))
+
+    from tools.kanban_tools import _goal_judge_available
+
+    assert _goal_judge_available() is True
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
@@ -702,6 +962,23 @@ def test_block_happy_path(worker_env):
     conn = kb.connect()
     try:
         assert kb.get_task(conn, worker_env).status == "blocked"
+    finally:
+        conn.close()
+
+
+def test_block_redacts_secret_in_reason(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_block({"reason": "my key is sk-abc123def456ghi789"})
+    d = json.loads(out)
+    assert d["ok"] is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        run = kb.latest_run(conn, worker_env)
+        assert run.outcome == "blocked"
+        assert "sk-abc123def456ghi789" not in (run.summary or "")
+        # The token should be masked: first 6 + "..." + last 4
+        assert "sk-abc...i789" in (run.summary or "")
     finally:
         conn.close()
 
@@ -914,6 +1191,27 @@ def test_comment_happy_path(worker_env):
         # Author defaults to HERMES_PROFILE env we set in the fixture
         assert comments[0].author == "test-worker"
         assert comments[0].body == "hello thread"
+    finally:
+        conn.close()
+
+
+def test_comment_redacts_secret_in_body(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_comment({
+        "task_id": worker_env,
+        "body": "my key is sk-abc123def456ghi789",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, worker_env)
+        assert len(comments) >= 1
+        body = comments[-1].body
+        assert "sk-abc123def456ghi789" not in (body or "")
+        # The token should be masked: first 6 + "..." + last 4
+        assert "sk-abc...i789" in (body or "")
     finally:
         conn.close()
 
