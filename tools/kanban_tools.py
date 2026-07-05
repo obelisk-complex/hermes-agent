@@ -34,7 +34,7 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
-from hermes_cli.goals import judge_goal
+from hermes_cli.goals import DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES, judge_goal
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -226,6 +226,12 @@ def _goal_judge_available() -> bool:
 
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
+
+# Per-task consecutive judge parse-failure counter for the goal-mode
+# completion gate. Mirrors the same guard in GoalManager.evaluate_after_turn()
+# (hermes_cli/goals.py). Resets on process restart, which is acceptable
+# because the worker process is short-lived.
+_judge_parse_failures: dict[str, int] = {}
 
 
 def heartbeat_current_worker_from_env() -> bool:
@@ -601,8 +607,9 @@ def _handle_complete(args: dict, **kw) -> str:
             if task and task.goal_mode and _goal_judge_available():
                 verdict = "done"
                 reason = ""
+                parse_failed = False
                 try:
-                    verdict, reason, _ = judge_goal(
+                    verdict, reason, parse_failed = judge_goal(
                         goal=f"{task.title}\n\n{task.body or ''}".strip(),
                         last_response=(summary or result or "").strip(),
                     )
@@ -614,6 +621,27 @@ def _handle_complete(args: dict, **kw) -> str:
                         judge_exc,
                         exc_info=True,
                     )
+                    parse_failed = False
+
+                # Track consecutive parse failures (same logic as GoalManager)
+                if parse_failed:
+                    _judge_parse_failures[tid] = _judge_parse_failures.get(tid, 0) + 1
+                else:
+                    _judge_parse_failures.pop(tid, None)  # reset on any successful parse
+
+                if _judge_parse_failures.get(tid, 0) >= DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES:
+                    count = _judge_parse_failures.pop(tid, None)  # prevent infinite loop
+                    logger.warning(
+                        "judge gate blocked completion of %s: judge model returned "
+                        "unparseable output %d turns in a row",
+                        tid, count,
+                    )
+                    return tool_error(
+                        f"Goal completion blocked: the judge model returned unparseable output "
+                        f"{count} turns in a row. Route the judge to a stricter model in "
+                        f"~/.hermes/config.yaml under auxiliary → goal_judge, then retry."
+                    )
+
                 if verdict != "done":
                     return tool_error(
                         f"Goal completion rejected by judge: {reason}. "
@@ -650,10 +678,38 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.CompletionBlockedError as gate_err:
+                # A pre_kanban_complete quality gate vetoed this completion.
+                # The task was NOT mutated (the gate runs before the write
+                # txn), so the worker can retry after fixing the gate
+                # failures. Spell that out - without it the model often
+                # treats a tool_error as terminal and blocks/crashes the run.
+                return tool_error(
+                    f"kanban_complete blocked by quality gate: "
+                    f"{gate_err.block_message}. "
+                    f"Your task is still in-flight (no state change). "
+                    f"Fix the gate failures and retry kanban_complete. "
+                    f"After 3+ consecutive blocks, call kanban_block with a "
+                    f"reason summarising the gate output instead of looping."
+                )
             if not ok:
+                # complete_task returns False either for an unknown/terminal id
+                # OR when the pre_kanban_complete gate blocked this task
+                # _MAX_COMPLETION_BLOCKS times and the kernel auto-blocked it
+                # for human review (FIX 2). Distinguish them so the worker
+                # learns the task is now blocked, not silently un-completable.
+                _t = kb.get_task(conn, tid)
+                if _t is not None and _t.status == "blocked":
+                    return tool_error(
+                        f"kanban_complete: {tid} was auto-blocked for human "
+                        f"review after the quality gate blocked it repeatedly. "
+                        f"The task is now in 'blocked' state - do NOT retry "
+                        f"completion; a human must unblock or requeue it."
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            _judge_parse_failures.pop(tid, None)  # clear counter on successful completion
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:

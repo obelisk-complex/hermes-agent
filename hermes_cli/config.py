@@ -2221,6 +2221,11 @@ DEFAULT_CONFIG = {
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
     # always goes to ~/.hermes/skills/.
     "skills": {
+        # Skills to preload on every session — skill content is injected into
+        # the system prompt at startup so the agent has the full procedure
+        # without needing a skill_view() call.  Names must match installed
+        # skill identifiers (e.g. "self-checking-harness").
+        "always": [],
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id

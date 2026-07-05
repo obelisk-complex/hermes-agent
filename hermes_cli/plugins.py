@@ -141,6 +141,11 @@ VALID_HOOKS: Set[str] = {
     # Plugins return a string to replace the response text, or None/empty to leave unchanged.
     # First non-None string wins. Useful for vocabulary/personality transformation.
     "transform_llm_output",
+    # on_output — fires when the LLM finishes its final text response (no tool
+    # calls).  Plugins return a dict {"action": "block", "message": "..."}
+    # to reject the output and force the model to retry.  Return None to allow.
+    # Kwargs: response_text, session_id, model, platform
+    "on_output",
     "pre_llm_call",
     "post_llm_call",
     # Verification-loop gate. Fired once per turn when the agent has edited code
@@ -210,6 +215,43 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_claimed",
     "kanban_task_completed",
     "kanban_task_blocked",
+    # ---- Kanban lifecycle hooks (fork-local) ----------------------------
+    # pre_kanban_spawn - fired in dispatch_once after the workspace is
+    # resolved and BEFORE spawn selection. Observers may inspect the task;
+    # a plugin may also OVERRIDE the spawn by returning a dict of task
+    # fields to apply (first directive wins), e.g.:
+    #     {"model_override": "claude-opus-4-8"}  /  {"skills": ["sdlc-review"]}
+    # Kwargs: task_id, title, body, assignee, model_override, workspace_path,
+    #   workspace_kind, branch_name, priority, skills, consecutive_failures,
+    #   board. Return None to leave the spawn unchanged.
+    "pre_kanban_spawn",
+    # fork_kanban_task_blocked - OBSERVER ONLY (return values ignored). Renamed
+    # from kanban_task_blocked to avoid colliding with upstream's own
+    # kanban_task_blocked observer (added by upstream PR #50349, merged into this
+    # fork on sync): both dispatch through hermes_cli.plugins.invoke_hook, so a
+    # shared name would deliver upstream's lean kwargs to the fork's quality-gate
+    # consumer. Fired the instant a task is blocked, covering BOTH the auto-block
+    # circuit-breaker path (spawn/review/timeout/crash, via _record_task_failure)
+    # and the manual block_task path.
+    # PERFORMANCE CONTRACT: callbacks MUST return fast. The hook fires just
+    # after the kanban write transaction commits, but the dispatcher thread
+    # is still serial - a slow callback (HTTP, Matrix notify, file I/O)
+    # stalls the kanban writer. Do any I/O off-thread (background thread /
+    # asyncio task); never block the callback on network latency.
+    # Kwargs (auto): task_id, reason, consecutive_failures, effective_limit,
+    #   limit_source, trigger_outcome, trigger="auto_block", run_id.
+    # Kwargs (manual): task_id, reason, run_id, trigger="manual".
+    "fork_kanban_task_blocked",
+    # pre_kanban_complete - BLOCK-CAPABLE. Fired in complete_task BEFORE the
+    # status→done write. A plugin returning {"action": "block", "message": str}
+    # ABORTS the completion (the task is NOT marked done) and the message is
+    # surfaced to the worker. First valid block directive wins; non-block
+    # return values are ignored. This is the quality-gate plugin's seam.
+    # Kwargs: task_id, result, workspace_path, branch_name, assignee,
+    #   model_override, blocked_attempt_count (count of prior
+    #   completion_blocked_plugin events - a bounded-retry / escalation
+    #   signal; the plugin should escalate or back off after a threshold).
+    "pre_kanban_complete",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"

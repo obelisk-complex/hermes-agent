@@ -15755,6 +15755,15 @@ def main(
     
     parsed_skills = _parse_skills_argument(skills)
 
+    # Merge skills.always from config — these are preloaded on every session
+    # without needing a --skills flag.  Config skills come first so a CLI
+    # --skills override can add to them (deduped by _parse_skills_argument).
+    always_skills = CLI_CONFIG.get("skills", {}).get("always", [])
+    if always_skills:
+        parsed_skills = _parse_skills_argument(
+            list(dict.fromkeys(list(always_skills) + parsed_skills))
+        )
+
     # Create CLI instance
     cli = HermesCLI(
         model=model,
