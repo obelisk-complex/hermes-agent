@@ -4518,6 +4518,18 @@ def _make_agent(
     agent_cfg = cfg.get("agent") or {}
     system_prompt = _prompt_text(agent_cfg.get("system_prompt", ""))
     startup_skills = _parse_tui_skills_env()
+
+    # Merge skills.always from config -- preloaded on every session.
+    # Config skills come first so env skills add on top (deduped).
+    always_skills = cfg.get("skills", {}).get("always", [])
+    if always_skills:
+        seen = set(always_skills)
+        for s in startup_skills:
+            if s not in seen:
+                seen.add(s)
+                always_skills.append(s)
+        startup_skills = always_skills
+
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
 
