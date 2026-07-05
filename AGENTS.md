@@ -210,6 +210,36 @@ backends, providers, notifiers), don't merge them one at a time — design an
 ABC + orchestrator, wrap the existing built-in as the first provider, and turn
 the competing PRs into plugins against that interface.
 
+### Plan, audit the plan, then build (agentic contributors)
+
+If you are an AI coding agent (or driving one) on a non-trivial change, do the
+planning loop BEFORE you write code:
+
+1. **Write the plan first** - the end state, the steps, the rollback, and how
+   you will prove it works. A `fix` that reproduces the symptom on current
+   `main` and names the exact line it manifests (see "Before you call it a bug")
+   is the minimum; larger work needs a real plan.
+2. **Audit the plan, do not just trust it.** Run a plan critic over it - a pass
+   that asks: what steps are missing, what assumptions are unverified, what
+   breaks if step N fails, is the ordering wrong, are the codebase claims
+   actually true? Then run a blind-spot pass for gaps the plan does not even
+   mention - cache-safety, alternation-safety, cross-platform, the Footprint
+   Ladder rung. (If you drive Claude Code, the `plan-auditor` and
+   `blind-spot-auditor` subagents from the Obelisk agent fleet do exactly this;
+   if you do not have them, spend ten minutes playing adversary to your own
+   plan - the questions above are the checklist.)
+3. **Loop until clean.** Refactor the plan to address findings and re-run the
+   critique until there are no blocking findings. Only then implement.
+
+This is a **local discipline, not a CI check.** That audit is your own - nothing
+about it is visible to CI or to a reviewer, and there is deliberately **no
+automated gate** for this in the repo. The PR template's "audited my plan"
+checkbox is a self-attestation - the reviewer relies on the quality of the
+result (a clean reproduction, a line-level fix, behaviour-contract tests), not on
+proof the loop ran. Skipping the loop tends to produce exactly the PRs the rubric
+rejects: wrong-premise fixes, dead branches that never execute, mitigations that
+kill the feature they secure.
+
 ## Development Environment
 
 ```bash
