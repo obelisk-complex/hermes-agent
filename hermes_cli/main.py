@@ -9533,7 +9533,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print(_format_concurrent_instances_message(concurrent, scripts_dir))
                 sys.exit(2)
 
-    # Pre-update backup — runs before any git/file mutation so users can
+    # Pre-update backup -- runs before any git/file mutation so users can
     # always roll back to the exact state they had before this update.
     _run_pre_update_backup(args)
 
@@ -9545,6 +9545,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _resume_windows_gateways_after_update,
             _windows_gateway_resume,
         )
+
+    # Venv-holder guard: on Windows, abort if a process is running from this
+    # install's venv (e.g. the Desktop backend). These keep native .pyd files
+    # locked, so a dependency sync would fail partway and strand the venv
+    # half-updated. Deliberately NOT bypassed by plain --force: the desktop
+    # bootstrap updater passes --force to skip the hermes.exe shim guard above,
+    # but its lock probe only checks the shim and app.asar -- a non-desktop
+    # venv python holding a .pyd would sail through and corrupt the sync.
+    # --force-venv is the explicit escape hatch.
+    if _is_windows() and not getattr(args, "force_venv", False):
+        _venv_holders = _detect_venv_python_processes()
+        if _venv_holders:
+            print(_format_venv_python_holders_message(_venv_holders))
+            _resume_windows_gateways_after_update(_windows_gateway_resume)
+            sys.exit(2)
 
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
