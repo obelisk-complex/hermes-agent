@@ -9737,7 +9737,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
             check=True,
         )
         commit_count = int(result.stdout.strip())
-        _rebase_sync_done = False
 
         if commit_count == 0:
             _invalidate_update_cache()
@@ -9941,9 +9940,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             prompt_user=prompt_for_restore,
                             input_fn=gw_input_fn,
                         )
-        else:
-            # Rebase-sync path: git operations already handled; stash restored above.
-            update_succeeded = True
 
         _invalidate_update_cache()
 
