@@ -9820,126 +9820,125 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         pre_update_snapshot_id = None
 
-        if not _rebase_sync_done:
-            print(f"→ Found {commit_count} new commit(s)")
+        print(f"→ Found {commit_count} new commit(s)")
 
-            # Snapshot critical state ...
-            pre_update_snapshot_id = None
-            try:
-                from hermes_cli.backup import create_quick_snapshot
+        # Snapshot critical state ...
+        pre_update_snapshot_id = None
+        try:
+            from hermes_cli.backup import create_quick_snapshot
 
-                pre_update_snapshot_id = create_quick_snapshot(label="pre-update", keep=1)
-                if pre_update_snapshot_id:
-                    print(f"  ✓ Pre-update snapshot: {pre_update_snapshot_id}")
-            except Exception as exc:
-                # Never let a snapshot failure block an update.
-                logger.debug("Pre-update snapshot failed: %s", exc)
+            pre_update_snapshot_id = create_quick_snapshot(label="pre-update", keep=1)
+            if pre_update_snapshot_id:
+                print(f"  ✓ Pre-update snapshot: {pre_update_snapshot_id}")
+        except Exception as exc:
+            # Never let a snapshot failure block an update.
+            logger.debug("Pre-update snapshot failed: %s", exc)
 
-            print("→ Pulling updates...")
-            update_succeeded = False
-            # Capture the pre-pull SHA so we can auto-roll-back if the new code
-            # has a syntax error in a critical-path file (PR #28452 incident:
-            # orphan merge-conflict markers in hermes_cli/config.py bricked
-            # every user who ran ``hermes update`` for the 7 minutes between
-            # the bad commit and the fix landing).
-            pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
-            try:
-                pull_result = subprocess.run(
-                    git_cmd + ["pull", "--ff-only", "origin", branch],
+        print("→ Pulling updates...")
+        update_succeeded = False
+        # Capture the pre-pull SHA so we can auto-roll-back if the new code
+        # has a syntax error in a critical-path file (PR #28452 incident:
+        # orphan merge-conflict markers in hermes_cli/config.py bricked
+        # every user who ran ``hermes update`` for the 7 minutes between
+        # the bad commit and the fix landing).
+        pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
+        try:
+            pull_result = subprocess.run(
+                git_cmd + ["pull", "--ff-only", "origin", branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if pull_result.returncode != 0:
+                # ff-only failed — local and remote have diverged (e.g. upstream
+                # force-pushed or rebase).  Since local changes are already
+                # stashed, reset to match the remote exactly.
+                print(
+                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+                )
+                reset_result = subprocess.run(
+                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
                     cwd=PROJECT_ROOT,
                     capture_output=True,
                     text=True,
                 )
-                if pull_result.returncode != 0:
-                    # ff-only failed — local and remote have diverged (e.g. upstream
-                    # force-pushed or rebase).  Since local changes are already
-                    # stashed, reset to match the remote exactly.
+                if reset_result.returncode != 0:
+                    print(f"✗ Failed to reset to origin/{branch}.")
+                    if reset_result.stderr.strip():
+                        print(f"  {reset_result.stderr.strip()}")
                     print(
-                        "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+                        f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
                     )
-                    reset_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
+                    sys.exit(1)
+
+            # Post-pull syntax guard: validate critical-path files actually
+            # parse before declaring the update successful. If a bad commit
+            # made it through CI (e.g. admin-merge bypass of a failing
+            # ruff check), this catches it on the user side and rolls back
+            # so the CLI stays bootable. The user can then retry ``hermes
+            # update`` later once a fix lands upstream.
+            syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
+                PROJECT_ROOT
+            )
+            if not syntax_ok:
+                print()
+                print("✗ Pulled code has a syntax error in a critical file:")
+                print(f"  {failing_path}")
+                if syntax_error:
+                    # py_compile errors can be multi-line; show the first
+                    # ~6 lines so the user sees the actual SyntaxError text.
+                    for line in str(syntax_error).splitlines()[:6]:
+                        print(f"    {line}")
+                if pre_pull_sha:
+                    print()
+                    print(f"→ Rolling back to {pre_pull_sha[:10]}...")
+                    rollback_result = subprocess.run(
+                        git_cmd + ["reset", "--hard", pre_pull_sha],
                         cwd=PROJECT_ROOT,
                         capture_output=True,
                         text=True,
                     )
-                    if reset_result.returncode != 0:
-                        print(f"✗ Failed to reset to origin/{branch}.")
-                        if reset_result.stderr.strip():
-                            print(f"  {reset_result.stderr.strip()}")
-                        print(
-                            f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
-                        )
-                        sys.exit(1)
-
-                # Post-pull syntax guard: validate critical-path files actually
-                # parse before declaring the update successful. If a bad commit
-                # made it through CI (e.g. admin-merge bypass of a failing
-                # ruff check), this catches it on the user side and rolls back
-                # so the CLI stays bootable. The user can then retry ``hermes
-                # update`` later once a fix lands upstream.
-                syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
-                    PROJECT_ROOT
-                )
-                if not syntax_ok:
+                    if rollback_result.returncode == 0:
+                        print("  ✓ Rollback complete — your install is unchanged.")
+                        print("  Try ``hermes update`` again later once a fix lands.")
+                    else:
+                        print("  ✗ Rollback failed. Recover manually with:")
+                        print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
+                        if rollback_result.stderr.strip():
+                            print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
+                else:
                     print()
-                    print("✗ Pulled code has a syntax error in a critical file:")
-                    print(f"  {failing_path}")
-                    if syntax_error:
-                        # py_compile errors can be multi-line; show the first
-                        # ~6 lines so the user sees the actual SyntaxError text.
-                        for line in str(syntax_error).splitlines()[:6]:
-                            print(f"    {line}")
-                    if pre_pull_sha:
-                        print()
-                        print(f"→ Rolling back to {pre_pull_sha[:10]}...")
-                        rollback_result = subprocess.run(
-                            git_cmd + ["reset", "--hard", pre_pull_sha],
-                            cwd=PROJECT_ROOT,
-                            capture_output=True,
-                            text=True,
-                        )
-                        if rollback_result.returncode == 0:
-                            print("  ✓ Rollback complete — your install is unchanged.")
-                            print("  Try ``hermes update`` again later once a fix lands.")
-                        else:
-                            print("  ✗ Rollback failed. Recover manually with:")
-                            print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
-                            if rollback_result.stderr.strip():
-                                print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
-                    else:
-                        print()
-                        print("  Could not capture pre-pull SHA — recover manually with:")
-                        print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
-                    sys.exit(1)
+                    print("  Could not capture pre-pull SHA — recover manually with:")
+                    print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
+                sys.exit(1)
 
-                update_succeeded = True
-            finally:
-                if auto_stash_ref is not None:
-                    # Don't attempt stash restore if the code update itself failed —
-                    # working tree is in an unknown state.
-                    if not update_succeeded:
-                        print(
-                            f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                        )
-                        print(f"  Restore manually with: git stash apply")
-                    elif discard_local_changes:
-                        # Non-interactive update + user opted into discarding local
-                        # source edits (updates.non_interactive_local_changes:
-                        # discard). Throw the stash away instead of re-applying it.
-                        _discard_stashed_changes(
-                            git_cmd,
-                            PROJECT_ROOT,
-                            auto_stash_ref,
-                        )
-                    else:
-                        _restore_stashed_changes(
-                            git_cmd,
-                            PROJECT_ROOT,
-                            auto_stash_ref,
-                            prompt_user=prompt_for_restore,
-                            input_fn=gw_input_fn,
-                        )
+            update_succeeded = True
+        finally:
+            if auto_stash_ref is not None:
+                # Don't attempt stash restore if the code update itself failed —
+                # working tree is in an unknown state.
+                if not update_succeeded:
+                    print(
+                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
+                    )
+                    print(f"  Restore manually with: git stash apply")
+                elif discard_local_changes:
+                    # Non-interactive update + user opted into discarding local
+                    # source edits (updates.non_interactive_local_changes:
+                    # discard). Throw the stash away instead of re-applying it.
+                    _discard_stashed_changes(
+                        git_cmd,
+                        PROJECT_ROOT,
+                        auto_stash_ref,
+                    )
+                else:
+                    _restore_stashed_changes(
+                        git_cmd,
+                        PROJECT_ROOT,
+                        auto_stash_ref,
+                        prompt_user=prompt_for_restore,
+                        input_fn=gw_input_fn,
+                    )
 
         _invalidate_update_cache()
 
