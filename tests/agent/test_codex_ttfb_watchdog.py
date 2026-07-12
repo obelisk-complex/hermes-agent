@@ -380,10 +380,57 @@ def test_large_codex_request_waits_instead_of_ttfb_reconnect(tmp_path, monkeypat
 
     monkeypatch.setattr(agent, "_run_codex_stream", fake_stream)
 
-    large_input = "x" * 44_000  # ~11k estimated tokens, above the 10k gate.
+    # ~30k estimated tokens (char/4), above the 25k
+    # HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS gate.
+    large_input = "x" * 120_000
     resp = h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": large_input})
     assert resp is sentinel
     assert "codex_ttfb_kill" not in closes
+
+
+def test_midsize_codex_request_below_gate_still_ttfb_reconnects(tmp_path, monkeypatch):
+    """The TTFB-disable gate engages at >=25k estimated tokens, not >10k.
+
+    A ~11k-token payload used to clear the old 10k gate and suppress the TTFB
+    watchdog. After the retune it sits below the 25k
+    HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS default, so the watchdog stays armed
+    and a silent backend is still killed and retried promptly.
+    """
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
+
+    closes: list = []
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
+    monkeypatch.setattr(
+        agent, "_abort_request_openai_client",
+        lambda c, reason=None: closes.append(reason),
+    )
+    monkeypatch.setattr(
+        agent, "_close_request_openai_client",
+        lambda c, reason=None: closes.append(reason),
+    )
+
+    stop = {"flag": False}
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 30
+        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+
+    midsize_input = "x" * 44_000  # ~11k estimated tokens: over 10k, under 25k.
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": midsize_input})
+        assert "TTFB" in str(excinfo.value)
+        assert "codex_ttfb_kill" in closes
+    finally:
+        stop["flag"] = True
 
 
 def test_large_codex_request_strict_ttfb_env_still_reconnects(tmp_path, monkeypatch):
@@ -415,7 +462,9 @@ def test_large_codex_request_strict_ttfb_env_still_reconnects(tmp_path, monkeypa
 
     monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
 
-    large_input = "x" * 44_000
+    # Same ~30k-token payload as the non-strict case above: STRICT must force
+    # the early reconnect back on even well past the 25k gate.
+    large_input = "x" * 120_000
     try:
         with pytest.raises(TimeoutError) as excinfo:
             h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": large_input})

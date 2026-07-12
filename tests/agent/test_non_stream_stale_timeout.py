@@ -191,19 +191,10 @@ providers:
 
 
 # ── openai-codex gateway-scale stale floor ────────────────────────────────
-
-
-def test_openai_codex_stale_floor_covers_gateway_tool_payload():
-    """Gateway/Telegram tool payloads (~20k tokens) need the 600s Codex floor."""
-    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
-
-    assert openai_codex_stale_timeout_floor(22_095) == 600.0
-    assert openai_codex_stale_timeout_floor(10_001) == 600.0
-    assert openai_codex_stale_timeout_floor(10_000) == 0.0
-
-
-def test_openai_codex_stale_floor_tiers():
-    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
-
-    assert openai_codex_stale_timeout_floor(55_000) == 900.0
-    assert openai_codex_stale_timeout_floor(120_000) == 1200.0
+#
+# The standalone ``openai_codex_stale_timeout_floor`` helper is gone: the
+# tiered floor is now inlined into ``interruptible_api_call`` and its
+# engagement threshold was deliberately retuned from >10k to >25k estimated
+# tokens, in step with the HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS default.
+# The retuned boundary is pinned from both sides in
+# tests/agent/test_codex_ttfb_watchdog.py.
