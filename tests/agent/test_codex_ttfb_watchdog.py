@@ -380,7 +380,9 @@ def test_large_codex_request_waits_instead_of_ttfb_reconnect(tmp_path, monkeypat
 
     monkeypatch.setattr(agent, "_run_codex_stream", fake_stream)
 
-    large_input = "x" * 44_000  # ~11k estimated tokens, above the 10k gate.
+    # ~30k estimated tokens, above the 25k gate
+    # (HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS).
+    large_input = "x" * 120_000
     resp = h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": large_input})
     assert resp is sentinel
     assert "codex_ttfb_kill" not in closes

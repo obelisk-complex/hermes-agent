@@ -191,19 +191,103 @@ providers:
 
 
 # ── openai-codex gateway-scale stale floor ────────────────────────────────
+#
+# The fork inlines the tiered stale floor directly into
+# ``interruptible_api_call`` (it is no longer the standalone
+# ``openai_codex_stale_timeout_floor`` helper) and retunes the
+# floor-engagement threshold from >10k to >25k estimated tokens, in step with
+# the ``HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS`` default. These tests exercise
+# the real inlined chain through ``interruptible_api_call`` rather than a
+# helper, and pin the retuned 25k boundary.
 
 
-def test_openai_codex_stale_floor_covers_gateway_tool_payload():
-    """Gateway/Telegram tool payloads (~20k tokens) need the 600s Codex floor."""
-    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
+def _observed_stale_threshold(tmp_path, monkeypatch, est_tokens: int) -> tuple[int, float]:
+    """Drive interruptible_api_call until the stale detector fires.
 
-    assert openai_codex_stale_timeout_floor(22_095) == 600.0
-    assert openai_codex_stale_timeout_floor(10_001) == 600.0
-    assert openai_codex_stale_timeout_floor(10_000) == 0.0
+    Returns ``(observed_threshold, base_timeout)`` where ``observed_threshold``
+    is the effective stale timeout the watchdog reports and ``base_timeout`` is
+    what the generic (non-codex) computation would have produced on its own.
+    """
+    import threading
+    import time as _real_time
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import pytest as _pytest
+    from agent import chat_completion_helpers as h
+
+    # Isolate the stale detector: disable the two codex stream watchdogs so
+    # only the wall-clock stale kill can fire.
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", "0")
+
+    agent = _make_agent(tmp_path)
+    # The floor is gated on the codex_responses api_mode plus a codex backend.
+    agent.api_mode = "codex_responses"
+
+    # char/4 estimator -> 4 chars per estimated token.
+    api_kwargs = {"model": "gpt-5.5", "input": "x" * (est_tokens * 4)}
+    base_timeout = agent._compute_non_stream_stale_timeout(api_kwargs)
+
+    # Worker stays in-flight so the stale branch owns the resulting error.
+    def _blocking_stream(*_args, **_kwargs):
+        threading.Event().wait(30.0)
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **_kw: MagicMock())
+    monkeypatch.setattr(agent, "_run_codex_stream", _blocking_stream)
+
+    # Fast-forward the clock after the call starts so the detector trips at
+    # once instead of waiting out a real 600s+ timeout.
+    calls = {"n": 0}
+    start = _real_time.time()
+
+    def _fake_time() -> float:
+        calls["n"] += 1
+        return start if calls["n"] <= 1 else start + 10_000.0
+
+    monkeypatch.setattr(
+        h,
+        "time",
+        SimpleNamespace(
+            time=_fake_time,
+            monotonic=_real_time.monotonic,
+            sleep=_real_time.sleep,
+        ),
+    )
+
+    with _pytest.raises(TimeoutError) as excinfo:
+        h.interruptible_api_call(agent, api_kwargs)
+
+    message = str(excinfo.value)
+    observed = int(message.split("threshold: ")[1].split("s")[0])
+    return observed, base_timeout
 
 
-def test_openai_codex_stale_floor_tiers():
-    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
+def test_openai_codex_stale_floor_covers_gateway_tool_payload(tmp_path, monkeypatch):
+    """Above the retuned 25k threshold, codex payloads get the 600s floor."""
+    observed, base_timeout = _observed_stale_threshold(tmp_path, monkeypatch, 30_000)
 
-    assert openai_codex_stale_timeout_floor(55_000) == 900.0
-    assert openai_codex_stale_timeout_floor(120_000) == 1200.0
+    assert base_timeout < 600.0  # the floor, not the generic base, is doing the work
+    assert observed == 600
+
+
+def test_openai_codex_stale_floor_not_engaged_below_retuned_threshold(tmp_path, monkeypatch):
+    """At/below 25k the floor stays out of the way (fork retune: 10k -> 25k).
+
+    A ~20k-token gateway payload used to be lifted to 600s upstream. The fork
+    deliberately moved the engagement point to >25k, so this size now keeps the
+    generic context-tier timeout.
+    """
+    observed, base_timeout = _observed_stale_threshold(tmp_path, monkeypatch, 20_000)
+
+    assert observed == int(base_timeout)
+    assert observed < 600
+
+
+def test_openai_codex_stale_floor_tiers(tmp_path, monkeypatch):
+    observed_55k, _ = _observed_stale_threshold(tmp_path, monkeypatch, 55_000)
+    assert observed_55k == 900
+
+    observed_120k, _ = _observed_stale_threshold(tmp_path, monkeypatch, 120_000)
+    assert observed_120k == 1200
