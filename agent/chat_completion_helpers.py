@@ -1458,7 +1458,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
             if fb_provider == "openai-codex":
                 fb_api_mode = "codex_responses"
-            elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
+            elif (
+                fb_provider == "anthropic"
+                or fb_base_url.rstrip("/").lower().endswith("/anthropic")
+                # A custom-named provider pointed at Anthropic's native host
+                # speaks anthropic_messages; chat_completions 404s there.
+                # Mirrors determine_api_mode() (hermes_cli/providers.py).
+                or base_url_hostname(fb_base_url) == "api.anthropic.com"
+            ):
                 fb_api_mode = "anthropic_messages"
             elif _fb_is_azure:
                 # Azure OpenAI serves gpt-5.x on /chat/completions - does NOT
