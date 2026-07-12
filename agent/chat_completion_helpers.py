@@ -2250,8 +2250,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # an iterator of chunks.  Treat that as "streaming unsupported" for the
         # rest of this session instead of crashing on ``for chunk in stream``
         # with ``'types.SimpleNamespace' object is not iterable`` (#11732).
-        response_choices = getattr(stream, "choices", None)
-        if isinstance(response_choices, list) and response_choices:
+        # ``choices`` may legitimately be ``[]`` or ``None`` on a terminal,
+        # error or content-filter frame.  Such a frame is still a whole
+        # response object rather than a token iterator, so the presence of the
+        # attribute -- not its truthiness -- is what distinguishes the two
+        # (#55933).
+        if hasattr(stream, "choices"):
+            response_choices = getattr(stream, "choices", None)
             logger.info(
                 "Streaming request returned a final response object instead of "
                 "an iterator; switching %s/%s to non-streaming for this session.",
@@ -2259,7 +2264,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 agent.model or "unknown",
             )
             agent._disable_streaming = True
-            message = getattr(response_choices[0], "message", None)
+            message = None
+            if isinstance(response_choices, list) and response_choices:
+                message = getattr(response_choices[0], "message", None)
             if message is not None:
                 reasoning_text = (
                     getattr(message, "reasoning_content", None)
