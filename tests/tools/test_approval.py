@@ -1247,11 +1247,17 @@ class TestGatewayProtection:
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is True
 
-    def test_pkill_unrelated_not_flagged(self):
-        """pkill targeting unrelated processes should not be flagged."""
+    def test_pkill_unrelated_process_now_prompts(self):
+        """pkill targeting a process that is not hermes' must still prompt.
+
+        This test used to assert the opposite, on the grounds that the target
+        belonged to nothing of hermes'. A process unrelated to the agent is
+        not unrelated to the *user*: `pkill -x neowall` killed the user's
+        wallpaper daemon and blanked both their monitors.
+        """
         cmd = "pkill -f nginx"
         dangerous, key, desc = detect_dangerous_command(cmd)
-        assert dangerous is False
+        assert dangerous is True
 
 
 class TestNormalizationBypass:
@@ -1486,11 +1492,16 @@ class TestPgrepKillExpansion:
         dangerous, _, _ = detect_dangerous_command(cmd)
         assert dangerous is True
 
-    def test_safe_kill_pid_not_flagged(self):
-        """A plain 'kill 12345' (literal PID, no expansion) must stay safe."""
+    def test_kill_literal_pid_now_prompts(self):
+        """A plain 'kill 12345' (literal PID, no expansion) must now prompt.
+
+        Previously asserted safe because the PID could not be shown to be
+        hermes'. But an opaque PID is exactly the case where the agent cannot
+        know whose process it is, which is a reason to ask, not to proceed.
+        """
         cmd = "kill 12345"
         dangerous, _, _ = detect_dangerous_command(cmd)
-        assert dangerous is False
+        assert dangerous is True
 
     def test_kill_dollar_pidof_detected(self):
         """`kill $(pidof hermes)` is the BSD/Linux equivalent of the
@@ -2454,3 +2465,124 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestLiveUserStateGuard:
+    """Commands that disrupt what the user is currently depending on.
+
+    These are approvals, not blocks: every command here has legitimate uses,
+    and --yolo still passes them through. The point is that the agent asks
+    first rather than deciding on the user's behalf.
+    """
+
+    # The two commands from the real incidents, exactly as they were run.
+    def test_incident_wallpaper_daemon_kill(self):
+        """`pkill -x neowall` blanked both of the user's monitors."""
+        dangerous, _, desc = detect_dangerous_command("pkill -x neowall")
+        assert dangerous is True
+        assert "kill a process by name" in desc
+
+    def test_incident_ollama_keep_alive_unload(self):
+        """A keep_alive: 0 unload killed a running inference job."""
+        cmd = (
+            "curl -s http://localhost:11434/api/generate "
+            '-d \'{"model": "llama3", "keep_alive": 0}\''
+        )
+        dangerous, _, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "keep_alive" in desc
+
+    def test_disruptive_commands_prompt(self):
+        """Each of these touches live state and must ask first."""
+        must_prompt = [
+            # Killing a process by name or PID.
+            "pkill -x neowall",
+            "killall neowall",
+            "kill 2416",
+            "kill -TERM 2416",
+            # systemd / service changes.
+            "systemctl --user stop hermes-gateway",
+            "service nginx restart",
+            "loginctl terminate-session 2",
+            # A live display, X and Wayland alike.
+            "DISPLAY=:0 ./neowall --replace",
+            "WAYLAND_DISPLAY=wayland-1 ./neowall",
+            "xrandr --output DP-1 --off",
+            "xdotool key super",
+            "wmctrl -c firefox",
+            "xset dpms force off",
+            "swaymsg output DP-1 disable",
+            "hyprctl dispatch exit",
+            # Unloading a model mid-inference.
+            "ollama stop llama3",
+            'curl -d \'{"keep_alive": 0}\' localhost:11434/api/generate',
+            # Desktop settings.
+            "gsettings set org.gnome.desktop.background picture-uri ''",
+            "dconf write /org/gnome/desktop/background/picture-uri \"''\"",
+            # GPU resets.
+            "nvidia-smi -r",
+            "sudo nvidia-smi --gpu-reset -i 0",
+            "rocm-smi --gpureset",
+            # Containers the agent did not start.
+            "docker rm my-container",
+            "podman stop my-container",
+            # Writes into the user's live state directories.
+            "echo broken > ~/.config/neowall/config.toml",
+            "echo x | tee ~/.config/neowall/config.toml",
+            "cp bad.toml ~/.config/neowall/config.toml",
+            "sed -i 's/a/b/' ~/.config/neowall/config.toml",
+            "rm ~/.config/neowall/config.toml",
+            "echo x > ~/.local/share/applications/foo.desktop",
+            # ~/.hermes: the user runs a live gateway out of it.
+            "echo x > ~/.hermes/sessions/current.json",
+            "rm ~/.hermes/sessions/current.json",
+        ]
+        for cmd in must_prompt:
+            dangerous, _, _ = detect_dangerous_command(cmd)
+            assert dangerous is True, f"should have prompted: {cmd!r}"
+
+    def test_controls_stay_silent(self):
+        """Reads and unrelated work must not prompt.
+
+        A guard that fires on `ls` is a guard the user learns to click
+        through, which is worse than no guard at all.
+        """
+        must_not_prompt = [
+            # Reads of the very paths we guard for writes.
+            "cat ~/.config/neowall/config.toml",
+            "ls ~/.config",
+            "ls -la ~/.hermes",
+            "grep -r pattern ~/.local/share",
+            # Read-only inspection of the services we guard.
+            "docker ps",
+            "docker logs my-container",
+            "ollama list",
+            "ollama ps",
+            "systemctl --user status hermes-gateway",
+            "nvidia-smi",
+            "gsettings get org.gnome.desktop.background picture-uri",
+            "dconf read /org/gnome/desktop/background/picture-uri",
+            # Informational kill flags kill nothing.
+            "killall -l",
+            "killall --version",
+            # Ordinary work in the workspace.
+            "git status",
+            "pytest tests/tools/test_approval.py",
+            "echo hello > /tmp/scratch.txt",
+            "cp a.toml b.toml",
+            # Merely *mentioning* a guarded tool is not driving it. These are
+            # the commands an agent runs while diagnosing a display bug, and
+            # a prompt the user clicks through by reflex protects nobody.
+            "cat notes-about-xrandr.md",
+            "grep -rn xrandr scripts/",
+            "git log --grep swaymsg",
+        ]
+        for cmd in must_not_prompt:
+            dangerous, _, desc = detect_dangerous_command(cmd)
+            assert dangerous is False, f"should have stayed silent: {cmd!r} ({desc})"
+
+    def test_yolo_still_passes_them_through(self):
+        """These are approvals, not blocks: they must not be hardline."""
+        for cmd in ("pkill -x neowall", "ollama stop llama3", "xrandr --output DP-1 --off"):
+            blocked, _ = detect_hardline_command(cmd)
+            assert blocked is False, f"must be approvable, not blocked: {cmd!r}"

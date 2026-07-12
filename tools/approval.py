@@ -261,6 +261,22 @@ _USER_SENSITIVE_WRITE_TARGET = (
     rf'{_CREDENTIAL_FILES})'
 )
 _PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_PROJECT_ENV_PATH}|{_PROJECT_CONFIG_PATH})'
+# The user's live application state: ~/.config, ~/.local and ~/.hermes.
+#
+# Distinct from _USER_SENSITIVE_WRITE_TARGET, which covers credentials and
+# shell rc files — that is a *security* boundary. This is a *live state*
+# boundary: rewriting ~/.config/<app> leaks no secret, it reconfigures
+# software the user is running right now.
+#
+# ~/.hermes is included whole. _HERMES_ENV_PATH and _HERMES_CONFIG_PATH
+# already gate the two files that are security policy (.env, config.yaml),
+# but the user runs a live gateway out of that directory, so the rest of it
+# (session state, logs, the venv) is live state in exactly the sense this
+# section is about, and was previously auto-approved.
+_LIVE_USER_STATE_PATH = (
+    r'(?:~|\$home|\$\{home\}|/home/[^/\s]+|/users/[^/\s]+)'
+    r'/\.(?:config|local|hermes)(?:/|$)'
+)
 # Anchor for the cp/mv/install rule, where the sensitive path is only a write
 # target when it is the LAST argument (the destination). Requiring end-of-line
 # (or a command separator) keeps `cp config.yaml backup.yaml` — config.yaml as
@@ -756,6 +772,113 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+
+    # =====================================================================
+    # Live user state
+    # =====================================================================
+    #
+    # Everything above protects the machine: destruction, credentials,
+    # privilege escalation. These protect what the user is *currently
+    # depending on* — the processes they have running, the desktop they are
+    # looking at, the model they are mid-inference with, the config of the
+    # app they are using. None of it is destructive in the `rm -rf` sense.
+    # All of it is disruptive, and the disruption lands on a human who did
+    # not ask for it.
+    #
+    # These exist because reasoning turned out not to be a brake. Two
+    # incidents in one session: an agent gathering hardware evidence ran a
+    # patched wallpaper daemon against the user's real DISPLAY=:0, blanked
+    # both their monitors and rewrote their config; and an agent asked the
+    # *conditional* "are you still using the GPU? if not, unload it" answered
+    # the condition itself, in the direction it preferred, and killed a
+    # running inference job. Both times there was a good reason, and the
+    # reason stood in for the authorisation.
+    #
+    # So this deliberately does not route through the model's judgement — it
+    # matches the command and asks. Approval, not a block: every pattern here
+    # has legitimate uses (that is exactly why they are dangerous), and a hard
+    # deny only teaches the next agent to route around it. --yolo still passes
+    # them through, which is the user making the call, which is the point.
+    #
+    # Deliberately crude. A false positive costs one keystroke; a false
+    # negative costs the user their desktop.
+
+    # Killing processes. The rules above gate only SIGKILL (pkill -9,
+    # killall -9) and hermes' self-termination (pkill hermes). A plain
+    # `pkill -x neowall` or `kill 1234` sailed straight through on the
+    # grounds that it targeted nothing of hermes' — but a process unrelated
+    # to the agent is not unrelated to the user, and that assumption is what
+    # took the user's monitors out. Ordering matters: the narrower patterns
+    # above match first and keep their more specific descriptions as keys.
+    # The informational flags (`killall -l` lists signals, `-V` prints a
+    # version) kill nothing; gating them would train the user to click
+    # through the prompt, which is the one failure mode this must not have.
+    (r'\b(?:pkill|killall)\b(?!\s+(?:-l|-v|-h|--list-signals|--version|--help)\b)',
+     "kill a process by name (it may be the user's, not yours)"),
+    (r'\bkill\s+(?:-\S+\s+)*\d+',
+     "kill a process by PID (it may be the user's, not yours)"),
+    # service(8) and loginctl reach the same place systemctl does;
+    # systemctl stop/restart/disable/mask is already gated above.
+    (r'\bservice\s+\S+\s+(?:stop|restart)\b', "stop/restart a service via service(8)"),
+    (r'\bloginctl\s+(?:terminate|kill|lock)\S*\b',
+     "terminate or lock the user's login session"),
+
+    # The live display. Setting DISPLAY / WAYLAND_DISPLAY points a command at
+    # a session a human is looking at; the X and Wayland control tools drive
+    # it directly. Yes, this fires on a deliberate `DISPLAY=:99` Xvfb run —
+    # one keystroke, and worth it.
+    (r'(?:^|\s)(?:display|wayland_display)=',
+     "runs against the user's live display session"),
+    # Anchored at a command position, not a bare \b. These tool names carry no
+    # verb to pin them down, so an unanchored match fires on any command that
+    # merely *mentions* one — `grep xrandr script.sh`, `cat xrandr-notes.md` —
+    # which are exactly the read-only commands an agent runs while diagnosing
+    # a display bug. Prompting on those teaches the user to click through, and
+    # a prompt clicked through by reflex protects nobody. Same reasoning as the
+    # _CMDPOS shutdown/reboot rules above. `DISPLAY=:0 xrandr ...` is still
+    # caught by the DISPLAY= rule regardless.
+    (_CMDPOS + r'(?:xrandr|xdotool|wmctrl|xset|xprop|xkill|swaymsg|hyprctl)\b',
+     "drives the user's live desktop session"),
+
+    # Unloading a model the user may be mid-inference with. `keep_alive: 0`
+    # is the Ollama API's unload-now instruction and carries no verb of its
+    # own, so match the field wherever it appears — curl body, execute_code
+    # payload, JSON file.
+    (r'\bollama\s+(?:stop|rm)\b', "unload a model the user may be using"),
+    (r'keep_alive["\'\s:=]+0\b',
+     "unload a model the user may be using (keep_alive: 0)"),
+
+    # The user's desktop settings, live: gsettings and dconf write straight
+    # through to the running session.
+    (r'\bgsettings\s+(?:set|reset)\b', "write the user's desktop settings"),
+    (r'\bdconf\s+(?:write|reset)\b', "write the user's desktop settings"),
+
+    # A GPU reset tears down every context on the card, including whatever
+    # the user is training or serving.
+    (r'\bnvidia-smi\b[^;|&\n]*(?:\s-r\b|--gpu-reset\b)', "reset the GPU"),
+    (r'\brocm-smi\b[^;|&\n]*(?:--gpureset\b|\s-r\b)', "reset the GPU"),
+
+    # Containers the agent did not start. docker restart/stop/kill is gated
+    # above; `docker rm` and the whole podman front-end were not.
+    (r'\bdocker\s+rm\b', "remove a container you did not start"),
+    (r'\bpodman\s+(?:restart|stop|kill|rm)\b',
+     "podman restart/stop/kill/rm (container lifecycle)"),
+
+    # Writes into ~/.config, ~/.local and ~/.hermes — the user's real
+    # application state, not this workspace. Same write-verb pairing as the
+    # credential/SSH rules above (redirection, tee, cp/mv/install, sed -i,
+    # rm), so that no verb is left as an unpaired open door. Reads are
+    # untouched: `cat ~/.config/x` and `ls ~/.config` stay silent.
+    (rf'>>?\s*["\']?{_LIVE_USER_STATE_PATH}',
+     "write to the user's config/state directory via redirection"),
+    (rf'\btee\b.*["\']?{_LIVE_USER_STATE_PATH}',
+     "write to the user's config/state directory via tee"),
+    (rf'\b(?:cp|mv|install)\b.*\s["\']?{_LIVE_USER_STATE_PATH}[^\s"\']*["\']?{_COMMAND_TAIL}',
+     "copy/move into the user's config/state directory"),
+    (rf'\bsed\s+-[^\s]*i.*{_LIVE_USER_STATE_PATH}',
+     "in-place edit of the user's config/state directory"),
+    (rf'\brm\b.*\s["\']?{_LIVE_USER_STATE_PATH}',
+     "delete from the user's config/state directory"),
 ]
 
 
