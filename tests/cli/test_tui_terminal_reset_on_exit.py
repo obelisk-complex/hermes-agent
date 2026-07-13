@@ -11,7 +11,7 @@ on ``_tui_input_modes_active`` so non-TUI one-shot CLI runs (which share
 """
 
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import call, mock_open, patch
 
 
 def _import_cli():
@@ -105,8 +105,29 @@ class TestResetTerminalInputModes(unittest.TestCase):
             cli_mod._reset_terminal_input_modes_on_exit()
 
         self.assertEqual(fake.written, [])
-        m_open.assert_called_once_with("/dev/tty", "w", encoding="ascii")
-        m_open().write.assert_called_once_with(cli_mod._TERMINAL_INPUT_MODE_RESET_SEQ)
+        # builtins.open is the hottest process global there is: any other code
+        # running in this process during the patch window (a leaked thread
+        # writing a log, say) records a call on this same mock. So we must not
+        # assert on the TOTAL open count — that is not what this test means.
+        # Scope the "exactly once" claim to the /dev/tty open we actually care
+        # about. This keeps the real assertion (no double-reset of the terminal)
+        # while staying immune to unrelated opens elsewhere in the process.
+        dev_tty_opens = [
+            c for c in m_open.call_args_list
+            if c == call("/dev/tty", "w", encoding="ascii")
+        ]
+        self.assertEqual(
+            len(dev_tty_opens), 1,
+            f"expected exactly one open of /dev/tty, got {dev_tty_opens!r}",
+        )
+        reset_writes = [
+            c for c in m_open().write.call_args_list
+            if c == call(cli_mod._TERMINAL_INPUT_MODE_RESET_SEQ)
+        ]
+        self.assertEqual(
+            len(reset_writes), 1,
+            "expected the terminal-reset sequence to be written exactly once",
+        )
 
     def test_swallows_stdout_errors(self):
         cli_mod = _import_cli()
