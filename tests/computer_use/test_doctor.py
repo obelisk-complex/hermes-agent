@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from io import StringIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -306,8 +306,14 @@ class TestDriverCmdResolution:
              patch("sys.stdout", new_callable=StringIO):
             doctor.run_doctor(driver_cmd="/custom/path/cua-driver")
         # shutil.which should have been called with the explicit arg, not
-        # the env-var / default resolver.
-        which_mock.assert_called_with("/custom/path/cua-driver")
+        # the env-var / default resolver. run_doctor calls shutil.which exactly
+        # once, on the command it resolved, so "was probed" == "won". We use
+        # assert_any_call rather than assert_called_with because shutil.which is
+        # a process global: unrelated code in the same process can record extra
+        # calls on this mock, and assert_called_with only checks the LAST one.
+        which_mock.assert_any_call("/custom/path/cua-driver")
+        # ...and the default was never probed, so the explicit arg really won.
+        assert call("cua-driver") not in which_mock.call_args_list
 
     def test_env_var_used_when_no_arg_given(self, monkeypatch):
         from tools.computer_use import doctor
@@ -321,5 +327,10 @@ class TestDriverCmdResolution:
              patch("subprocess.Popen", return_value=proc), \
              patch("sys.stdout", new_callable=StringIO):
             doctor.run_doctor()
-        # First (and only) which call should have used the env var.
-        which_mock.assert_called_with("/env/path/cua-driver")
+        # The which call should have used the env var. assert_any_call, not
+        # assert_called_with: shutil.which is a process global and unrelated
+        # code in this process can append calls to this mock, which would make
+        # a last-call assertion fail spuriously.
+        which_mock.assert_any_call("/env/path/cua-driver")
+        # ...and the default was never probed, so the env var really won.
+        assert call("cua-driver") not in which_mock.call_args_list

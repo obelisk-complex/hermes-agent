@@ -1575,7 +1575,11 @@ class TestConnectSmtp(unittest.TestCase):
             result = _create_ipv4_connection("smtp.test.com", 587, 30)
 
         self.assertIs(result, fake_sock)
-        mock_getaddrinfo.assert_called_once_with(
+        # assert_any_call, not assert_called_once_with: socket.getaddrinfo is a
+        # process global, so unrelated code in this process can add calls to this
+        # mock and break a count-of-1 assertion. The claim here is the ARGS —
+        # that AF_INET is forced — not that nothing else ever resolved a name.
+        mock_getaddrinfo.assert_any_call(
             "smtp.test.com", 587, _socket.AF_INET, _socket.SOCK_STREAM,
         )
         self.assertIs(_socket.getaddrinfo, original_getaddrinfo)

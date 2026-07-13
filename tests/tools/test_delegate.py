@@ -562,7 +562,13 @@ class TestToolNamePreservation(unittest.TestCase):
             captured["acp_command"] = kwargs.get("acp_command")
             captured["acp_args"] = kwargs.get("acp_args")
 
-        mock_which.assert_called_with("copilot")
+        # assert_any_call, NOT assert_called_with: shutil.which is a process
+        # global, so any other code running in this process during the patch
+        # window (e.g. a lazy-dep install probing shutil.which("uv")) records a
+        # call on this same mock. assert_called_with only checks the LAST call
+        # and would spuriously fail with "Expected: which('copilot') /
+        # Actual: which('uv')". What we mean is that the probe happened at all.
+        mock_which.assert_any_call("copilot")
         self.assertNotEqual(
             captured["provider"],
             "copilot-acp",
