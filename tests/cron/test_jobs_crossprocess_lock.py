@@ -27,6 +27,33 @@ from cron import jobs
 # Repo root (parent of the ``cron`` package) so the child process can import it.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(jobs.__file__)))
 
+# Deadlines, not sleeps: each wait below returns the instant the file lands, so
+# a generous budget costs a healthy run nothing.  The old budgets were
+# ``for _ in range(1000)`` + ``sleep(0.01)`` — 10s to cold-start a Python
+# subprocess that imports the whole ``cron`` package, on a CI box already
+# running eight test files in parallel.
+_CHILD_START_TIMEOUT = 30.0   # parent waits for a child to reach its signal file
+_LOCK_HOLD_TIMEOUT = 60.0     # holder child's cap on holding the lock
+
+
+def _wait_for_file(path, timeout: float, what: str, proc=None) -> None:
+    """Block until *path* exists; raise with a useful message if it never does.
+
+    If *proc* is given and exits before the file appears, fail immediately with
+    its exit code rather than waiting out the whole deadline on a dead process.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        if proc is not None and proc.poll() is not None:
+            raise AssertionError(
+                f"{what}: process exited with code {proc.returncode} "
+                f"before writing {path.name}"
+            )
+        time.sleep(0.01)
+    raise AssertionError(f"{what}: timed out after {timeout:.0f}s")
+
 
 @pytest.mark.skipif(jobs.fcntl is None, reason="POSIX fcntl/flock required")
 def test_jobs_lock_excludes_another_process(tmp_path, monkeypatch):
@@ -55,8 +82,13 @@ def test_jobs_lock_excludes_another_process(tmp_path, monkeypatch):
             with jobs._jobs_lock():
                 pathlib.Path({str(ready)!r}).write_text("1")
                 # Hold the lock until the parent signals (bounded so a wedged
-                # test can never hang CI).
-                for _ in range(1000):
+                # test can never hang CI). The cap must comfortably exceed the
+                # time the parent needs to cold-start the blocker child: if the
+                # holder let go early, the blocker would acquire the lock and
+                # the parent's "must still be blocked" assertion would fail for
+                # a reason that has nothing to do with the lock.
+                _deadline = time.monotonic() + {_LOCK_HOLD_TIMEOUT!r}
+                while time.monotonic() < _deadline:
                     if pathlib.Path({str(release)!r}).exists():
                         break
                     time.sleep(0.01)
@@ -87,11 +119,12 @@ def test_jobs_lock_excludes_another_process(tmp_path, monkeypatch):
     blocker_child = None
     try:
         # Wait until the child is inside the critical section.
-        for _ in range(1000):
-            if ready.exists():
-                break
-            time.sleep(0.01)
-        assert ready.exists(), "child never acquired _jobs_lock()"
+        _wait_for_file(
+            ready,
+            _CHILD_START_TIMEOUT,
+            "child never acquired _jobs_lock()",
+            proc=child,
+        )
 
         # While the child holds it, a non-blocking acquire of the SAME lock file
         # from this process must fail. A threading.Lock could never block here.
@@ -107,11 +140,15 @@ def test_jobs_lock_excludes_another_process(tmp_path, monkeypatch):
         # holder releases, rather than falling through with only a process-local
         # threading lock.
         blocker_child = subprocess.Popen([sys.executable, str(blocker)])
-        for _ in range(1000):
-            if blocker_started.exists():
-                break
-            time.sleep(0.01)
-        assert blocker_started.exists(), "blocker process never started"
+        _wait_for_file(
+            blocker_started,
+            _CHILD_START_TIMEOUT,
+            "blocker process never started",
+            proc=blocker_child,
+        )
+        # Unconditional: the assertion below is a *negative* one (the blocker
+        # must NOT have got the lock), so there is no event to wait on. Keep it
+        # short — it is paid on every run.
         time.sleep(0.05)
         assert not blocker_acquired.exists(), "second process entered _jobs_lock() while held"
     finally:
