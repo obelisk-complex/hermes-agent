@@ -563,7 +563,10 @@ class TestTryRecoverPrimaryTransport:
                 error, retry_count=3, max_retries=3,
             )
             # wait_time = min(3 + retry_count, 8) = min(6, 8) = 6
-            mock_sleep.assert_called_once_with(6)
+            # assert_any_call: time.sleep is a process global — any other thread
+            # sleeping during this window would break a count-of-1 assertion.
+            # The claim is the wait VALUE, not the number of sleeps.
+            mock_sleep.assert_any_call(6)
 
     def test_wait_time_capped_at_8(self):
         agent = _make_agent(provider="custom")
@@ -575,7 +578,9 @@ class TestTryRecoverPrimaryTransport:
                 error, retry_count=10, max_retries=3,
             )
             # wait_time = min(3 + 10, 8) = 8
-            mock_sleep.assert_called_once_with(8)
+            # assert_any_call for the same reason as above: the cap VALUE is the
+            # claim, and time.sleep is a process global.
+            mock_sleep.assert_any_call(8)
 
     def test_closes_existing_client_before_rebuild(self):
         agent = _make_agent(provider="custom")
