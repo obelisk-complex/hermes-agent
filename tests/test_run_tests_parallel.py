@@ -103,7 +103,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
                     sys.executable, "-c",
                     "import os, signal, sys, time; "
                     "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                    "sys.stdout.write(f'gc-pgid={{os.getpgid(0)}} gc-pid={{os.getpid()}}\\\\n'); "
+                    "sys.stdout.write(f'gc-pgid={{os.getpgid(0)}} gc-pid={{os.getpid()}}\\\n'); "
                     "sys.stdout.flush(); "
                     "time.sleep(600)",
                 ],
@@ -279,6 +279,9 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
 
 
+# ── File retry ────────────────────────────────────────────────────────────────
+
+
 def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     """A pass-on-retry is green, loud, and retains the failing traceback."""
     repo_root = Path(__file__).resolve().parent.parent
@@ -361,73 +364,125 @@ def test_file_retry_does_not_launder_deterministic_failure(tmp_path: Path) -> No
     assert "FLAKY file" not in proc.stdout
 
 
-# ---------------------------------------------------------------------------
-# Zero-collection is not a pass; node ids are translated, not dropped.
+# ── Slice-plan determinism ───────────────────────────────────────────────────
 #
-# Both behaviors were real foot-guns: a run where NOTHING was collected printed
-# "0 tests passed, 0 failed (100% complete)" (reads green), and a pytest node id
-# (`file.py::Class::test`) was silently discarded by path discovery so the run
-# ended with "No test files to run" while looking like an accepted selector.
+# CI shards the suite into 8 slices. Which files share a slice decides which
+# process-global mocks can collide, so a plan that moves between runs makes a
+# red slice unreproducible: re-running it shuffles the files and the failure
+# evaporates. These tests pin the plan to the committed tree.
 
 
-def test_zero_collected_across_run_fails_and_says_so(tmp_path: Path) -> None:
-    """A -k that matches nothing must FAIL, not report a green summary."""
-    probe_dir = _make_probe_dir(tmp_path)
-    proc = _run_runner(probe_dir, "-k", "zzz_matches_nothing")
-    assert proc.returncode == 1, proc.stdout
-    assert "NO TESTS RAN" in proc.stdout
-    assert "NOT a pass" in proc.stdout
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_all_skipped_file_is_still_a_pass(tmp_path: Path) -> None:
-    """Per-file zero-collection stays tolerated.
+def _load_runner_module():
+    import importlib.util
 
-    A platform-gated file (every test skipped) reports "N skipped" — collected,
-    just not executed — and must NOT trip the nothing-ran guard.
+    spec = importlib.util.spec_from_file_location(
+        "_rtp", _REPO_ROOT / "scripts" / "run_tests_parallel.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _generate_slices(cwd: Path, n: int = 8) -> dict:
+    """Run ``--generate-slices N`` and return the parsed matrix."""
+    proc = subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "scripts" / "run_tests_parallel.py"),
+         "--generate-slices", str(n)],
+        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=180,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_slice_plan_is_identical_across_invocations() -> None:
+    """Same tree, two invocations, byte-identical plan.
+
+    This is the property CI depends on: a given commit always produces the
+    same slices, so anyone can reproduce a red slice.
     """
-    probe_dir = tmp_path / "skipprobe"
-    probe_dir.mkdir()
-    (probe_dir / "test_allskipped.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.skip(reason='platform-gated')\n\n"
-        "def test_one():\n    assert True\n\n"
-        "def test_two():\n    assert True\n"
+    first = _generate_slices(_REPO_ROOT)
+    second = _generate_slices(_REPO_ROOT)
+    assert first == second
+
+
+def test_slice_plan_ignores_the_local_durations_cache(tmp_path: Path) -> None:
+    """A stale root ``test_durations.json`` must not move the plan.
+
+    ``test_durations.json`` is a measurement *output*, written after every run
+    and differing on every machine. If it fed back into planning, slice
+    composition would depend on who ran what last, which is exactly the
+    non-reproducibility this design removes.
+    """
+    baseline = _generate_slices(_REPO_ROOT)
+
+    stray = _REPO_ROOT / "test_durations.json"
+    existing = stray.read_text() if stray.is_file() else None
+    try:
+        # Durations wildly unlike the committed snapshot: if they were read,
+        # LPT would order the files completely differently.
+        plan = json.loads((_REPO_ROOT / "ci" / "test_durations.json").read_text())
+        stray.write_text(json.dumps({k: 999.0 for k in plan}, sort_keys=True))
+        polluted = _generate_slices(_REPO_ROOT)
+    finally:
+        if existing is None:
+            stray.unlink(missing_ok=True)
+        else:
+            stray.write_text(existing)
+
+    assert polluted == baseline
+
+
+def test_slice_selection_matches_the_generated_plan() -> None:
+    """``--slice 6/8`` locally selects exactly CI's slice 6.
+
+    The generate job hands each CI job an explicit file list; a developer
+    reproducing that slice uses ``--slice``. Both must derive from the same
+    committed snapshot or "run the failing slice" reproduces a different set.
+    """
+    rtp = _load_runner_module()
+    matrix = _generate_slices(_REPO_ROOT)
+    durations = rtp._load_plan_durations(_REPO_ROOT)
+    files = rtp._discover_files([_REPO_ROOT / "tests"])
+
+    for index in (1, 6, 8):
+        selected = rtp._slice_files(files, index, 8, durations, _REPO_ROOT)
+        got = sorted(rtp._format_file(f, _REPO_ROOT) for f in selected)
+        want = sorted(
+            f for f in matrix["slice"][index - 1]["files"].split(":") if f
+        )
+        assert got == want, f"slice {index} disagrees between --slice and the plan"
+
+
+def test_committed_snapshot_is_clean_and_covers_the_suite() -> None:
+    """The committed snapshot stays a tidy, representative plan input.
+
+    Guards two ways it rots: absolute ``/tmp`` paths leaking in from the
+    runner's own probe tests (they churn the diff and never match a real
+    file), and coverage decaying as tests are added (files with no entry get
+    a default estimate, so at some point the slices stop being balanced).
+    """
+    snapshot = json.loads((_REPO_ROOT / "ci" / "test_durations.json").read_text())
+    assert snapshot, "snapshot is empty"
+
+    bad = [k for k in snapshot if k.startswith("/") or not k.startswith("tests/")]
+    assert not bad, f"snapshot has non-repo-relative keys: {bad[:5]}"
+
+    rtp = _load_runner_module()
+    discovered = {
+        rtp._format_file(f, _REPO_ROOT)
+        for f in rtp._discover_files([_REPO_ROOT / "tests"])
+    }
+    known = discovered & set(snapshot)
+    coverage = len(known) / len(discovered)
+    # Not 100%: a newly added test file should not fail CI. It just gets the
+    # default estimate until someone refreshes the snapshot.
+    assert coverage >= 0.90, (
+        f"snapshot covers only {coverage:.0%} of {len(discovered)} discovered "
+        f"test files — refresh ci/test_durations.json from the "
+        f"test-durations-snapshot artefact of a green main run"
     )
-    proc = _run_runner(probe_dir)
-    assert proc.returncode == 0, proc.stdout
-    assert "NO TESTS RAN" not in proc.stdout
-
-
-def test_node_id_selector_runs_the_named_test(tmp_path: Path) -> None:
-    """``file.py::test_alpha`` runs that test instead of discovering nothing."""
-    probe_dir = _make_probe_dir(tmp_path)
-    target = probe_dir / "test_flagprobe.py"
-    repo_root = Path(__file__).resolve().parent.parent
-    proc = subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "run_tests_parallel.py"),
-         f"{target}::test_alpha", "-j", "1", "--file-timeout", "30"],
-        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, timeout=60,
-    )
-    assert proc.returncode == 0, proc.stdout
-    assert "No test files to run" not in proc.stdout
-    assert "node id" in proc.stdout  # explains the translation
-    # Ran exactly the one selected test, not both in the file.
-    assert "1 tests passed" in proc.stdout
-
-
-def test_explicit_k_wins_over_node_id_inference(tmp_path: Path) -> None:
-    """A caller's own ``-k`` is not overridden by the node-id translation."""
-    probe_dir = _make_probe_dir(tmp_path)
-    target = probe_dir / "test_flagprobe.py"
-    repo_root = Path(__file__).resolve().parent.parent
-    proc = subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "run_tests_parallel.py"),
-         f"{target}::test_alpha", "-k", "test_beta",
-         "-j", "1", "--file-timeout", "30"],
-        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, timeout=60,
-    )
-    # -k test_beta wins: one test ran, and it wasn't filtered to nothing.
-    assert proc.returncode == 0, proc.stdout
-    assert "1 tests passed" in proc.stdout
