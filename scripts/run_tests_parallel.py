@@ -40,6 +40,7 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -86,9 +87,27 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 _DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
 
 # Duration cache: maps relative file paths to last-observed subprocess
-# wall-clock seconds. Used by ``--slice`` to distribute files across
-# CI jobs by estimated total time, so no one job gets all the slow files.
+# wall-clock seconds. Written after every run (gitignored). This is a
+# *measurement output* only — it is deliberately NOT an input to slice
+# planning, because then the plan would depend on whatever happened to
+# be on the machine rather than on the committed tree.
 _DURATIONS_FILE = "test_durations.json"
+
+# Slice plan input: a committed snapshot of CI-measured per-file wall-clock
+# seconds. This is the ONLY input to slice planning, which makes the plan a
+# pure function of the committed tree: the same commit always yields the same
+# slices, on CI and on a laptop, so a red slice can be reproduced by anyone
+# with ``scripts/run_tests.sh --slice I/8``.
+#
+# Refresh it deliberately (never automatically) — see the "Refreshing" note in
+# .github/workflows/tests.yml. Files missing from the snapshot fall back to
+# _DEFAULT_DURATION, so adding a test file needs no snapshot update; it just
+# gets an average-ish estimate until the next refresh.
+_PLAN_DURATIONS_FILE = "ci/test_durations.json"
+
+# Fallback estimate for a file with no entry in the plan snapshot. Set from
+# the observed median of the committed snapshot (p50 ≈ 4.4s), not a guess.
+_DEFAULT_DURATION = 4.4
 
 
 def _approximately_count_tests(
@@ -485,6 +504,34 @@ def _load_durations(repo_root: Path) -> dict[str, float]:
         return {}
 
 
+def _load_plan_durations(repo_root: Path) -> dict[str, float]:
+    """Read the committed slice-plan durations snapshot.
+
+    This is the only duration source consulted when deciding *which files
+    go in which slice*. It reads ``ci/test_durations.json`` — a committed,
+    reviewable artefact — and never the mutable ``test_durations.json``
+    written by the last run, so slice composition cannot drift with local
+    state or with a CI cache.
+
+    Missing or corrupt snapshot → empty dict. Every file then gets
+    ``_DEFAULT_DURATION`` and the plan degrades to a stable round-robin over
+    the sorted file list: still perfectly deterministic, just less balanced.
+    """
+    path = repo_root / _PLAN_DURATIONS_FILE
+    if not path.is_file():
+        print(
+            f"[WARN] No {_PLAN_DURATIONS_FILE}; every file will be estimated at "
+            f"{_DEFAULT_DURATION}s. Slices stay deterministic but lose balance.",
+            file=sys.stderr,
+        )
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[ERROR] Failed to read {_PLAN_DURATIONS_FILE}: {e}", file=sys.stderr)
+        return {}
+
+
 def _save_durations(
     file_times: List[Tuple[Path, float]],
     repo_root: Path,
@@ -516,23 +563,30 @@ def _compute_lpt_slices(
     file to the slice with the smallest accumulated time so far. This
     minimizes the makespan (max slice duration) and keeps CI jobs balanced.
 
-    Files with no cached duration get a default estimate of 2.0s (roughly
-    the P50 from profiling). This means first-time runs (no cache) still
-    get reasonable distribution, and new files don't all land in one slice.
+    Files with no entry in the snapshot get ``_DEFAULT_DURATION``. This means
+    a newly added test file needs no snapshot update to be slotted sensibly,
+    and new files don't all land in one slice.
+
+    Determinism: the output is a pure function of (*files*, *slice_count*,
+    *durations*). Ties are broken by path — *files* arrives sorted from
+    :func:`_discover_files`, the sort below is stable, and ``min()`` returns
+    the lowest index on a tie — so equal-duration files always land the same
+    way. Callers must therefore pass a *committed* duration source (see
+    :func:`_load_plan_durations`); pass a locally-measured one and the plan
+    stops being reproducible.
 
     Returns a list of N file-lists, one per slice (0-indexed).
     """
     if slice_count < 2:
         return [files]
 
-    default_dur = 2.0
     file_durs: List[Tuple[Path, float]] = []
     for f in files:
         rel = _format_file(f, repo_root)
-        dur = durations.get(rel, default_dur)
+        dur = durations.get(rel, _DEFAULT_DURATION)
         file_durs.append((f, dur))
 
-    # Sort longest first (LPT).
+    # Sort longest first (LPT). Stable, so equal durations keep path order.
     file_durs.sort(key=lambda x: x[1], reverse=True)
 
     # Greedy assignment: for each file, add it to the slice with the
@@ -575,10 +629,10 @@ def _slice_files(
 
     target = bucket_files[slice_index - 1]
     target_dur = sum(
-        durations.get(_format_file(f, repo_root), 2.0) for f in target
+        durations.get(_format_file(f, repo_root), _DEFAULT_DURATION) for f in target
     )
     total_dur = sum(
-        durations.get(_format_file(f, repo_root), 2.0)
+        durations.get(_format_file(f, repo_root), _DEFAULT_DURATION)
         for bucket in bucket_files
         for f in bucket
     )
@@ -772,7 +826,7 @@ def main() -> int:
 
     # --generate-slices: compute LPT distribution and emit JSON, then exit.
     if args.generate_slices is not None:
-        durations = _load_durations(repo_root)
+        durations = _load_plan_durations(repo_root)
         slices = _compute_lpt_slices(
             files, args.generate_slices, durations, repo_root
         )
@@ -785,6 +839,36 @@ def main() -> int:
                 for i, bucket in enumerate(slices)
             ]
         }
+        # Plan digest: identical commit => identical digest. Printed to stderr
+        # (stdout is the matrix, captured with $()) so CI can log it and two
+        # runs of a commit can be compared without diffing 2000 paths.
+        est = [
+            sum(durations.get(_format_file(f, repo_root), _DEFAULT_DURATION) for f in b)
+            for b in slices
+        ]
+        digest = hashlib.sha256(
+            json.dumps(matrix, sort_keys=True).encode()
+        ).hexdigest()
+        unknown = sum(
+            1
+            for b in slices
+            for f in b
+            if _format_file(f, repo_root) not in durations
+        )
+        print(f"slice plan digest: {digest}", file=sys.stderr)
+        print(
+            f"slice plan: {len(files)} files across {args.generate_slices} slices; "
+            f"estimated work min={min(est):.0f}s max={max(est):.0f}s "
+            f"spread={max(est) - min(est):.0f}s",
+            file=sys.stderr,
+        )
+        if unknown:
+            print(
+                f"slice plan: {unknown} file(s) absent from {_PLAN_DURATIONS_FILE}, "
+                f"estimated at {_DEFAULT_DURATION}s each. Refresh the snapshot if "
+                f"this grows large.",
+                file=sys.stderr,
+            )
         # Print to stdout so the CI step can capture it with $().
         print(json.dumps(matrix))
         return 0
@@ -796,7 +880,9 @@ def main() -> int:
     # Apply slicing if requested — distribute files across CI jobs by
     # estimated duration so no one job gets all the slow files.
     if slice_index is not None:
-        durations = _load_durations(repo_root)
+        # Same committed snapshot the CI generate job uses, so `--slice 6/8`
+        # locally reproduces CI's slice 6 file-for-file.
+        durations = _load_plan_durations(repo_root)
         files = _slice_files(files, slice_index, slice_count, durations, repo_root)
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}

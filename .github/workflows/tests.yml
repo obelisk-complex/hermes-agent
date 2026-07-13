@@ -22,21 +22,40 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      slice-plan-digest: ${{ steps.matrix.outputs.slice-plan-digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Restore duration cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: test_durations.json
-          key: test-durations
-
+      # Slice composition is a pure function of the committed tree: LPT over
+      # ci/test_durations.json, which is checked in. No cache is restored here
+      # on purpose. Two runs of the same commit therefore produce byte-identical
+      # slices, and a red slice reproduces locally with
+      #   scripts/run_tests.sh --slice <i>/8
+      #
+      # (The previous version restored an `actions/cache` entry keyed
+      # `test-durations` while the save step wrote `test-durations-<run_id>`.
+      # Those keys never matched and cache entries are immutable, so every run
+      # silently planned against one frozen blob from 2026-06-11 that no one
+      # could see or reproduce — and would have reshuffled every slice at once
+      # the moment it was evicted.)
       - name: Generate test slices
         id: matrix
         run: |
+          set -euo pipefail
           MATRIX=$(python3 scripts/run_tests_parallel.py --generate-slices ${{ inputs.slice_count }})
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          # Digest of the plan: compare it across runs to confirm determinism.
+          DIGEST=$(printf '%s' "$MATRIX" | sha256sum | cut -d' ' -f1)
+          echo "slice-plan-digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Slice plan"
+            echo
+            echo "Digest: \`$DIGEST\`"
+            echo
+            echo "Deterministic: same commit => same digest => same slices."
+            echo "Reproduce a slice locally: \`scripts/run_tests.sh --slice <i>/${{ inputs.slice_count }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
@@ -113,45 +132,85 @@ jobs:
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
+      # Measured durations, published as evidence only. Nothing in CI reads
+      # these back: the slice plan comes from the committed snapshot. They
+      # exist so a human can refresh that snapshot deliberately (see below).
+      # Named per slice so the download step can't have one clobber another.
       - name: Upload per-slice durations
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-durations-slice-${{ matrix.slice.index }}
           path: test_durations.json
-          retention-days: 1
+          retention-days: 14
 
-  # Merge per-slice duration data into a single cache, so future runs
-  # (including PRs) get balanced slicing.
-  save-durations:
+  # Publish a refreshed slice-plan snapshot as a downloadable artefact.
+  #
+  # This does NOT feed back into CI automatically — that is the whole point.
+  # Auto-feedback is what made slice composition unreproducible: the plan
+  # depended on the last run's measurements rather than on the tree.
+  #
+  # Refreshing the plan is a reviewed commit, not a side effect:
+  #   1. download `test-durations-snapshot` from a green run on main
+  #   2. cp test_durations.json ci/test_durations.json
+  #   3. commit — the diff shows exactly how the plan will move
+  propose-durations-snapshot:
+    name: "Propose durations snapshot"
     needs: test
     if: needs.test.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
       - name: Download all slice durations
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: test-durations-slice-*
           path: durations
-          merge-multiple: true
+          # NOT merge-multiple: every artefact contains a file called
+          # test_durations.json, so flattening them into one directory makes
+          # them overwrite each other and you keep exactly one slice's data.
+          # Keep them in per-artefact subdirectories and merge explicitly.
 
-      - name: Merge into single durations file
+      - name: Merge slices into a snapshot
         run: |
-          python3 -c "
-          import json, glob, os
-          merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
-            with open(f) as fh:
-              merged.update(json.load(fh))
-          with open('test_durations.json', 'w') as fh:
-            json.dump(merged, fh, indent=2, sort_keys=True)
-          print(f'Merged {len(merged)} file durations')
-          "
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, pathlib
 
-      - name: Save merged duration cache
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+          merged: dict[str, float] = {}
+          shards = sorted(glob.glob("durations/**/test_durations.json", recursive=True))
+          for f in shards:
+              merged.update(json.loads(pathlib.Path(f).read_text()))
+
+          # Keep only repo-relative paths to real test files. The runner's own
+          # probe tests invoke it against files under /tmp, and those absolute
+          # paths would otherwise land in the snapshot and churn every refresh.
+          root = pathlib.Path(".").resolve()
+          clean = {
+              k: round(float(v), 3)
+              for k, v in merged.items()
+              if k.startswith("tests/") and (root / k).is_file()
+          }
+          dropped = len(merged) - len(clean)
+
+          out = pathlib.Path("test_durations.json")
+          out.write_text(json.dumps(clean, indent=2, sort_keys=True) + "\n")
+          print(f"merged {len(shards)} shards -> {len(clean)} files ({dropped} dropped)")
+          print(f"total measured work: {sum(clean.values()):.0f}s")
+
+          old = json.loads(pathlib.Path("ci/test_durations.json").read_text())
+          added = len(set(clean) - set(old))
+          removed = len(set(old) - set(clean))
+          print(f"vs committed snapshot: +{added} file(s), -{removed} file(s)")
+          PY
+
+      - name: Upload snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: test-durations-snapshot
           path: test_durations.json
-          key: test-durations-${{ github.run_id }}
+          retention-days: 14
 
   e2e:
     runs-on: ubuntu-latest

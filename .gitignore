@@ -28,7 +28,9 @@ __pycache__/web_tools.cpython-310.pyc
 logs/
 data/
 .pytest_cache/
-test_durations.json
+# Measurement output from the last local run. Root-anchored on purpose: the
+# committed slice-plan snapshot at ci/test_durations.json must NOT be ignored.
+/test_durations.json
 .pytest-cache/
 tmp/
 temp_vision_images/
