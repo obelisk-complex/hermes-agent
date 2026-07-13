@@ -86,18 +86,25 @@ def _clear_approval_state():
 _NOTIFY_WAIT_S = 10.0
 
 
-def _notify_recorder(expected: int = 1):
+def _notify_recorder(expected: int = 1, also_set: "threading.Event | None" = None):
     """Return ``(received, seen, cb)`` for a gateway notify callback.
 
     ``seen`` is set once *expected* notifications have landed, so the main
     thread can wait on an event the producer signals instead of sleep-polling
     a list.
+
+    ``also_set`` is set on *every* notification, whichever recorder receives it.
+    Cross-session tests share one such event across several sessions' recorders,
+    so they wake as soon as a prompt lands *anywhere* — including at the wrong
+    session, which is a failure they must detect rather than time out on.
     """
     received: list = []
     seen = threading.Event()
 
     def cb(data):
         received.append(data)
+        if also_set is not None:
+            also_set.set()
         if len(received) >= expected:
             seen.set()
 
@@ -814,6 +821,28 @@ class TestCrossSessionApprovalIsolation:
             mod.unregister_gateway_notify(key)
         _clear_approval_state()
 
+    @pytest.fixture(autouse=True)
+    def _manual_approval_mode(self, monkeypatch):
+        """Pin ``approvals.mode`` to manual, for the reason given at length on
+        ``TestBlockingApprovalE2E._manual_approval_mode``: the shipped default
+        is ``smart``, so ``check_all_command_guards`` detours through
+        ``_smart_approve`` (auxiliary LLM) before it ever reaches the gateway
+        notify callback these tests assert on, and in a keyless environment
+        that call does not fail fast.
+
+        Measured here, on the callback's path, with the box oversubscribed
+        (64 busy loops / 16 cores): the prompt reaches session A at
+        t=1.66-3.52s, and ``_smart_approve`` accounts for essentially all of it
+        (at t_a=3.520s, 3.464s was inside ``_smart_approve``). Against the old
+        2.5s poll budget that failed 3 runs in 12; at 96 busy loops, 7 in 10.
+
+        The prompt was never misrouted: session B recorded zero notifications
+        in every run, and the worker always resolved its key to session-A. The
+        old poll loop simply gave up before the aux client did.
+        """
+        from tools import approval as mod
+        monkeypatch.setattr(mod, "_get_approval_mode", lambda: "manual")
+
     def test_contextvar_wins_over_clobbered_environ(self):
         """get_current_session_key honors the contextvar, not stale env."""
         from tools.approval import (
@@ -883,10 +912,16 @@ class TestCrossSessionApprovalIsolation:
             set_current_session_key,
             unregister_gateway_notify,
         )
-        notified_a = []
-        notified_b = []
-        register_gateway_notify("session-A", lambda d: notified_a.append(d))
-        register_gateway_notify("session-B", lambda d: notified_b.append(d))
+        # One event shared by both recorders: it fires as soon as a prompt lands
+        # at *either* session, so a prompt misrouted to B wakes us immediately
+        # and fails as a leak, rather than timing out and being reported as "did
+        # not route to A" — the two are different bugs and were indistinguishable
+        # while this test polled a list and asserted A first.
+        landed_anywhere = threading.Event()
+        notified_a, _seen_a, cb_a = _notify_recorder(also_set=landed_anywhere)
+        notified_b, _seen_b, cb_b = _notify_recorder(also_set=landed_anywhere)
+        register_gateway_notify("session-A", cb_a)
+        register_gateway_notify("session-B", cb_b)
 
         # Concurrent session B clobbered the process-global env var last.
         os.environ["HERMES_SESSION_KEY"] = "session-B"
@@ -910,14 +945,15 @@ class TestCrossSessionApprovalIsolation:
         t = threading.Thread(target=worker_a, daemon=True)
         t.start()
         try:
-            for _ in range(50):
-                if notified_a or notified_b:
-                    break
-                time.sleep(0.05)
+            assert landed_anywhere.wait(_NOTIFY_WAIT_S), (
+                "no approval prompt reached any session's notify callback"
+            )
 
             # The prompt must land in session A (the originator), never B.
-            assert len(notified_a) == 1, "approval prompt did not route to session A"
+            # Assert the leak first: if B got it, that is the finding, and
+            # "did not route to A" would merely be its shadow.
             assert len(notified_b) == 0, "approval prompt leaked to session B (#24100)"
+            assert len(notified_a) == 1, "approval prompt did not route to session A"
             assert "rm -rf /important" in notified_a[0]["command"]
 
             resolve_gateway_approval("session-A", "once")
@@ -957,8 +993,10 @@ class TestCrossSessionApprovalIsolation:
         os.environ["HERMES_GATEWAY_SESSION"] = "1"
         os.environ["HERMES_EXEC_ASK"] = "1"
 
-        register_gateway_notify("sess-A", lambda d: None)
-        register_gateway_notify("sess-B", lambda d: None)
+        _notified_a, seen_a, cb_a = _notify_recorder()
+        _notified_b, seen_b, cb_b = _notify_recorder()
+        register_gateway_notify("sess-A", cb_a)
+        register_gateway_notify("sess-B", cb_b)
 
         results = {"sess-A": None, "sess-B": None}
 
@@ -975,11 +1013,18 @@ class TestCrossSessionApprovalIsolation:
         tb.start()
         try:
             # Wait until both sessions have a pending approval in their queue.
-            for _ in range(100):
-                if (len(_gateway_queues.get("sess-A", [])) >= 1
-                        and len(_gateway_queues.get("sess-B", [])) >= 1):
-                    break
-                time.sleep(0.05)
+            # _await_gateway_decision appends the queue entry before it calls the
+            # notify callback, so waiting for both callbacks is a strictly
+            # stronger signal than polling _gateway_queues, and it is an event
+            # the producer sets rather than a poll. Both workers here run the
+            # same guard as the routing test above, so both pay the same
+            # pre-notify cost; this poll was on the same 2.5s-class budget.
+            assert seen_a.wait(_NOTIFY_WAIT_S), (
+                "sess-A's agent thread never reached the notify callback"
+            )
+            assert seen_b.wait(_NOTIFY_WAIT_S), (
+                "sess-B's agent thread never reached the notify callback"
+            )
 
             # Each command must be parked in its OWN session queue.
             qa = _gateway_queues.get("sess-A", [])
