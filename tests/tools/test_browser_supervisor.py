@@ -10,6 +10,19 @@ Run manually:
     scripts/run_tests.sh tests/tools/test_browser_supervisor.py
 
 Automated: skipped in CI unless ``HERMES_E2E_BROWSER=1`` is set.
+
+Absent browser vs slow browser
+------------------------------
+Only *absence* of a browser skips these tests: no Chrome/Chromium on ``PATH``
+is an environment that cannot run them, and the module-level ``skipif`` says
+so.  Everything else — a Chrome that dies on launch, a Chrome that takes too
+long to open its CDP port, a page that never loads, a dialog the supervisor
+never sees — is a **failure**.  A timeout used to skip here, which meant a
+slow browser silently deleted this file's coverage and left CI green.
+
+Every budget below is a *deadline*, not a sleep: each wait returns the moment
+the thing it waits for happens, so the budgets cost a healthy run nothing and
+only bite when something is genuinely broken.
 """
 
 from __future__ import annotations
@@ -30,6 +43,14 @@ pytestmark = pytest.mark.skipif(
     reason="Chrome/Chromium not installed",
 )
 
+# Deadlines (see module docstring): generous, because none of them is paid on
+# a healthy run.
+CDP_BOOT_TIMEOUT = 60.0        # Chrome launch -> /json/version answering
+CDP_CALL_TIMEOUT = 20.0        # one CDP request/response round trip
+PAGE_LOAD_TIMEOUT = 20.0       # Page.navigate -> Page.loadEventFired
+DIALOG_TIMEOUT = 15.0          # JS dialog fires -> supervisor sees it
+SUPERVISOR_TIMEOUT = 15.0      # supervisor attaches / its state settles
+
 
 def _find_chrome() -> str:
     for candidate in ("google-chrome", "chromium", "chromium-browser"):
@@ -37,6 +58,50 @@ def _find_chrome() -> str:
         if path:
             return path
     pytest.skip("no Chrome binary found")
+
+
+def _wait_until(predicate, *, timeout: float, what: str, interval: float = 0.05):
+    """Poll *predicate* until it returns a truthy value; fail if it never does.
+
+    Returns as soon as the condition holds.  On timeout this **fails** — it
+    never skips: a condition that never arrives is a broken supervisor, not a
+    missing browser.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    pytest.fail(f"timed out after {timeout:.1f}s waiting for {what}")
+
+
+def _terminate_chrome(proc: subprocess.Popen) -> None:
+    """Stop Chrome and reap it.
+
+    The stdlib ``subprocess._wait()`` POSIX implementation has a known race
+    (https://bugs.python.org/issue38630): when SIGCHLD arrives concurrently
+    with ``proc.wait()``, ``_try_wait(WNOHANG)`` can return a foreign pid and
+    the ``assert pid == self.pid or pid == 0`` fires.  We saw this in CI on
+    slice 1 after this fixture's teardown (PR #33661 follow-up).  Swallow the
+    stdlib race + force-kill if wait hangs, then always reap so we don't leak
+    a zombie.
+    """
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except (subprocess.TimeoutExpired, AssertionError, Exception):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except (AssertionError, Exception):
+            pass
 
 
 @pytest.fixture
@@ -58,9 +123,11 @@ def chrome_cdp(request):
         port_offset = int(worker_id.lstrip("gw"))
     port = 9225 + port_offset
     profile = tempfile.mkdtemp(prefix="hermes-supervisor-test-")
+    chrome = _find_chrome()  # skips iff no browser exists at all
+    stderr_log = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         [
-            _find_chrome(),
+            chrome,
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
             "--no-first-run",
@@ -70,12 +137,20 @@ def chrome_cdp(request):
             "--site-per-process",  # force OOPIFs for cross-origin iframes
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_log,
     )
 
     ws_url = None
-    deadline = time.monotonic() + 15
+    died_with = None
+    last_error: Exception | None = None
+    started = time.monotonic()
+    deadline = started + CDP_BOOT_TIMEOUT
     while time.monotonic() < deadline:
+        # A Chrome that exited is broken, not slow: say so now rather than
+        # burning the rest of the deadline on a corpse.
+        if proc.poll() is not None:
+            died_with = proc.returncode
+            break
         try:
             import urllib.request
             with urllib.request.urlopen(
@@ -84,49 +159,43 @@ def chrome_cdp(request):
                 info = json.loads(r.read().decode())
                 ws_url = info["webSocketDebuggerUrl"]
                 break
-        except Exception:
+        except Exception as exc:  # not up yet (or never will be)
+            last_error = exc
             time.sleep(0.25)
     if ws_url is None:
+        elapsed = time.monotonic() - started
+        _terminate_chrome(proc)
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except (subprocess.TimeoutExpired, AssertionError, Exception):
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except (AssertionError, Exception):
-                pass
-        shutil.rmtree(profile, ignore_errors=True)
-        pytest.skip("Chrome didn't expose CDP in time")
-
-    yield ws_url, port
-
-    # Tear down Chrome. The stdlib `subprocess._wait()` POSIX implementation
-    # has a known race (https://bugs.python.org/issue38630): when SIGCHLD
-    # arrives concurrently with `proc.wait()`, `_try_wait(WNOHANG)` can
-    # return a foreign pid and the `assert pid == self.pid or pid == 0`
-    # fires. We saw this in CI on slice 1 after this fixture's teardown
-    # (PR #33661 follow-up). Swallow the stdlib race + force-kill if wait
-    # hangs, then always reap so we don't leak a zombie.
-    try:
-        proc.terminate()
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=3)
-    except (subprocess.TimeoutExpired, AssertionError, Exception):
-        try:
-            proc.kill()
+            stderr_log.seek(0)
+            stderr_tail = stderr_log.read().decode("utf-8", "replace")[-2000:].strip()
         except Exception:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except (AssertionError, Exception):
-            pass
-    shutil.rmtree(profile, ignore_errors=True)
+            stderr_tail = "<unreadable>"
+        finally:
+            stderr_log.close()
+        shutil.rmtree(profile, ignore_errors=True)
+        if died_with is not None:
+            headline = f"Chrome exited with code {died_with} before exposing CDP"
+        else:
+            headline = (
+                f"Chrome did not expose CDP on 127.0.0.1:{port} within "
+                f"{CDP_BOOT_TIMEOUT:.0f}s"
+            )
+        # Deliberately a failure, not a skip. A browser that is merely slow (or
+        # broken) must not be able to delete this file's coverage and leave CI
+        # green; only an *absent* browser skips, above.
+        pytest.fail(
+            f"{headline} (waited {elapsed:.1f}s)\n"
+            f"  binary:      {chrome}\n"
+            f"  last probe:  {last_error!r}\n"
+            f"  chrome stderr tail:\n{stderr_tail or '<empty>'}"
+        )
+
+    try:
+        yield ws_url, port
+    finally:
+        _terminate_chrome(proc)
+        stderr_log.close()
+        shutil.rmtree(profile, ignore_errors=True)
 
 
 def _test_page_url() -> str:
@@ -139,13 +208,35 @@ def _test_page_url() -> str:
 
 
 def _fire_on_page(cdp_url: str, expression: str) -> None:
-    """Navigate the first page target to a data URL and fire `expression`."""
+    """Navigate the first page target to the test page, then fire `expression`.
+
+    Waits on ``Page.loadEventFired`` rather than sleeping a fixed 1.5s: the page
+    is provably loaded before the expression runs, and a page that never loads
+    fails loudly instead of silently racing the assertions that follow.
+    """
     import asyncio
     import websockets as _ws_mod
 
     async def run():
         async with _ws_mod.connect(cdp_url, max_size=50 * 1024 * 1024) as ws:
             next_id = [1]
+            pending: dict = {}
+            loaded = asyncio.Event()
+
+            async def reader_fn():
+                try:
+                    async for raw in ws:
+                        m = json.loads(raw)
+                        if "id" in m:
+                            fut = pending.pop(m["id"], None)
+                            if fut and not fut.done():
+                                fut.set_result(m)
+                        elif m.get("method") == "Page.loadEventFired":
+                            loaded.set()
+                except Exception:
+                    pass
+
+            rd = asyncio.create_task(reader_fn())
 
             async def call(method, params=None, session_id=None):
                 cid = next_id[0]
@@ -155,25 +246,41 @@ def _fire_on_page(cdp_url: str, expression: str) -> None:
                     p["params"] = params
                 if session_id:
                     p["sessionId"] = session_id
+                fut = asyncio.get_event_loop().create_future()
+                pending[cid] = fut
                 await ws.send(json.dumps(p))
-                async for raw in ws:
-                    m = json.loads(raw)
-                    if m.get("id") == cid:
-                        return m
+                return await asyncio.wait_for(fut, timeout=CDP_CALL_TIMEOUT)
 
-            targets = (await call("Target.getTargets"))["result"]["targetInfos"]
-            page = next(t for t in targets if t.get("type") == "page")
-            attach = await call(
-                "Target.attachToTarget", {"targetId": page["targetId"], "flatten": True}
-            )
-            sid = attach["result"]["sessionId"]
-            await call("Page.navigate", {"url": _test_page_url()}, session_id=sid)
-            await asyncio.sleep(1.5)  # let the page load
-            await call(
-                "Runtime.evaluate",
-                {"expression": expression, "returnByValue": True},
-                session_id=sid,
-            )
+            try:
+                targets = (await call("Target.getTargets"))["result"]["targetInfos"]
+                page = next(t for t in targets if t.get("type") == "page")
+                attach = await call(
+                    "Target.attachToTarget",
+                    {"targetId": page["targetId"], "flatten": True},
+                )
+                sid = attach["result"]["sessionId"]
+                # Enable Page *before* navigating so the load event can't be
+                # missed in the gap between the two calls.
+                await call("Page.enable", session_id=sid)
+                await call("Page.navigate", {"url": _test_page_url()}, session_id=sid)
+                try:
+                    await asyncio.wait_for(loaded.wait(), timeout=PAGE_LOAD_TIMEOUT)
+                except asyncio.TimeoutError:
+                    pytest.fail(
+                        "page never fired Page.loadEventFired within "
+                        f"{PAGE_LOAD_TIMEOUT:.0f}s"
+                    )
+                await call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                    session_id=sid,
+                )
+            finally:
+                rd.cancel()
+                try:
+                    await rd
+                except BaseException:
+                    pass
 
     asyncio.run(run())
 
@@ -187,14 +294,22 @@ def supervisor_registry():
     SUPERVISOR_REGISTRY.stop_all()
 
 
-def _wait_for_dialog(supervisor, timeout: float = 5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        snap = supervisor.snapshot()
-        if snap.pending_dialogs:
-            return snap.pending_dialogs
-        time.sleep(0.1)
-    return ()
+def _wait_for_dialog(supervisor, timeout: float = DIALOG_TIMEOUT):
+    """Return the pending dialogs once one appears; fail if none ever does."""
+    return _wait_until(
+        lambda: supervisor.snapshot().pending_dialogs,
+        timeout=timeout,
+        what="the supervisor to report a pending dialog",
+    )
+
+
+def _wait_for_page_session(supervisor, timeout: float = SUPERVISOR_TIMEOUT):
+    """Wait until the supervisor is attached to a page target's CDP session."""
+    _wait_until(
+        lambda: supervisor.snapshot().active and supervisor._page_session_id is not None,
+        timeout=timeout,
+        what="the supervisor to attach to a page session",
+    )
 
 
 def test_supervisor_start_and_snapshot(chrome_cdp, supervisor_registry):
@@ -205,8 +320,12 @@ def test_supervisor_start_and_snapshot(chrome_cdp, supervisor_registry):
     # Navigate so the frame tree populates.
     _fire_on_page(cdp_url, "/* no dialog */ void 0")
 
-    # Give a moment for frame events to propagate
-    time.sleep(1.0)
+    # Wait for the frame events to reach the supervisor (deadline, not a sleep).
+    _wait_until(
+        lambda: supervisor.snapshot().frame_tree.get("top") is not None,
+        timeout=SUPERVISOR_TIMEOUT,
+        what="a top frame in the supervisor's frame tree",
+    )
     snap = supervisor.snapshot()
     assert snap.active is True
     assert snap.task_id == "pytest-1"
@@ -229,9 +348,13 @@ def test_main_frame_alert_detection_and_dismiss(chrome_cdp, supervisor_registry)
 
     result = supervisor.respond_to_dialog("dismiss")
     assert result["ok"] is True
-    # State cleared after dismiss
-    time.sleep(0.3)
-    assert supervisor.snapshot().pending_dialogs == ()
+    # State cleared after dismiss — wait for it to clear rather than assuming
+    # 0.3s was enough.
+    _wait_until(
+        lambda: supervisor.snapshot().pending_dialogs == (),
+        timeout=SUPERVISOR_TIMEOUT,
+        what="the dismissed dialog to clear from pending_dialogs",
+    )
 
 
 def test_iframe_contentwindow_alert(chrome_cdp, supervisor_registry):
@@ -293,8 +416,18 @@ def test_auto_dismiss_policy(chrome_cdp, supervisor_registry):
     )
 
     _fire_on_page(cdp_url, "setTimeout(() => alert('PYTEST-AUTO-DISMISS'), 50)")
-    # Give the supervisor a moment to see + auto-dismiss
-    time.sleep(2.0)
+    # Wait on the positive signal — the dialog landing in recent_dialogs closed
+    # by the policy — instead of sleeping 2s and hoping. A bare
+    # ``pending_dialogs == ()`` after a sleep also passes when the supervisor
+    # never saw the dialog at all.
+    _wait_until(
+        lambda: any(
+            "PYTEST-AUTO-DISMISS" in r.message and r.closed_by == "auto_policy"
+            for r in supervisor.snapshot().recent_dialogs
+        ),
+        timeout=DIALOG_TIMEOUT,
+        what="the alert to be seen and auto-dismissed by the policy",
+    )
     snap = supervisor.snapshot()
     # Nothing pending because auto-dismiss cleared it immediately
     assert snap.pending_dialogs == ()
@@ -351,13 +484,14 @@ def test_recent_dialogs_ring_buffer(chrome_cdp, supervisor_registry):
     )
 
     _fire_on_page(cdp_url, "setTimeout(() => alert('PYTEST-RECENT'), 50)")
-    # Wait for auto-dismiss to cycle the dialog through
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        recent = sv.snapshot().recent_dialogs
-        if recent and any("PYTEST-RECENT" in r.message for r in recent):
-            break
-        time.sleep(0.1)
+    # Wait for auto-dismiss to cycle the dialog through.
+    _wait_until(
+        lambda: any(
+            "PYTEST-RECENT" in r.message for r in sv.snapshot().recent_dialogs
+        ),
+        timeout=DIALOG_TIMEOUT,
+        what="the auto-dismissed dialog to reach recent_dialogs",
+    )
 
     recent = sv.snapshot().recent_dialogs
     assert recent, "recent_dialogs should contain the auto-dismissed dialog"
@@ -539,7 +673,7 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                 fut = _asyncio.get_event_loop().create_future()
                 pending[c] = fut
                 await ws.send(json.dumps(p))
-                return await _asyncio.wait_for(fut, timeout=20)
+                return await _asyncio.wait_for(fut, timeout=CDP_CALL_TIMEOUT)
 
             try:
                 t = (await call("Target.getTargets"))["result"]["targetInfos"]
@@ -554,7 +688,7 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                 await ws.send(json.dumps({"id": nav_id, "method": "Page.navigate", "params": {"url": url}, "sessionId": sid}))
 
                 # Wait for supervisor to see the prompt
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + DIALOG_TIMEOUT
                 dialog = None
                 while time.monotonic() < deadline:
                     snap = sv.snapshot()
@@ -562,7 +696,9 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                         dialog = snap.pending_dialogs[0]
                         break
                     await _asyncio.sleep(0.05)
-                assert dialog is not None, "no dialog captured"
+                assert dialog is not None, (
+                    f"no dialog captured within {DIALOG_TIMEOUT:.0f}s"
+                )
                 assert dialog.bridge_request_id is not None, "expected bridge path"
                 assert dialog.type == "prompt"
 
@@ -570,18 +706,27 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                 resp = sv.respond_to_dialog("accept", prompt_text="AGENT-SUPPLIED-REPLY")
                 assert resp["ok"] is True
 
-                # Wait for nav to complete + read back
+                # Wait for nav to complete, then poll the page for the reply the
+                # agent supplied rather than sleeping a fixed 0.5s and reading
+                # once (a read that lands early returns None and fails the test
+                # for a reason that has nothing to do with the bridge).
                 try:
-                    await _asyncio.wait_for(nav_fut, timeout=10)
+                    await _asyncio.wait_for(nav_fut, timeout=PAGE_LOAD_TIMEOUT)
                 except Exception:
                     pass
-                await _asyncio.sleep(0.5)
-                r = await call(
-                    "Runtime.evaluate",
-                    {"expression": "window.__ret", "returnByValue": True},
-                    sid=sid,
-                )
-                return r.get("result", {}).get("result", {}).get("value")
+                value = None
+                read_deadline = time.monotonic() + PAGE_LOAD_TIMEOUT
+                while time.monotonic() < read_deadline:
+                    r = await call(
+                        "Runtime.evaluate",
+                        {"expression": "window.__ret", "returnByValue": True},
+                        sid=sid,
+                    )
+                    value = r.get("result", {}).get("result", {}).get("value")
+                    if value is not None:
+                        break
+                    await _asyncio.sleep(0.05)
+                return value
             finally:
                 rd.cancel()
                 try: await rd
@@ -598,7 +743,7 @@ def test_evaluate_runtime_primitive(chrome_cdp, supervisor_registry):
 
     # Need a page to evaluate against.
     _fire_on_page(cdp_url, "void 0")
-    time.sleep(0.5)
+    _wait_for_page_session(supervisor)
 
     out = supervisor.evaluate_runtime("1 + 41")
     assert out["ok"] is True
@@ -612,7 +757,7 @@ def test_evaluate_runtime_object(chrome_cdp, supervisor_registry):
     supervisor = supervisor_registry.get_or_start(task_id="pytest-eval-2", cdp_url=cdp_url)
 
     _fire_on_page(cdp_url, "void 0")
-    time.sleep(0.5)
+    _wait_for_page_session(supervisor)
 
     out = supervisor.evaluate_runtime('({foo: "bar", n: 7})')
     assert out["ok"] is True
@@ -626,7 +771,7 @@ def test_evaluate_runtime_js_exception(chrome_cdp, supervisor_registry):
     supervisor = supervisor_registry.get_or_start(task_id="pytest-eval-3", cdp_url=cdp_url)
 
     _fire_on_page(cdp_url, "void 0")
-    time.sleep(0.5)
+    _wait_for_page_session(supervisor)
 
     out = supervisor.evaluate_runtime("nonExistentVar.nope")
     assert out["ok"] is False
@@ -646,7 +791,7 @@ def test_evaluate_runtime_dom_node_returns_empty_object(chrome_cdp, supervisor_r
     supervisor = supervisor_registry.get_or_start(task_id="pytest-eval-4", cdp_url=cdp_url)
 
     _fire_on_page(cdp_url, "void 0")
-    time.sleep(0.5)
+    _wait_for_page_session(supervisor)
 
     out = supervisor.evaluate_runtime("document.querySelector('h1')")
     assert out["ok"] is True
@@ -661,7 +806,7 @@ def test_evaluate_runtime_unserializable_value(chrome_cdp, supervisor_registry):
     supervisor = supervisor_registry.get_or_start(task_id="pytest-eval-5", cdp_url=cdp_url)
 
     _fire_on_page(cdp_url, "void 0")
-    time.sleep(0.5)
+    _wait_for_page_session(supervisor)
 
     out = supervisor.evaluate_runtime("Infinity")
     assert out["ok"] is True
