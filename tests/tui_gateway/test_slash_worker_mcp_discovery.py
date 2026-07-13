@@ -31,6 +31,24 @@ pytest.importorskip("mcp.server.fastmcp")
 # rather than the fastest developer laptop is therefore free.
 RESPONSE_TIMEOUT_S = float(os.environ.get("HERMES_TEST_SLASH_WORKER_TIMEOUT_S", "60"))
 
+# Bound the worker puts on MCP discovery before it snapshots the tool list.
+#
+# This is the timeout that actually decides this test, and it is NOT the one
+# above. The worker calls ``wait_for_mcp_discovery()``, which joins the
+# discovery thread for at most ``mcp_discovery_timeout`` (config.yaml; default
+# 1.5s) and then builds a HermesCLI regardless. Discovery has to spawn a second
+# interpreter, import FastMCP and finish a stdio handshake, so on a loaded CI
+# runner it does not land inside 1.5s -- the join gives up, the tool snapshot is
+# taken without the MCP tools, and the worker answers /tools promptly and
+# cheerfully with only the builtins. Nothing times out and nothing errors: the
+# assertion below just fails to find the tool. Raising RESPONSE_TIMEOUT_S cannot
+# help, because the reply was never late.
+#
+# ``Thread.join`` returns the instant discovery completes, so a large bound
+# costs a healthy worker nothing; it converts a race against ambient load into a
+# wait. Sized like RESPONSE_TIMEOUT_S, for the same reason.
+DISCOVERY_TIMEOUT_S = RESPONSE_TIMEOUT_S
+
 
 def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     profile_home = tmp_path / "profile-home"
@@ -57,6 +75,7 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     (profile_home / "config.yaml").write_text(
         yaml.safe_dump(
             {
+                "mcp_discovery_timeout": DISCOVERY_TIMEOUT_S,
                 "mcp_servers": {
                     "profileprobe": {
                         "enabled": True,
