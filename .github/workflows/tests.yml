@@ -43,10 +43,14 @@ jobs:
         id: matrix
         run: |
           set -euo pipefail
-          MATRIX=$(python3 scripts/run_tests_parallel.py --generate-slices ${{ inputs.slice_count }})
+          # stdout is the matrix; the plan digest and summary go to stderr.
+          MATRIX=$(python3 scripts/run_tests_parallel.py \
+            --generate-slices ${{ inputs.slice_count }} 2> plan.log)
+          cat plan.log
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          # Digest of the plan: compare it across runs to confirm determinism.
-          DIGEST=$(printf '%s' "$MATRIX" | sha256sum | cut -d' ' -f1)
+          # One digest, computed in one place. Compare it across runs to
+          # confirm determinism; it also matches what a laptop prints.
+          DIGEST=$(grep -oP 'slice plan digest: \K\S+' plan.log)
           echo "slice-plan-digest=$DIGEST" >> "$GITHUB_OUTPUT"
           {
             echo "### Slice plan"
@@ -150,13 +154,19 @@ jobs:
   # depended on the last run's measurements rather than on the tree.
   #
   # Refreshing the plan is a reviewed commit, not a side effect:
-  #   1. download `test-durations-snapshot` from a green run on main
+  #   1. download `test-durations-snapshot` from a green run on main, or from
+  #      a manual run of this workflow on your branch
   #   2. cp test_durations.json ci/test_durations.json
   #   3. commit — the diff shows exactly how the plan will move
+  #
+  # Runs on main, and on manual dispatch from any branch: adding a batch of
+  # tests is exactly when you want a fresh snapshot without waiting for a merge.
   propose-durations-snapshot:
     name: "Propose durations snapshot"
     needs: test
-    if: needs.test.result == 'success' && github.ref == 'refs/heads/main'
+    if: >-
+      needs.test.result == 'success'
+      && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
