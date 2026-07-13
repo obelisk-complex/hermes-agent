@@ -436,6 +436,29 @@ class TestBlockingApprovalE2E:
     def teardown_method(self):
         self._approval_mode_patch.stop()
 
+    def teardown_method(self):
+        """Release any agent thread still blocked on an approval.
+
+        Every test here starts a thread that blocks inside
+        ``check_all_command_guards`` until something resolves the approval.
+        The resolve call sits *after* the assertions, so an assertion that
+        fails early strands the thread — it then waits out ``gateway_timeout``
+        (default 300s, ``tools/approval.py``) with nothing coming.
+
+        ``unregister_gateway_notify`` signals every queued entry (see
+        ``test_unregister_signals_all_entries``), so unregistering here wakes
+        the stranded thread immediately and the failure surfaces in
+        milliseconds rather than as a five-minute hang.
+
+        ``_clear_approval_state`` alone is not enough: it drops the queues
+        without setting their events, leaving the thread blocked.
+        """
+        from tools import approval as mod
+
+        for key in list(mod._gateway_notify_cbs):
+            mod.unregister_gateway_notify(key)
+        _clear_approval_state()
+
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
         from tools.approval import (
@@ -467,7 +490,7 @@ class TestBlockingApprovalE2E:
                 os.environ.pop("HERMES_SESSION_KEY", None)
                 reset_current_session_key(token)
 
-        t = threading.Thread(target=agent_thread)
+        t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
 
         for _ in range(50):
@@ -515,7 +538,7 @@ class TestBlockingApprovalE2E:
                 os.environ.pop("HERMES_SESSION_KEY", None)
                 reset_current_session_key(token)
 
-        t = threading.Thread(target=agent_thread)
+        t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
         for _ in range(50):
             if notified:
@@ -574,7 +597,7 @@ class TestBlockingApprovalE2E:
                 os.environ.pop("HERMES_SESSION_KEY", None)
                 reset_current_session_key(token)
 
-        t = threading.Thread(target=agent_thread)
+        t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
         t.join(timeout=1)
         if t.is_alive():
@@ -618,9 +641,9 @@ class TestBlockingApprovalE2E:
             return run
 
         threads = [
-            threading.Thread(target=make_agent(0, "rm -rf /a")),
-            threading.Thread(target=make_agent(1, "rm -rf /b")),
-            threading.Thread(target=make_agent(2, "rm -rf /c")),
+            threading.Thread(target=make_agent(0, "rm -rf /a"), daemon=True),
+            threading.Thread(target=make_agent(1, "rm -rf /b"), daemon=True),
+            threading.Thread(target=make_agent(2, "rm -rf /c"), daemon=True),
         ]
         for t in threads:
             t.start()
@@ -675,8 +698,8 @@ class TestBlockingApprovalE2E:
             return run
 
         threads = [
-            threading.Thread(target=make_agent(0, "rm -rf /x")),
-            threading.Thread(target=make_agent(1, "rm -rf /y")),
+            threading.Thread(target=make_agent(0, "rm -rf /x"), daemon=True),
+            threading.Thread(target=make_agent(1, "rm -rf /y"), daemon=True),
         ]
         for t in threads:
             t.start()
@@ -768,6 +791,13 @@ class TestCrossSessionApprovalIsolation:
 
     def teardown_method(self):
         os.environ.pop("HERMES_SESSION_KEY", None)
+        # Same hazard as TestBlockingApprovalE2E: a failed assertion can leave
+        # a worker blocked on an approval that nothing will now resolve.
+        from tools import approval as mod
+
+        for key in list(mod._gateway_notify_cbs):
+            mod.unregister_gateway_notify(key)
+        _clear_approval_state()
 
     def test_contextvar_wins_over_clobbered_environ(self):
         """get_current_session_key honors the contextvar, not stale env."""
@@ -862,7 +892,7 @@ class TestCrossSessionApprovalIsolation:
             finally:
                 reset_current_session_key(token)
 
-        t = threading.Thread(target=worker_a)
+        t = threading.Thread(target=worker_a, daemon=True)
         t.start()
         try:
             for _ in range(50):
@@ -924,8 +954,8 @@ class TestCrossSessionApprovalIsolation:
             finally:
                 reset_current_session_key(token)
 
-        ta = threading.Thread(target=worker, args=("sess-A", "rm -rf /a-data"))
-        tb = threading.Thread(target=worker, args=("sess-B", "rm -rf /b-data"))
+        ta = threading.Thread(target=worker, args=("sess-A", "rm -rf /a-data"), daemon=True)
+        tb = threading.Thread(target=worker, args=("sess-B", "rm -rf /b-data"), daemon=True)
         ta.start()
         tb.start()
         try:
