@@ -76,6 +76,34 @@ def _clear_approval_state():
     mod._pending.clear()
 
 
+# Budget for "the agent thread got as far as the gateway notify callback".
+# With approvals.mode pinned to manual (see _manual_approval_mode below), the
+# work in front of the callback is a hardline scan, a config read, a tirith
+# scan and a pattern match: ~5ms, and ~7ms with the machine oversubscribed 4x.
+# The waits below are Events the callback sets, so a healthy run resumes the
+# instant it fires; only a genuine failure pays this budget, and teardown_method
+# unblocks the agent thread so it fails fast rather than hanging.
+_NOTIFY_WAIT_S = 10.0
+
+
+def _notify_recorder(expected: int = 1):
+    """Return ``(received, seen, cb)`` for a gateway notify callback.
+
+    ``seen`` is set once *expected* notifications have landed, so the main
+    thread can wait on an event the producer signals instead of sleep-polling
+    a list.
+    """
+    received: list = []
+    seen = threading.Event()
+
+    def cb(data):
+        received.append(data)
+        if len(received) >= expected:
+            seen.set()
+
+    return received, seen, cb
+
+
 # ------------------------------------------------------------------
 # Blocking gateway approval infrastructure (tools/approval.py)
 # ------------------------------------------------------------------
@@ -445,6 +473,28 @@ class TestBlockingApprovalE2E:
             mod.unregister_gateway_notify(key)
         _clear_approval_state()
 
+    @pytest.fixture(autouse=True)
+    def _manual_approval_mode(self, monkeypatch):
+        """Pin ``approvals.mode`` to manual for the whole class.
+
+        The shipped default is ``mode: smart`` (``hermes_cli/config.py``), so
+        ``check_all_command_guards`` runs Phase 2.5 (``_smart_approve``, which
+        calls the auxiliary LLM) *before* it reaches the gateway notify
+        callback. With no provider configured (CI, any keyless checkout) that call
+        does not fail fast: the aux client tries openrouter, nous, local/custom
+        and api-key in turn, taking 0.6-0.9s on an idle machine and 2.8s with
+        the machine oversubscribed 4x, then gives up and escalates to exactly
+        the manual prompt these tests are about. That put the notify callback
+        on the wrong side of the 2.5s wait budget under CI contention.
+
+        Smart approval is covered by its own tests. Pinning the mode keeps
+        these tests on the path they describe, and removes a second hazard: an
+        aux provider that *is* reachable can answer APPROVE, in which case the
+        guard returns early and the notification never fires at all.
+        """
+        from tools import approval as mod
+        monkeypatch.setattr(mod, "_get_approval_mode", lambda: "manual")
+
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
         from tools.approval import (
@@ -453,9 +503,9 @@ class TestBlockingApprovalE2E:
         )
 
         session_key = "e2e-test"
-        notified = []
+        notified, notify_seen, notify_cb = _notify_recorder()
 
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        register_gateway_notify(session_key, notify_cb)
 
         result_holder = [None]
 
@@ -479,11 +529,9 @@ class TestBlockingApprovalE2E:
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
 
-        for _ in range(50):
-            if notified:
-                break
-            time.sleep(0.05)
-
+        assert notify_seen.wait(_NOTIFY_WAIT_S), (
+            "agent thread never reached the gateway notify callback"
+        )
         assert len(notified) == 1
         assert "rm -rf /important" in notified[0]["command"]
 
@@ -502,8 +550,8 @@ class TestBlockingApprovalE2E:
         )
 
         session_key = "e2e-deny"
-        notified = []
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        notified, notify_seen, notify_cb = _notify_recorder()
+        register_gateway_notify(session_key, notify_cb)
 
         result_holder = [None]
 
@@ -526,10 +574,10 @@ class TestBlockingApprovalE2E:
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        for _ in range(50):
-            if notified:
-                break
-            time.sleep(0.05)
+        assert notify_seen.wait(_NOTIFY_WAIT_S), (
+            "agent thread never reached the gateway notify callback"
+        )
+        assert len(notified) == 1
 
         resolve_gateway_approval(session_key, "deny")
         t.join(timeout=5)
@@ -586,8 +634,8 @@ class TestBlockingApprovalE2E:
         )
 
         session_key = "e2e-parallel"
-        notified = []
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        notified, all_notified, notify_cb = _notify_recorder(expected=3)
+        register_gateway_notify(session_key, notify_cb)
 
         results = [None, None, None]
 
@@ -616,12 +664,12 @@ class TestBlockingApprovalE2E:
         for t in threads:
             t.start()
 
-        # Wait for all 3 to block
-        for _ in range(100):
-            if len(notified) >= 3:
-                break
-            time.sleep(0.05)
-
+        # Wait for all 3 to block. The queue entry is appended before the
+        # notify callback fires (_await_gateway_decision), so the third
+        # notification implies all three entries are queued.
+        assert all_notified.wait(_NOTIFY_WAIT_S), (
+            f"only {len(notified)} of 3 agent threads reached the notify callback"
+        )
         assert len(notified) == 3
         assert len(_gateway_queues.get(session_key, [])) == 3
 
@@ -644,7 +692,8 @@ class TestBlockingApprovalE2E:
         )
 
         session_key = "e2e-mixed"
-        register_gateway_notify(session_key, lambda d: None)
+        _notified, both_notified, notify_cb = _notify_recorder(expected=2)
+        register_gateway_notify(session_key, notify_cb)
 
         results = [None, None]
 
@@ -673,14 +722,16 @@ class TestBlockingApprovalE2E:
             t.start()
 
         # Wait for both threads to register pending approvals instead of
-        # relying on a fixed sleep.  The approval module stores entries in
-        # _gateway_queues[session_key] — poll until we see 2 entries.
+        # relying on a fixed sleep.  _await_gateway_decision appends the queue
+        # entry before it calls the notify callback, so waiting for the second
+        # notification is a strictly stronger signal than polling
+        # _gateway_queues[session_key] for 2 entries, and it is an event the
+        # producer sets rather than a poll.
         from tools.approval import _gateway_queues
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if len(_gateway_queues.get(session_key, [])) >= 2:
-                break
-            time.sleep(0.05)
+        assert both_notified.wait(_NOTIFY_WAIT_S), (
+            "both agent threads did not reach the notify callback"
+        )
+        assert len(_gateway_queues.get(session_key, [])) == 2
 
         # Approve first, deny second
         resolve_gateway_approval(session_key, "once")   # oldest
