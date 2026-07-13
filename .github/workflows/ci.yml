@@ -13,7 +13,20 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      # Fork-local: our PRs target upstream, so `pull_request` never fires on
+      # this fork and pushes to feature branches matched no event at all. Run
+      # CI on pushes to the branch prefixes we actually work in. Allowlisted
+      # rather than unfiltered so the throwaway `worktree-agent-*`,
+      # `restore-lost-hunks-*` and `backup/**` refs don't each fire the suite.
+      - 'ci/**'
+      - 'chore/**'
+      - 'feat/**'
+      - 'fix/**'
+      - 'fork/**'
+      - 'proposal/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
