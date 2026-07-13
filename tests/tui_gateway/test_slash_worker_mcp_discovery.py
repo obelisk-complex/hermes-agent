@@ -16,6 +16,21 @@ import yaml
 
 pytest.importorskip("mcp.server.fastmcp")
 
+# Budget for the worker's FIRST reply. This is not a warm round-trip: before it
+# can emit a byte the worker cold-boots a fresh interpreter, imports the whole
+# ``cli`` stack, spawns a SECOND interpreter for the FastMCP probe server and
+# completes the stdio handshake, builds a HermesCLI, then renders /tools.
+# Measured cost of that sequence: ~1.3s on an idle 16-core box, ~5.2s at 6x CPU
+# oversubscription, and ~9-10s on a CI runner already running 8 test workers --
+# which is why a 10s budget sat exactly on the cliff edge and tipped over
+# whenever the runner was busy (the reply simply had not been written yet).
+#
+# ``Queue.get`` returns the instant the reply lands, so a generous ceiling costs
+# nothing when the worker is healthy; it only bounds how long a genuinely broken
+# worker takes to be reported. Sizing it for the slowest plausible CI runner
+# rather than the fastest developer laptop is therefore free.
+RESPONSE_TIMEOUT_S = float(os.environ.get("HERMES_TEST_SLASH_WORKER_TIMEOUT_S", "60"))
+
 
 def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     profile_home = tmp_path / "profile-home"
@@ -82,19 +97,50 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     try:
         assert proc.stdin is not None
         assert proc.stdout is not None
+        assert proc.stderr is not None
         stdout = proc.stdout
         threading.Thread(
             target=lambda: output.put(stdout.readline()),
             daemon=True,
         ).start()
+
+        # Drain stderr continuously. Leaving a PIPE unread is a deadlock waiting
+        # to happen: once the worker writes more than the pipe buffer (64 KiB on
+        # Linux) it blocks in write() forever and we would sit here until the
+        # timeout with no idea why -- the same symptom as a slow boot, but
+        # unfixable by waiting. Draining also means a failing worker's traceback
+        # actually reaches the report instead of dying with the pipe.
+        stderr_lines: list[str] = []
+        stderr_pipe = proc.stderr
+        threading.Thread(
+            target=lambda: stderr_lines.extend(stderr_pipe),
+            daemon=True,
+        ).start()
+
+        def _worker_stderr() -> str:
+            captured = "".join(stderr_lines).strip()
+            return f"\n--- worker stderr ---\n{captured}" if captured else ""
+
         proc.stdin.write(json.dumps({"id": 1, "command": "/tools"}) + "\n")
         proc.stdin.flush()
         try:
-            line = output.get(timeout=10)
+            line = output.get(timeout=RESPONSE_TIMEOUT_S)
         except queue.Empty:
-            pytest.fail("slash worker produced no /tools response within 10 seconds")
+            pytest.fail(
+                f"slash worker produced no /tools response within "
+                f"{RESPONSE_TIMEOUT_S:g}s (still running: {proc.poll() is None})"
+                f"{_worker_stderr()}"
+            )
+        # An empty line means readline() hit EOF: the worker exited rather than
+        # replying. Say so, instead of letting json.loads("") raise an opaque
+        # JSONDecodeError that hides the real cause.
+        if not line:
+            pytest.fail(
+                f"slash worker exited before replying to /tools "
+                f"(returncode={proc.poll()}){_worker_stderr()}"
+            )
         response = json.loads(line)
-        assert response["ok"] is True
+        assert response["ok"] is True, f"worker returned an error: {response}"
         assert "mcp__profileprobe__hermes_61922_profile_probe" in response["output"]
     finally:
         proc.terminate()
