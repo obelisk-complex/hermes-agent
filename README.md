@@ -24,6 +24,10 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 
 `SOUL.example.md` at the repo root is a self-contained, generic personality template combining a Senior SWE communication style and engineering discipline with the self-checking harness. Drop it into `~/.hermes/SOUL.md` to adopt the full personality, or use it as a base for your own. The template is provider- and agent-agnostic (no Hermes-specific references) so it works with any AI coding assistant.
 
+### Kanban quality-gate integration
+
+The self-check system extends into the kanban workflow via the `quality-gate` plugin (`plugins/quality-gate/`). When a subagent returns `NEEDS_WORK` or `BLOCKED`, the kanban hooks (`tools/kanban_tools.py`, `hermes_cli/kanban_db.py`) mechanically block task completion -- a kanban task with an open gate cannot be marked done until the failure is fixed or explicitly accepted. The integration also tracks judge-parse failures and surfaces blocked status through the kanban CLI.
+
 ### Private-by-default image generation
 
 Separate from the self-check system above, and unrelated to the `on_output` hook. Image generation (`tools/image_generation_tool.py`) is hardened on two fronts:
