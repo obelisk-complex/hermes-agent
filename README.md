@@ -17,8 +17,12 @@ This fork adds a **self-check enforcement system**: it stops the agent reporting
 
 ### How to get it
 
-- **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
+- **Use this fork directly:** the enforcer plugin and harness skill are bundled and on by default. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/` or from `SOUL.example.md` at the repo root, then restart Hermes.
 - **Add it to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
+
+### SOUL.example.md -- Senior SWE personality template
+
+`SOUL.example.md` at the repo root is a self-contained, generic personality template combining a Senior SWE communication style and engineering discipline with the self-checking harness. Drop it into `~/.hermes/SOUL.md` to adopt the full personality, or use it as a base for your own. The template is provider- and agent-agnostic (no Hermes-specific references) so it works with any AI coding assistant.
 
 ### Private-by-default image generation
 
