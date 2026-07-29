@@ -6947,6 +6947,7 @@ def run_conversation(
                         if _decision == "escalate":
                             final_response = _esc_msg
                             agent._on_output_blocks = 0
+                            _final_validated = True
                         else:
                             continue  # Retry: continue outer while loop
                     else:
