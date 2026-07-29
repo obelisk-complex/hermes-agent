@@ -1797,8 +1797,6 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             elif _fb_is_azure:
                 # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
                 # support the Responses API. Stay on chat_completions.
-                # Azure OpenAI serves gpt-5.x on /chat/completions - does NOT
-                # support the Responses API. Stay on chat_completions.
                 fb_api_mode = "chat_completions"
             elif agent._is_direct_openai_url(fb_base_url):
                 fb_api_mode = "codex_responses"

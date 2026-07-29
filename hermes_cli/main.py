@@ -11652,7 +11652,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
         "for m in mods:\n"
         "    try: importlib.import_module(m)\n"
         "    except Exception as e: missing.append(f'{m}: {e}')\n"
-        "print('\\\\n'.join(missing))\n"
+        "print('\\n'.join(missing))\n"
     )
     try:
         result = subprocess.run(
@@ -12585,8 +12585,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 )
             _resume_windows_gateways_after_update(_windows_gateway_resume)
             return
-
-        pre_update_snapshot_id = None
 
         print(f"→ Found {commit_count} new commit(s)")
 
