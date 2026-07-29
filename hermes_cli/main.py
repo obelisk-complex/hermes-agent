@@ -12473,7 +12473,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
             check=True,
         )
         commit_count = int(result.stdout.strip())
-        _rebase_sync_done = False
 
         if commit_count == 0:
             _invalidate_update_cache()
