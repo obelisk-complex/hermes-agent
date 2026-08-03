@@ -473,6 +473,20 @@ def _run_agent(
         # gateway sessions.
         _fb = get_fallback_chain(cfg)
 
+        # Merge skills.always from config — same as cli.py main().
+        always_skills = cfg.get("skills", {}).get("always", [])
+        skills_prompt: Optional[str] = None
+        if always_skills:
+            try:
+                from agent.skill_commands import build_preloaded_skills_prompt
+                sp, _loaded, _missing = build_preloaded_skills_prompt(
+                    list(dict.fromkeys(always_skills)),
+                )
+                if sp:
+                    skills_prompt = sp
+            except Exception:
+                pass
+
         agent = AIAgent(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
