@@ -1,0 +1,328 @@
+---
+name: self-checking-harness
+description: "5-gate validation protocol for subagents: Evidence → Confidence → Contradictions → Alternatives → Threshold enforcement. Every delegate_task subagent must complete these gates before returning."
+category: software-development
+---
+
+# Self-Checking Harness — 5-Gate Validation Protocol
+
+<<<<<<<
+=======
+## Development Ethos (single source of truth)
+
+This skill is the canonical statement of how code gets built here. The 5-gate
+protocol below is the *enforcement*; the principles in this section are what it
+serves. The other skills (`simplify-code`, the Superpowers software-development
+bundle) are detailed expansions of individual principles; this section is the
+index, so there is one place to update and deploy from, not several that drift.
+
+- **Less code wins.** The best change removes lines. Prefer reuse over
+  re-implementation; delete before you add. Risk-tiered application lives in
+  `simplify-code` (`../simplify-code/SKILL.md`).
+- **Chesterton's Fence.** Before removing or "fixing" anything that looks dead,
+  establish why it exists (`git log -S '<symbol>'`, `git blame`, read the
+  introducing commit). Code that looks redundant is a hypothesis, not a
+  conclusion; reactivating retired behaviour is a behaviour change, not a cleanup.
+- **No AI slop.** No comments restating the obvious code, no defensive
+  null-checks on already-validated input, no `as any` or other type-system
+  escapes, no patterns inconsistent with the surrounding file. The anti-slop
+  catalogue is `optional-skills/creative/creative-ideation/references/anti-slop.md`.
+- **Fail loud, not silent.** A swallowed exception, a silent `return False`, a
+  dropped record, an empty `except: pass` is a latent incident. Make it
+  observable (log at warning or above, or emit a metric) and flag it in review.
+- **Plan, then audit the plan, then build.** For any non-trivial behaviour
+  change, write the plan (end state, steps, rollback, success criteria), have it
+  adversarially audited (plan-soundness plus blind-spot), and loop until it
+  passes before touching code.
+- **Loop til clean.** Mechanical linters first (auto-fix), then the QA/audit
+  fleet, fixing findings until lint is green, tests are green, and every agent
+  returns a clean verdict; stop on a stall rather than spin.
+- **Name behaviour changes.** Enabling or disabling a control, changing a
+  default, tightening validation, activating a flag, removing a branch: call it
+  out as a behaviour change, keep a regression test for the prior behaviour, and
+  verify the new one. Config is the runtime source of truth, not the repo.
+- **Voice.** en-GB spelling everywhere; no em-dashes or en-dashes in user-facing
+  materials (use commas, colons, parentheses, or "8 to 12" for ranges). Code,
+  identifiers, and verbatim data are exempt.
+
+>>>>>>>
+## When to Use
+
+Every subagent invoked via `delegate_task` MUST complete these 5 gates before returning. This is mechanically enforced by the self-check-enforcer plugin which blocks ALL CLEAR claims when gates are violated.
+
+## Core Protocol (5 Gates)
+
+| Gate | What it requires | Confidence score |
+|------|-----------------|-----------------|
+| **Gate 1 — Evidence** | Show specific files read/written, test output, command results, source URLs. Cite exact line numbers, exit codes, or diff fragments. | — |
+| **Gate 2 — Confidence Score** | Assign 0.0–1.0. 1.0 = verified by execution. 0.8 = cross-referenced sources. 0.6 = single authoritative source. 0.4 = plausible but unverified background knowledge. | Required |
+| **Gate 3 — Contradiction Check** | List any evidence that contradicts or qualifies the conclusion. "None found" is valid. | — |
+| **Gate 4 — Alternative Explanation** | What else could explain the evidence? Why was it rejected? | — |
+| **Gate 5 — Confidence Threshold** | If score < 0.7, specify what evidence would raise it. Escalate if cannot reach 0.7. | ≥ 0.7 |
+
+## Return Format
+
+Every subagent MUST return its result in this JSON structure:
+
+```json
+{
+  "verdict": "READY | NEEDS_WORK | BLOCKED",
+  "result": "...",
+  "evidence": ["file:line" or "url" or "command:output"],
+  "confidence": 0.0-1.0,
+  "contradictions": "... or None found",
+  "alternatives_considered": "...",
+  "escalation_reason": null or "..."
+}
+```
+
+**Verdict (v3.7.0):** `READY` = all gates pass and all acceptance scenarios ran and passed; `NEEDS_WORK` = any verification or test failed (a re-runnable FAIL); `BLOCKED` = the work physically requires a human (set `escalation_reason`). A child reporting `BLOCKED` / a non-null `escalation_reason` mechanically opens an **escalation gate** even with no FAIL token — the parent must surface it, not silently accept it.
+
+## FIRST STEP
+
+Every subagent MUST call `skill_view(name='self-checking-harness')` as its first action before using any write_file, terminal, patch, delegate_task, or send_message tools.
+
+## Key Rules
+
+- **Delegate-task decomposition:** Tasks >5 lines code, multi-step reasoning, config changes, network effects MUST use subagent with gates
+- **Re-verification after fixes:** The subagent that found bugs is NOT the one that verifies the fix — use a different agent
+- **Set-of-possible-values discipline:** Every literal value in generated code/config must belong to an explicit, bounded set
+- **Confidence thresholding:** Never forward subagent output with confidence < 0.7
+- **No self-talk in output:** Never describe process/methodology/reasoning in the final output
+- **Pre-flight planning:** Scan source diversity, flag narratives, identify contradictions, pin claims needing validation
+- **Source provenance:** Every cited story must have ownership tag on first mention
+- **Content review vs code review:** Self-check is for CODE tasks. Content tasks need a SEPARATE reviewer subagent
+- **Source every factual claim:** Prices, stats, dates, entities must have linked URLs
+- **No fabrication:** Unverifiable entities must not be asserted
+- **Explicit retraction:** When wrong, state the correction and whether it was fabrication, estimate, or reasoning error
+- **Strict plan↔artifact matching (v3.7.0):** For every action you claim to have completed, verify the artifact exists and matches — "create file X" → X exists with that content; "ran the tests" → show the command + exit code. A *done* claim with no artifact is a CRITICAL finding: return FAIL, never assert it.
+- **Run acceptance scenarios (v3.7.0):** If the task carries acceptance scenarios / a Testing Strategy, RUN each and report its command + exit code (or observed result). A scenario you did not run is unverified — FAIL it rather than claim success.
+- **Verdict (v3.7.0):** Return READY only when every gate passes and every acceptance scenario ran and passed; NEEDS_WORK if any failed; BLOCKED (+ escalation_reason) if a human is required.
+
+## v3.7.0 Verification-Protocol Features
+
+These extend the 5-gate protocol with stronger verification discipline (bottega-inspired).
+
+### Verdict: READY / NEEDS_WORK / BLOCKED
+
+Every subagent returns a `verdict` alongside its result:
+- **READY** — all gates pass, all acceptance scenarios ran and passed; work verified.
+- **NEEDS_WORK** — any verification or test failed (a re-runnable FAIL; parent re-dispatches with `verifies_task` or acknowledges).
+- **BLOCKED** — the work physically requires a human (missing credential, external outage, ambiguous requirement); the child sets `escalation_reason`.
+
+Mechanically, `on_subagent_stop` opens an **escalation gate** when a *completed* child reports `verdict: BLOCKED` or a non-null `escalation_reason` — even with no FAIL token. The violation is labelled `BLOCKED (escalate to a human)` so the parent surfaces the blocker rather than silently accepting it. The conversation-loop's 5-block exhaustion is likewise an explicit BLOCKED/escalation exit, not a soft "could not complete" warning.
+
+### Strict plan↔artifact matching
+
+For every action a subagent claims to have completed, the verifier matches it to its artifact: "create file X" → X must exist with that content; "ran the tests" → show the command + exit code. **A claim of done with no artifact is a CRITICAL finding — treat it as FAIL.** As an advisory mechanical aid, `on_output` flags claimed file creations/writes (``created `path` ``, ``wrote `path` ``) whose target is absent on disk, surfaced via the same channel as citation warnings. Content matching stays the verifier agent's job — the plugin cannot know expected content.
+
+### Acceptance scenarios in the task contract
+
+The delegate-task template carries an **ACCEPTANCE SCENARIOS** block — explicit, runnable scenarios the work must satisfy. `delegate_tool.py` injects a mandatory instruction that the child must RUN each scenario and report its command + exit code (or observed result) before claiming completion; a scenario it did not run is an unverified claim and must be FAILed.
+
+### Structured (enumerated) gate feedback
+
+Violation detail is an enumerated per-id checklist of the specific failed checks (`[id] — N failed check(s):` then `  ✗ ...` per item), so a retry targets exactly what failed rather than an opaque blob.
+
+## Enforcement Features
+
+The `self-check-enforcer` plugin provides the following enforcement mechanisms. It is now a **bundled plugin in the fork repo** (`plugins/self-check-enforcer/`), on by default — it is no longer hand-installed under `~/.hermes/plugins/`. See `references/gate-enforcement-plugin.md` for the current hook map, feature list, and version history (through v3.7.1).
+
+### GitHub Actions Daily Auto-Sync (sole sync mechanism)
+
+The fork at `obelisk-complex/hermes-agent` includes `.github/workflows/sync-upstream.yml` — a scheduled workflow that runs daily at 0400 Pacific (11:00 UTC). It fetches upstream/main from NousResearch/hermes-agent, rebases custom commits onto upstream/main, and force-pushes to origin/main with lease. Silent when up-to-date. Also triggerable manually from the Actions tab. Runs on GitHub infrastructure — no local machine needed.
+
+**Local `hermes update` only pulls from `origin`** — it never fetches upstream, rebases, or force-pushes. This prevents accidental pushes to unintended repos from local machines. The remote fork stays synced entirely via the GH Actions workflow.
+
+### CI Tests as Persistence Check
+
+The old Layer 4 (patch files + apply script) used binary "did the patch apply?" checks. The new model runs the full `pytest` suite (~193 tests) on every push and after every `Sync Upstream` run; v3.7.1 hardened the pre-push gate to four guard suites and pinned `actions/checkout` to a SHA. If a rebase breaks our custom changes, a failing test catches it immediately. See design note 22 in the v15 spec for details.
+
+### verifies_task auto-clear
+
+When re-dispatching a failed subagent, include `verifies_task=<original_child_session_id>` in the delegate_task context:
+
+```
+CONTEXT: verifies_task=child-abc123
+```
+
+The NO-OP guard in delegate_tool.py injects a mandatory instruction for the subagent to echo `VERIFIES_TASK: <id>` in its summary. If the re-run returns `child_status="completed"` (set by the runtime, not forgeable by the agent), the matching violation is auto-cleared. This is the **mechanical clear path** — no prose documentation needed. Still falls through to FAIL scanning on the re-run's summary, so new failures are still caught.
+
+Works in **batch mode** too: each subagent independently echoes its own marker, so the correct child's violation is cleared regardless of dispatch order.
+
+### Allowlist token — [GATE:ACCEPTING:\<child_session_id\>]
+
+If you cannot re-dispatch but want to acknowledge a failure and move on, include `[GATE:ACCEPTING:<child_session_id>]` in your response for each open violation. Every open violation must have a matching token or the ALL CLEAR block still fires. This replaces the old "explicitly list each FAIL" requirement with a parseable token.
+
+Example:
+```
+[GATE:ACCEPTING:child-abc] The config validation failed because the endpoint was unreachable — acceptable for this deployment.
+```
+
+### Citation verification
+
+File:line references (e.g. `conversation_loop.py:450`) in agent output are checked against the filesystem. Unverifiable citations produce a warning injected via pre_llm_call on the next turn. If an ALL CLEAR block is also triggered, citation issues are included in the block message body. Use proper relative paths (`agent/conversation_loop.py:450`, not bare `conversation_loop.py:450`) for best resolution.
+
+### post_tool_call read-only tool exemption
+
+`read_file`, `search_files`, `session_search`, `memory`, `web_extract`, `patch`, and `skill_view` are exempted from FAIL scanning in `post_tool_call`. These tools return content verbatim (file contents, search results, session history, memory store, web page text, diff output, skill documents) -- "FAIL" in their output is descriptive text from the source being edited or read, not a tool-operation failure.
+
+(Provenance: `patch` was added to the list in v3.5.2 because editing files that describe the NO-OP rejection guard produces diff output containing the word "FAIL"; `skill_view` was added in v3.5.3 because skill documents may contain "FAIL" as descriptive text. Same class of false positive as `read_file` -- the tool returns content that happens to contain the word "FAIL".)
+
+The primary detection chain (`on_subagent_stop` → `on_output` → `pre_tool_call`) is untouched by this exemption. Threat model reviewed: no escape routes created because the exemption only removes noise from tools where "FAIL" is always descriptive text, never a tool-operation failure.
+
+### on_output retry, revalidation, and BLOCKED escalation (current — v3.6.0 / v3.7.0 / v3.7.1)
+
+The `on_output` hook fires in two places in `agent/conversation_loop.py`, and the conversation-loop wiring is the current authority — see `references/on-output-hook-implementation.md`.
+
+**In-loop (after final text with no tool calls).** A block appends the rejection message, increments the per-turn counter `agent._on_output_blocks`, and sets `_blocked`; after the `for _ores` loop, `if _blocked` defers the decision to an importable pure helper, `agent/_on_output_gate.py::decide_after_block(block_count)`:
+- `"retry"` → `continue` targets the outer conversation `while` loop, a real LLM retry with the rejection in history.
+- `"escalate"` (the **5th** block, `> ON_OUTPUT_BLOCK_LIMIT == 4`) → replaces `final_response` with an explicit **BLOCKED escalation-to-a-human** message (the task is NOT silently marked done) and resets the counter.
+
+If no block, the allow path sets `_final_validated = True`. Both `_blocked` and `_final_validated` reset at the top of **every loop iteration** (not just per turn); a per-turn-only reset was the v3.6.0 gate-clearing bug where a compliant retry could never break and the turn burned to budget.
+
+**Post-loop (budget-exhaustion / non-standard exit).** Guarded by `not _final_validated` — True only when the in-loop hook ALLOWED the exact response being returned this turn — so a normal validated completion skips this second invocation, while a budget-exhaustion exit (which leaves the last, unvalidated model text) is re-checked here; a block replaces `final_response` with no retry.
+
+The `_final_validated` flag (set only on the allow path) **replaced the old sticky `agent._on_output_fired` flag in v3.6.0**: the sticky flag was set unconditionally, so it skipped revalidation on budget-exhaustion exits and let a leaking all-clear slip through. The 5-block exit became an explicit BLOCKED escalation in v3.7.0, and the decision was extracted to `agent/_on_output_gate.py` in v3.7.1 so it is unit-tested directly.
+
+### Detection-first FAIL scanning (no "fixed" masking — current, v3.6.0)
+
+`subagent_stop` scans the child summary with the full `\bFAIL\b` (`_FAIL_PATTERN`): a bare FAIL opens the gate even alongside a `READY` claim — a false positive is cheaply clearable with `[GATE:ACCEPTING:<id>]`, while a false negative would be a silent bypass. The earlier `\bFAIL\b(?!.*(?i:\bfixed\b))` negative-lookahead was **removed in v3.6.0** because it was itself a bypass: "FAIL: x — will be fixed" is an *unresolved* failure that slipped through. `_FAIL_PATTERN_SHORT` (used at `post_tool_call` / `transform_tool_result`) keeps the conjugation and adjacent-punctuation exclusions; see **Plugin Development Pitfalls → Split FAIL patterns per detection site** below.
+
+## Plugin Development Pitfalls (from the self-check-enforcer implementation)
+
+These gotchas apply to any Hermes plugin, not just the enforcement system:
+
+### Hook registration name mismatch
+
+The name in `ctx.register_hook("name", handler)` must match the hook name in `hermes_cli/plugins.py::VALID_HOOKS` **exactly**. The `on_` prefix is not universal — for example, `"post_llm_call"` is in VALID_HOOKS, but `"on_post_llm_call"` is not. A mismatched name logs a warning silently and the handler never fires. Always verify hook names against the source before writing registration code:
+
+```bash
+grep -E '"(pre_|post_|on_|transform_|subagent_)' /path/to/hermes_cli/plugins.py
+```
+
+### grep-pin source references, don't hardcode line numbers
+
+Line numbers in docstrings or comments drift with upstream changes. Instead of:
+
+```python
+# Line 2306
+```
+
+Use a machine-confirmable reference:
+
+```python
+# Confirmed via: grep -n '"subagent_stop"' tools/delegate_tool.py
+```
+
+A future session can re-run the grep to find the actual line without manual archaeology.
+
+### Batch-mode single-slot state breaks correlation
+
+A single `pending_verifies` mapping in session state (set in `pre_tool_call`, consumed in `subagent_stop`) fails in batch mode: the first child to return `completed` consumes the slot, regardless of which task carried the correlation ID. Use **echo-based correlation** instead — have each subagent mechanically echo its correlation ID in its summary via a mandatory instruction injected at the tool-handler level. See `self-check-enforcement-system-v15.md` in the repo root for the full implementation (the NO-OP guard in delegate_tool.py injects the echo instruction below the parent's reach).
+
+**Trust boundary for echo-based correlation:** the echo is trusted because the id is a capability — the subagent can only echo an id it was given in its context. If ids ever become guessable or visible across children, this assumption breaks. Always document this trust boundary explicitly in the code comment.
+
+### Module-level imports for plugin handlers
+
+Import at module scope, not in handler bodies. An `import time` inside `on_subagent_stop` or `on_output` works (it's cached in `sys.modules` after the first call) but is misleading — it suggests the import is conditional. Put all imports at the top of the file. Same applies to any plugin code: module-scope imports are the norm; inline imports are the exception and need a comment explaining why.
+
+### Detection regex alternatives cause false positives, zero recall gain
+
+When building a violation-detection regex, every alternative branch that is NOT the core signal (`\bFAIL\b`) is a false-positive vector with near-zero additional recall. In the self-check enforcer, `\bFAIL\b` was supplemented with `\bconfidence<0.5`, `\bescalation_reason\b`, and `\bgate.*fail|violation` — but every real violation path (NO-OP guard, child status fallback text, plugin block messages) already produces `\bFAIL\b`. The extra alternatives matched descriptive analysis text ("confidence was 0.35 for audio segment 3") with no real detection benefit.
+
+**Rule of thumb for detection patterns:** list every real path that produces the signal, and verify that each path independently produces the core token. If the core token is present in every case, drop all alternatives. A regex with 4 alternatives is 4x harder to audit and creates 4x the false-positive surface for zero recall gain.
+
+**Verification protocol before adding a new pattern alternative:**
+1. List every real code path that should trigger detection
+2. Check whether each path already produces the core signal (`FAIL`, `ERROR`, etc.)
+3. If yes -> don't add the alternative. The already-caught case adds only noise.
+4. If no -> the alternative needs a test proving it catches something `\bFAIL\b` doesn't
+
+This applies broadly: content filters, gate detectors, blocklist matchers, and any regex whose job is to find a specific signal in noisy text.
+
+### Negative lookahead for false-positive patterns (HISTORICAL — this exclusion was removed in v3.6.0)
+
+> **Superseded.** This documents a v3.4-era technique and the reason it was **removed in v3.6.0**. It is retained as a cautionary lesson, not as current behaviour. The current `_FAIL_PATTERN` is the plain `re.compile(r"\bFAIL\b")` — there is no `fixed` exclusion.
+
+When a common descriptive pattern causes false positives, a **negative lookahead** scoped to the exclusion can be preferable to broadening the match set. v3.4 applied this to "FAIL #1 - FIXED" section headers, where every FAIL was followed by FIXED describing a remediated issue:
+
+```python
+# v3.4 only — REMOVED in v3.6.0 (it was a bypass)
+_FAIL_PATTERN = re.compile(r"\bFAIL\b(?!.*(?i:\bfixed\b))")
+```
+
+**Why it was removed:** the exclusion let an *unresolved* failure slip the gate — "FAIL: auth bypass — will be fixed later" contains "fixed", so the lookahead suppressed the match and the gate never opened. Detection-first (a bare FAIL gates; clear a genuine false positive with `[GATE:ACCEPTING:<id>]`) is strictly safer than a content-sensitive exclusion that an unresolved-but-"will be fixed" summary can defeat. The general lesson still holds for *truly* descriptive noise, but FAIL-on-a-completion-summary is signal, not noise.
+
+### Split FAIL patterns per detection site (current — full at `subagent_stop`, SHORT elsewhere)
+
+`_FAIL_PATTERN` is the full `\bFAIL\b`; `_FAIL_PATTERN_SHORT` adds conjugation + adjacent-punctuation exclusions. Each detection site uses the appropriate pattern:
+
+| Site | Pattern | Reason |
+|------|---------|--------|
+| `subagent_stop` | `_FAIL_PATTERN` (full `\bFAIL\b`) | Subagents emit structured `FAIL:` markers -- the standalone word is the correct signal; detection-first (no "fixed" masking) |
+| `post_tool_call` | `_FAIL_PATTERN_SHORT` (tight) | Natural language tool output contains conjugated forms like "failed", "failing" |
+| `transform_tool_result` | `_FAIL_PATTERN_SHORT` (tight) | Annotates delegate_task results in agent-facing text |
+
+The tight `_FAIL_PATTERN_SHORT` excludes these forms after `FAIL`: `ED`, `ed`, `ING`, `ing`, `URE`, `ure`, `OVER`, `over`, `S`, `s`, `TO`, `to` — and adjacent punctuation (`"` `'` `)` `]` `}`) to prevent false positives from source-code scanning (grep returning literal `"FAIL"` strings). (v3.6.0 rebuilt this pattern: it dropped a dead conjugation lookahead and a `[\s]` typo while keeping the punctuation exclusion.)
+
+### Violation detail shows child session ID
+
+Each violation now prefixes its detail with the key (`[child_session_id]` or `[tool:tool_name]`), so the agent can read which ID to use for `[GATE:ACCEPTING:<id>]`. The `pre_llm_call` reminder already said "the child_session_id is shown in the violation detail below" -- now it actually is.
+
+Both subagent failure paths include the key:
+- **Status-failure path** (child exited with error/timeout/interrupted): `[{key}]\n[STATUS=...] Child exited with failure status`
+- **FAIL-pattern path** (summary contains FAIL tokens): `[{key}]\nFAIL - ...`
+
+This replaces blind guessing of UUIDs with a visible label per violation.
+
+## Subagent Task Context Template
+
+Every `delegate_task` call MUST include:
+
+```
+GOAL: [what to accomplish]
+
+CONTEXT:
+[task-specific context]
+If re-dispatching a failed subagent, include: verifies_task=<original_child_session_id>
+
+FIRST STEP: skill_view(name='self-checking-harness')
+
+ACCEPTANCE SCENARIOS (run each; report command + exit code before claiming done):
+- [scenario 1 — e.g. `pytest tests/foo.py` exits 0]
+- [scenario 2 — ...]
+
+=== VALIDATION GATES (MANDATORY) ===
+1. Evidence — cite specific files read/written, command output, line numbers
+2. Confidence Score — assign 0.0–1.0 (< 0.7 = escalate)
+3. Contradiction Check — any evidence that contradicts conclusion
+4. Alternative Explanation — what else could explain the evidence?
+5. Confidence Threshold — ≥ 0.7 or escalate
+6. Verdict — READY only if every acceptance scenario ran and passed; NEEDS_WORK if any verification/test failed; BLOCKED (+ escalation_reason) if a human is required
+
+RETURN: JSON including "verdict": READY|NEEDS_WORK|BLOCKED (see Return Format above).
+Strict matching: every "done" item must map to a real artifact (file exists / command+exit shown) or it is a FAIL.
+
+TOOLSETS: [terminal, file, web, ...]
+```
+
+## Related Skills
+
+- `verification-before-completion` — parent umbrella: the Iron Law gate protocol that this 5-gate protocol automates for subagent delegation tasks. The `self-check-enforcer` plugin (documented in this skill's `references/gate-enforcement-plugin.md`) mechanically enforces the gates. That reference covers the current (v3.7.1) hook map and features: split FAIL patterns, READY/NEEDS_WORK/BLOCKED verdict + BLOCKED escalation, `_final_validated` revalidation, done-claim bypass closure, and clearance tokens.
+- `engineering-principles` — cross-fleet verification principles and audit patterns that complement the 5-gate protocol.
+<<<<<<<
+=======
+- `simplify-code`: the parallel 3-reviewer cleanup pass (reuse, quality, efficiency) that operationalises the "less code" and "no AI slop" principles from the Development Ethos above, with risk-tiered SAFE / CAREFUL / RISKY application.
+>>>>>>>
+
+## Reference Files
+
+See `references/` directory for supporting documentation. Key files:
+- `references/gate-enforcement-plugin.md` — full plugin architecture, current (v3.7.1) hook map, feature list, and version history
+- `references/on-output-hook-implementation.md` — on_output hook code (v3.7.1): registration, wiring in `agent/conversation_loop.py`, the `_final_validated` revalidation guard, and the 5-block BLOCKED escalation via `agent/_on_output_gate.py`
+- `references/plugin-enforcement.md` — plugin structure, installation, comparison to Claude Code hooks
+
+**Layer 4 (patch persistence system) was removed in v3.5.** The 4 `.patch` files, apply script, verify script, session-start trigger, and daily cron job are all gone. All changes are committed history on `obelisk-complex/hermes-agent`. The GitHub Actions daily sync at 04:00 Pacific is the **sole** mechanism that rebases custom commits onto upstream and pushes them; local `hermes update` only pulls from `origin` (v3.5.1 removed local auto-rebase). The old `references/patch-persistence.md` reference has been removed.
+
+**External reference:** `self-check-enforcement-system-v15.md` (in the fork repo root) -- the complete **v3.7.1** specification covering all 3 layers, detection flow, bypass table, design notes, changelog, and the GitHub Actions daily sync workflow. As of v3.7.1 it links the tracked plugin (`plugins/self-check-enforcer/`) rather than embedding the source. Current key features: detection-first `\bFAIL\b` at `subagent_stop` (no "fixed" masking), READY/NEEDS_WORK/BLOCKED verdict with a NEEDS_WORK re-runnable gate and a BLOCKED escalation gate, the 5-block BLOCKED-to-a-human escalation (`agent/_on_output_gate.py`), `_final_validated` revalidation on budget-exhaustion exits, closed done-claim bypasses, strict plan↔artifact matching, and enumerated per-id failed-check feedback.
