@@ -366,7 +366,7 @@ class FailureCache:
         if not CACHE_FILE.exists():
             return {}
         try:
-            return json.loads(CACHE_FILE.read_text())
+            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             # Corrupt cache — rename and start fresh
             corrupt_path = CACHE_FILE.with_suffix(".json.corrupt")
@@ -394,7 +394,7 @@ class FailureCache:
 
         tmp = CACHE_FILE.with_suffix(".json.tmp")
         try:
-            tmp.write_text(json.dumps(data, indent=2))
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             tmp.rename(CACHE_FILE)
         except OSError as e:
             print(f"[escalation-ladder] ERROR: Cache write failed: {e}", file=sys.stderr)

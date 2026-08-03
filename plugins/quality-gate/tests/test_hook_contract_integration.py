@@ -350,4 +350,4 @@ class TestSpawnHookContract:
             f"title not passed from flat kwargs: {classify_calls[0]['title']!r}"
         )
         # Tier from controlled classify_tier must match sidecar.
-        assert "standard" in sidecar.read_text()
+        assert "standard" in sidecar.read_text(encoding="utf-8")
