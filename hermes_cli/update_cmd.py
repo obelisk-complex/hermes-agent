@@ -304,6 +304,13 @@ _UPDATE_CRITICAL_FILES = (
     "model_tools.py",
     "toolsets.py",
     "hermes_constants.py",
+    # Fork customisation (self-check enforcement) edits these upstream-owned
+    # files; include them so a conflict marker left by the daily upstream
+    # rebase is caught by the post-pull syntax guard and rolled back, rather
+    # than bricking the agent at the first turn after a "successful" update.
+    "agent/conversation_loop.py",
+    "tools/delegate_tool.py",
+    "hermes_cli/plugins.py",
 )
 
 def _capture_head_sha(git_cmd, cwd) -> str | None:
