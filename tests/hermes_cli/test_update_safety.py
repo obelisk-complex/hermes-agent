@@ -24,7 +24,7 @@ Runnable two ways:
 import os
 import symtable
 
-_MAIN = os.path.join(os.path.dirname(__file__), "..", "..", "hermes_cli", "main.py")
+_MAIN = os.path.join(os.path.dirname(__file__), "..", "..", "hermes_cli", "update_cmd.py")
 
 
 def _main_source():
