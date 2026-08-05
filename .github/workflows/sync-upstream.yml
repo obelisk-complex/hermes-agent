@@ -170,6 +170,10 @@ jobs:
       # rather than leaving it for someone to remember.
       - name: Close tracking issue on successful sync
         if: success() && steps.check.outputs.upstream_ahead != '0'
+        # A notification hiccup (e.g. the gh API, or Issues toggled off again)
+        # must never flip an actually-successful sync to a failed run — that
+        # would make the cure worse than the disease this step exists to fix.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -210,6 +214,11 @@ jobs:
       # a human still has to run the runbook once.
       - name: Notify sync failure (open/update tracking issue)
         if: failure()
+        # Same reasoning as the close-step's continue-on-error: the job is
+        # already correctly failed at this point (a real sync problem); a
+        # broken notification must stay a separate, visible-but-non-fatal
+        # signal rather than obscuring which step actually blocked the sync.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
