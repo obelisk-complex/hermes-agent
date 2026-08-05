@@ -24,10 +24,20 @@ dispatch. Each run:
 A conflict with **no** recorded resolution makes the rebase abort, fail loud,
 and leave `origin/main` untouched. That is the failure you are here to fix.
 
+A failed run also opens (or comments on) a single issue labelled
+`sync-upstream-blocked` — the Actions tab alone went unwatched for a 12-day
+failure streak (2026-07-22 to 2026-08-02) before anyone noticed, so the
+workflow now self-announces. It auto-closes on the next successful sync; it
+does not attempt to resolve the conflict itself (see the "Fixing it" section
+below — this is still a one-time human step, deliberately: auto-resolving a
+semantic conflict is how the fork previously lost real hunks silently).
+
 ## Reading a failure
 
-Open the failed run. The **job Summary** carries a per-path diagnosis written by
-the workflow before it aborts:
+Open the failed run (linked from the `sync-upstream-blocked` issue, or via
+`gh run list --repo obelisk-complex/hermes-agent --workflow=sync-upstream.yml`).
+The **job Summary** carries a per-path diagnosis written by the workflow
+before it aborts:
 
 - `NEW <path> (hash <h>)`: no recorded resolution for this conflict. Resolve it
   once and add `ci/rerere-cache/<h>/`.

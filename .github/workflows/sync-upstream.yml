@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 # Never let two daily syncs (or a manual dispatch + the schedule) race the
 # force-push to main.
@@ -160,6 +161,28 @@ jobs:
           git push --force-with-lease origin main
           echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
 
+      # Closes the self-heal gap this pairs with (see "Notify sync failure"
+      # below): a blocked sync used to only show up as a red run in the
+      # Actions tab, which nobody was watching daily — it repeated silently
+      # for a 12-day streak (2026-07-22 to 2026-08-02) before a human noticed.
+      # A successful sync after a blocked streak means the conflict was
+      # resolved (by whatever fixed it), so auto-close the tracking issue
+      # rather than leaving it for someone to remember.
+      - name: Close tracking issue on successful sync
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased and pushed to \`origin/main\`. Closing."
+            gh issue close "$existing" --repo "${{ github.repository }}"
+            echo "Closed tracking issue #$existing"
+          fi
+
       # Persist any resolutions rerere recorded this run (even on failure, so a
       # resolution applied mid-run is not lost). Unique key per run; restore-keys
       # picks up the most recent on the next run.
@@ -174,3 +197,41 @@ jobs:
         if: failure()
         run: |
           echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
+
+      # The Actions tab alone is not a notification channel — nobody was
+      # watching it, so an unrecorded conflict repeated identically for 12
+      # days (2026-07-22 to 2026-08-02) before a human noticed. This makes a
+      # blocked sync self-announcing: one persistent, labelled issue that
+      # gets a new comment each day it's still stuck (not a fresh issue per
+      # day) and auto-closes on the next green run (see "Close tracking
+      # issue on successful sync" above). This does NOT attempt to resolve
+      # the conflict itself — auto-resolving a semantic conflict is exactly
+      # how the fork previously lost real hunks silently (see LOST-HUNKS.md);
+      # a human still has to run the runbook once.
+      - name: Notify sync failure (open/update tracking issue)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create sync-upstream-blocked --color B60205 \
+            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --force >/dev/null 2>&1 || true
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Still blocked as of $(date -u +%Y-%m-%dT%H:%M:%SZ). Run: $run_url"
+            echo "Updated existing tracking issue #$existing"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "Sync Upstream blocked: manual rebase conflict resolution needed" \
+              --label sync-upstream-blocked \
+              --body "The nightly Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
+
+          Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
+
+          Failing run: $run_url"
+            echo "Opened new tracking issue"
+          fi
