@@ -36,20 +36,26 @@ semantic conflict is how the fork previously lost real hunks silently).
 
 Open the failed run (linked from the `sync-upstream-blocked` issue, or via
 `gh run list --repo obelisk-complex/hermes-agent --workflow=sync-upstream.yml`).
-The **job Summary** carries a per-path diagnosis written by the workflow
-before it aborts:
+There is **no per-path NEW/STALE job-summary diagnosis today** — a prior
+version of this doc described one; nothing in `sync-upstream.yml` writes it.
+What's actually there to read:
 
-- `NEW <path> (hash <h>)`: no recorded resolution for this conflict. Resolve it
-  once and add `ci/rerere-cache/<h>/`.
-- `STALE <path> (hash <h>)`: a recorded postimage exists but no longer applies
-  cleanly (upstream changed lines near the resolved zone). Re-resolve and
-  **renew** that committed postimage.
+- **"Rebase custom commits onto upstream"** step log: git's own rebase output
+  names the conflicting path(s) directly. A conflict with no recorded
+  resolution ends in `::error::Upstream rebase hit an UNKNOWN conflict...`
+  (generic — the path is in the git output just above it, not in this line).
+- **"Validate rebased tree (pre-push gate)"** step log: a `py_compile` failure
+  names the exact file with conflict markers left in it.
+- Either failure opens/updates the `sync-upstream-blocked` issue (see above),
+  but today that issue links to the run rather than embedding the path — you
+  still have to open the log.
 
-These two look identical without the diagnosis, which is why it exists. The
-classification comes from git's own `MERGE_RR` map (one `hash<TAB>path` record
-per active conflict); STALE vs NEW is decided purely by whether
-`rr-cache/<hash>/postimage` exists. (`git rerere diff` is **not** a stale
-signal: it is non-empty for brand-new conflicts too.)
+Whether git classifies a conflict as brand-new vs a previously-recorded
+resolution that no longer applies cleanly (a real distinction — see `git
+rerere status` / `MERGE_RR`) is not surfaced anywhere the workflow writes to.
+If this keeps costing real triage time, teaching the rebase step to capture
+`git diff --name-only --diff-filter=U` and put it in the `::error::` line and
+the issue body is a contained follow-up — flagging it, not doing it here.
 
 ## Fixing it (reproduce, resolve, PROVE, seed, dispatch)
 
@@ -103,10 +109,17 @@ signal: it is non-empty for brand-new conflicts too.)
 ## Durability: commit every runtime resolution within 7 days
 
 If a sync resolves a conflict at runtime that is not in the committed
-`ci/rerere-cache`, the run emits `::warning::rerere recorded resolution(s) at
-runtime ... commit these`. The Actions rr-cache has a 7-day TTL, so an
-uncommitted runtime resolution is silently lost and the same conflict re-fails
-later. Reproduce it (steps above), capture the entry, and commit it.
+`ci/rerere-cache`, **the workflow does not warn you** — a prior version of
+this doc claimed it emits a warning; it doesn't. The only place the new
+resolution lives is the `actions/cache/save` entry keyed
+`rerere-cache-${{ github.run_id }}`, which the Actions cache backend evicts
+after 7 days of no matching restore. An uncommitted runtime resolution is
+silently lost once that happens, and the same conflict re-fails cold later
+looking like a brand-new one. There is currently no signal telling you this
+happened — treat *any* green sync that followed a red one as a prompt to
+check whether `.git/rr-cache` in that run grew an entry not yet in
+`ci/rerere-cache/`, and commit it (steps above) before the cache window
+closes.
 
 ## Notes
 
