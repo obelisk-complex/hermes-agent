@@ -76,6 +76,93 @@ def test_shared_command_refuses_managed_mode_override(tmp_path, monkeypatch):
     assert not (home / "config.yaml").exists()
 
 
+# ---------------------------------------------------------------------------
+# /approvals tags — dual-signal tag surface (T10, G11)
+# ---------------------------------------------------------------------------
+
+def test_tags_round_trip_writes_a_list(tmp_path, monkeypatch):
+    """G11: enable/disable round-trips and the value reads back as a LIST."""
+    from hermes_cli.approval_mode import run_approval_tags_command
+    from tools.approval import _get_auto_approve_tags
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _isolate_config(monkeypatch, home)
+
+    assert _get_auto_approve_tags() == frozenset()
+
+    result = run_approval_tags_command("enable proc.control")
+    assert result.ok is True
+    assert _get_auto_approve_tags() == frozenset({"proc.control"})
+
+    result = run_approval_tags_command("enable vcs.write")
+    assert result.ok is True
+    assert _get_auto_approve_tags() == frozenset({"proc.control", "vcs.write"})
+
+    result = run_approval_tags_command("disable proc.control")
+    assert result.ok is True
+    assert _get_auto_approve_tags() == frozenset({"vcs.write"})
+
+    # On disk it is a list, not a string (D11 / control 14).
+    raw = (home / "config.yaml").read_text(encoding="utf-8")
+    saved = yaml.safe_load(raw)
+    assert saved["approvals"]["auto_approve_tags"] == ["vcs.write"]
+
+
+def test_tags_reject_non_configurable_without_writing(tmp_path, monkeypatch):
+    from hermes_cli.approval_mode import run_approval_tags_command
+    from tools.approval import _get_auto_approve_tags
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _isolate_config(monkeypatch, home)
+
+    for bad in ("security.scan", "priv.escalate", "code.exec", "mcp.tool",
+                "config.write", "UNTAGGED", "totally-unknown"):
+        result = run_approval_tags_command(f"enable {bad}")
+        assert result.ok is False
+        assert _get_auto_approve_tags() == frozenset()
+
+    result = run_approval_tags_command("bogus-verb proc.control")
+    assert result.ok is False
+    assert _get_auto_approve_tags() == frozenset()
+
+
+def test_tags_listing_covers_every_tag_and_allowlist_note(tmp_path, monkeypatch):
+    from hermes_cli.approval_mode import run_approval_tags_command
+    from tools.action_tags import ActionTag
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _isolate_config(monkeypatch, home)
+
+    result = run_approval_tags_command(None)
+    assert result.ok is True
+    for tag in ActionTag:
+        assert tag.value in result.message
+    assert "command_allowlist" in result.message
+
+
+def test_tags_dispatch_on_cli_surface(tmp_path, monkeypatch, capsys):
+    """The CLI /approvals handler routes 'tags' before the mode runner."""
+    from cli import HermesCLI
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _isolate_config(monkeypatch, home)
+
+    cli = HermesCLI.__new__(HermesCLI)
+    cli._handle_approvals_command("/approvals tags enable net.egress")
+    out = capsys.readouterr().out
+    assert "net.egress" in out and "enabled" in out
+    # The mode runner must not have swallowed it as an invalid mode.
+    assert "Usage:" not in out
+
+
 
 
 
