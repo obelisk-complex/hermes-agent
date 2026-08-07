@@ -160,20 +160,60 @@ jobs:
           # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
           export PYTHONPATH="$PWD"
           # Catch conflict markers / syntax breakage the rebase may have left in
-          # the import-critical and fork-customised files.
+          # the import-critical and fork-customised files. Cheap smoke check that
+          # runs before the heavier fork-local test pass below.
           for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
             python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
           done
-          # Guard tests (stdlib-only, no install needed): fail the sync if the
-          # rebase relocated/dropped the custom on_output hook or the _blocked
-          # reset, lost the update syntax-guard coverage, or reintroduced a
-          # shadowed stdlib import. This is the real "CI tests as persistence"
-          # gate — it runs BEFORE the push, so a broken rebase never reaches
-          # origin/main (which every `hermes update` consumer hard-resets to).
-          python3 tests/agent/test_on_output_retry_loop.py
-          python3 tests/hermes_cli/test_update_safety.py
-          python3 tests/agent/test_hook_contract.py
-          python3 tests/tools/test_delegate_instructions.py
+
+      - name: Find fork-local test files
+        id: fork-tests
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # Upstream can't update a test file it has never seen. A rebase can
+          # replay a fork commit cleanly onto an upstream refactor and still
+          # leave a fork-local test calling an API upstream just changed
+          # underneath it — this broke silently for
+          # tests/hermes_cli/test_kanban_cli_complete_block.py and
+          # tests/tools/test_kanban_tools.py (2026-07-20/21) because the old
+          # gate only ran 4 hand-picked files. Diff the tree instead of
+          # hand-maintaining a list, so the gate self-updates as the fork
+          # grows: everything under tests/ that exists in our rebased HEAD
+          # but not in upstream/main is fork-owned and upstream will never
+          # fix it for us.
+          mapfile -t files < <(comm -23 \
+            <(git ls-tree -r --name-only HEAD -- tests | sort) \
+            <(git ls-tree -r --name-only upstream/main -- tests | sort))
+          echo "Found ${#files[@]} fork-local test file(s):"
+          printf '  %s\n' "${files[@]}"
+          IFS=:; echo "files=${files[*]}" >> "$GITHUB_OUTPUT"; unset IFS
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        # Same extras as tests.yml — several fork-local tests exercise the
+        # lazy-install provider SDKs directly, and the hermetic test env
+        # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1).
+        run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Run fork-local tests against the rebased tree
+        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        # This is the real "CI tests as persistence" gate — it runs BEFORE the
+        # push, so a rebase that silently breaks a fork-owned test never
+        # reaches origin/main (which every `hermes update` consumer hard-resets to).
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh --files '${{ steps.fork-tests.outputs.files }}'
 
       - name: Push validated rebase
         id: push
