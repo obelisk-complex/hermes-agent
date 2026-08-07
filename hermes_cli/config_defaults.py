@@ -2526,6 +2526,24 @@ DEFAULT_CONFIG = {
         # modal; HERMES_TUI_NO_CONFIRM=1 force-skips that modal regardless of
         # the configured value.
         "destructive_slash_confirm": True,
+        # Dual-signal auto-approval (ported from Cloudflare OS's Gatekeeper).
+        # With mode "smart", auto-approval requires BOTH signals: the guardian
+        # verdict AND a user-enabled rule for the action's stable tag
+        # (auto_approve_tags). "legacy" (default) keeps today's behaviour —
+        # the guardian verdict alone auto-approves. "off" disables LLM
+        # auto-approval within smart mode (the guardian still runs; use
+        # approvals.mode: manual to skip it entirely). Normalisation is
+        # fail-closed: false/no/off -> "off", true/yes/on -> "dual_signal",
+        # anything unparseable -> warn + "off" (D16 of the dual-signal plan).
+        "auto_approve": "legacy",
+        # Tags the user has opted into for dual-signal auto-approval. Each
+        # entry must be a CONFIGURABLE_TAGS value; never-auto-approvable and
+        # not-wired tags are dropped with a warning. A non-list value (e.g. a
+        # string written via `hermes config set`) is rejected wholesale.
+        "auto_approve_tags": [],
+        # Free-text attribution recorded in the audit line of every
+        # auto-approval (e.g. "ops team policy"). Empty -> "config:<path>".
+        "auto_approve_enabled_by": "",
     },
 
     # Permanently allowed dangerous command patterns (added via "always" approval)
