@@ -89,6 +89,13 @@ def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
     return "deny"
 
 
+# T8a of the dual-signal plan: marks a non-human approval resolution so the
+# head-of-line barrier's prompt-depth limb does not count it as a human
+# decision (G4a). Read via getattr(cb, "_hermes_synthetic_approval", False)
+# in tools/approval.py:_manual_gate_scope.
+_subagent_auto_deny._hermes_synthetic_approval = True  # type: ignore[attr-defined]
+
+
 def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
     """Auto-approve dangerous commands in subagent threads (opt-in YOLO).
 
@@ -100,6 +107,9 @@ def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
         command, description,
     )
     return "once"
+
+
+_subagent_auto_approve._hermes_synthetic_approval = True  # type: ignore[attr-defined]
 
 
 def _get_subagent_approval_callback():

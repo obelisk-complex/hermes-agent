@@ -3158,6 +3158,15 @@ class CLICommandsMixin:
 
         parts = (cmd_original or "").strip().split(None, 1)
         requested = parts[1] if len(parts) > 1 else None
+        # /approvals tags (T10, dual-signal plan): dispatch before the mode
+        # runner. No admin gate here — the local user IS the operator.
+        if requested is not None:
+            sub = requested.split(None, 1)
+            if sub and sub[0] == "tags":
+                from hermes_cli.approval_mode import run_approval_tags_command
+                tags_args = sub[1] if len(sub) > 1 else None
+                _cprint(f"  {run_approval_tags_command(tags_args).message}")
+                return
         result = run_approval_mode_command(requested)
         _cprint(f"  {result.message}")
 
