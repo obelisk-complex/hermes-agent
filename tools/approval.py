@@ -10,6 +10,7 @@ This module is the single source of truth for the dangerous command system:
 
 import contextlib
 import contextvars
+import contextlib
 import fnmatch
 import functools
 import hashlib
@@ -28,6 +29,10 @@ from hermes_cli.config import cfg_get
 
 from tools.interrupt import is_interrupted
 from utils import env_var_enabled, is_truthy_value
+
+# D2 of the dual-signal plan: tools/action_tags.py imports nothing from
+# Hermes, so importing it at module scope cannot create a cycle.
+from tools.action_tags import ActionTag
 
 logger = logging.getLogger(__name__)
 
@@ -173,16 +178,33 @@ def _prepare_smart_approval_observer(
     return payload
 
 
-def _observe_smart_approval_verdict(payload: dict | None, verdict: str) -> None:
-    """Emit a smart verdict after the auxiliary LLM decision, if safe."""
+def _observe_smart_approval_verdict(payload: dict | None, verdict: str,
+                                    decision=None) -> None:
+    """Emit a smart verdict after the auxiliary LLM decision, if safe.
+
+    Exactly ONE ``post_approval_response`` per verdict (frozen contract of
+    tests/tools/test_approval_plugin_hooks.py). On the dual-signal path the
+    ``decision`` carries the gate's fields (action_tags, reason, enabled_by,
+    outcome) and they ride THIS emission — no second post hook is fired, so
+    the pre/post sequence stays [pre_approval_request, post_approval_response]
+    and the choice stays ``smart_approve``/``smart_deny`` (audit R4-7's
+    premise — "no hook fires on the edited branch" — was wrong: the verdict
+    observer fires before the dual-signal branch, and the plugin-hook tests
+    assert the exact single-emission sequence).
+    """
     if payload is None or verdict not in {"approve", "deny"}:
         return
-    _fire_approval_hook(
-        "post_approval_response",
-        **payload,
-        choice=f"smart_{verdict}",
-        decided_by="aux_llm",
-    )
+    hook_kwargs = dict(payload)
+    hook_kwargs["choice"] = f"smart_{verdict}"
+    hook_kwargs["decided_by"] = "aux_llm"
+    if decision is not None:
+        hook_kwargs["action_tags"] = list(getattr(decision, "tags", ()))
+        hook_kwargs["auto_approval_reason"] = getattr(decision, "reason", "")
+        hook_kwargs["enabled_by"] = getattr(decision, "enabled_by", "")
+        hook_kwargs["dual_signal_outcome"] = (
+            "auto_approved" if decision.auto_approved else "manual"
+        )
+    _fire_approval_hook("post_approval_response", **hook_kwargs)
 
 
 
@@ -1093,6 +1115,16 @@ DANGEROUS_PATTERNS = [
     # profile flag can't slip the agent past the guard.
     (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    # `hermes config set/unset/edit` rewrites the security policy file
+    # (~/.hermes/config.yaml holds approvals.mode, yolo, the allowlist, and
+    # the new dual-signal keys). Without this entry the CLI walks around the
+    # config-write gate entirely: the command matches no pattern, so
+    # check_all_command_guards returns approved before Phase 2.5 in every
+    # mode (D19 of the dual-signal plan). Read verbs (show/get/path/env-path/
+    # check) and migrate (bounded to filling absent defaults) are deliberately
+    # excluded. Flag-tolerant like the gateway entry above, so a profile flag
+    # can't slip the agent past the guard.
+    (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*config\s+(set|unset|edit)\b', "write hermes config via CLI (approval policy lives here)"),
     # Docker container lifecycle — any user with docker.sock mounted (a common
     # Docker Compose pattern) gives the agent the ability to restart/stop/kill
     # containers without approval.  These are agent-initiated lifecycle operations
@@ -2573,6 +2605,15 @@ def detect_dangerous_command(command: str) -> tuple:
 
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
+# D17 (dual-signal plan): monotonic submission timestamps for _pending
+# records, kept in a parallel dict so the model-visible payload shape at the
+# submit_pending call sites stays byte-identical. Limb (b) of the barrier
+# treats a record older than approvals.timeout as an abandoned decision.
+_pending_at: dict[str, float] = {}
+# Limb (c): depth of in-flight human CLI prompts per session, so a concurrent
+# command in the same session cannot auto-approve while a human is deciding
+# an earlier one.
+_manual_prompt_depth: dict[str, int] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
@@ -2901,6 +2942,12 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if reason:
             entry.reason = reason
         entry.event.set()
+    # D13/T8a (dual-signal plan): clear_pending takes _lock itself, so this
+    # call must sit OUTSIDE the with _lock: block above (a call inside it
+    # would deadlock permanently on the non-reentrant lock). A resolved
+    # gateway action is a human decision; any matching no-notify pending
+    # record is settled too.
+    clear_pending(session_key)
     return len(targets)
 
 
@@ -2946,6 +2993,93 @@ def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
         _pending[session_key] = approval
+        _pending_at[session_key] = time.monotonic()
+
+
+def clear_pending(session_key: str) -> bool:
+    """Remove any no-notify pending approval record for a session (T8a).
+
+    Returns whether anything was removed. No-ops on a falsy key. Deliberately
+    does NOT no-op on the literal ``"default"`` session key — that is the
+    commonest real CLI key and skipping it would make the pending record
+    unresolvable for the majority session (R23).
+
+    D13: takes ``_lock`` itself, so every call site must be outside any
+    ``_lock`` scope — the non-reentrant lock would deadlock permanently on a
+    nested acquisition.
+    """
+    if not session_key:
+        return False
+    with _lock:
+        had = _pending.pop(session_key, None) is not None
+        _pending_at.pop(session_key, None)
+        return had
+
+
+@contextlib.contextmanager
+def _manual_gate_scope(session_key: str):
+    """Count an in-flight human CLI prompt for the barrier (T8).
+
+    Increments ``_manual_prompt_depth`` on entry, decrements on exit
+    (try/finally, so an exception inside the prompt cannot strand the
+    counter). The scope is a NO-OP when a synthetic (non-human) approval
+    callback is installed — CLI-parented subagent threads resolve approvals
+    via the TLS callbacks in tools/delegate_tool.py (marked
+    ``_hermes_synthetic_approval = True``), never a human, so counting them
+    would deny a concurrent thread's auto-approval for a reason G4 does not
+    describe (G4a, audit R3-11).
+    """
+    if not session_key:
+        yield
+        return
+    from tools.terminal_tool import _get_approval_callback
+    cb = _get_approval_callback()
+    if getattr(cb, "_hermes_synthetic_approval", False):
+        yield
+        return
+    with _lock:
+        _manual_prompt_depth[session_key] = _manual_prompt_depth.get(session_key, 0) + 1
+    try:
+        yield
+    finally:
+        with _lock:
+            depth = _manual_prompt_depth.get(session_key, 0) - 1
+            if depth > 0:
+                _manual_prompt_depth[session_key] = depth
+            else:
+                _manual_prompt_depth.pop(session_key, None)
+
+
+def session_has_open_human_decision(session_key: str) -> bool:
+    """True when an unresolved human decision is visible for the session (T8).
+
+    One lock acquisition, never nested (D13): reads the blocking gateway
+    queue (limb a — also covers MCP elicitation in gateway sessions), any
+    non-stale no-notify ``_pending`` record (limb b, D17), and the in-flight
+    CLI prompt depth (limb c). The timeout is read OUTSIDE the lock. Does not
+    call ``has_blocking_approval`` — that takes the same non-reentrant lock.
+
+    Total (G13): any exception logs at WARNING and returns True (fail-closed,
+    suppress auto-approval) — three dict reads raising means session state is
+    unhealthy and the manual gate is the right answer.
+    """
+    try:
+        with _lock:
+            if _gateway_queues.get(session_key):
+                return True
+            if session_key in _pending:
+                timeout = _get_approval_timeout()
+                submitted = _pending_at.get(session_key, 0.0)
+                if time.monotonic() - submitted < timeout:
+                    return True
+            if _manual_prompt_depth.get(session_key, 0) > 0:
+                return True
+        return False
+    except Exception as exc:
+        logger.warning(
+            "session_has_open_human_decision failed — failing closed: %s", exc
+        )
+        return True
 
 
 def approve_session(session_key: str, pattern_key: str):
@@ -3000,6 +3134,8 @@ def clear_session(session_key: str) -> None:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
+        _pending_at.pop(session_key, None)
+        _manual_prompt_depth.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
         # Session-boundary cleanup should cancel any blocked approval waits
@@ -3451,6 +3587,249 @@ def _get_approval_mode() -> str:
     """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
     mode = _get_approval_config().get("mode", "manual")
     return _normalize_approval_mode(mode)
+
+
+# ---------------------------------------------------------------------------
+# Dual-signal auto-approval (T4/T5 of the dual-signal plan)
+# ---------------------------------------------------------------------------
+
+def _normalize_auto_approve(value) -> str:
+    """Normalize ``approvals.auto_approve`` (D16: fail closed, never permissive).
+
+    Returns one of 'legacy', 'dual_signal', 'off'.
+
+    Junk values are an *expressed intent that cannot be honoured* and fail
+    closed to 'off' — the opposite of ``_normalize_approval_mode``'s junk
+    fallback, because here 'legacy' is the permissive value. Distinct from
+    the read-*failure* rule in ``_get_auto_approve_mode`` (last-known-good).
+    """
+    if isinstance(value, bool):
+        return "off" if value is False else "dual_signal"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("off", "false", "no"):
+            return "off"
+        if normalized in ("dual_signal", "true", "yes", "on"):
+            return "dual_signal"
+        if normalized == "legacy":
+            return "legacy"
+        logger.warning(
+            "Unknown approvals.auto_approve %r — defaulting to 'off' "
+            "(LLM auto-approval disabled). Valid values: legacy, dual_signal, off",
+            value,
+        )
+        return "off"
+    if value is None:
+        return "off"
+    logger.warning(
+        "Non-scalar approvals.auto_approve %r — defaulting to 'off' "
+        "(LLM auto-approval disabled).",
+        value,
+    )
+    return "off"
+
+
+# Last successfully-resolved auto_approve mode (G13): a read failure keeps the
+# last-known-good value so a transient IO error can neither downgrade a
+# dual_signal user to legacy nor switch a default-config machine off.
+_last_known_good_auto_approve: Optional[str] = None
+
+
+def _get_auto_approve_mode() -> str:
+    """Read ``approvals.auto_approve``, fail-closed per D16, total per G13.
+
+    Read failures return the last successfully-resolved value, or ``'legacy'``
+    (the shipped default) when no read has ever succeeded — never a raise.
+    """
+    global _last_known_good_auto_approve
+    try:
+        value = _get_approval_config().get("auto_approve", "legacy")
+        resolved = _normalize_auto_approve(value)
+        _last_known_good_auto_approve = resolved
+        return resolved
+    except Exception as exc:
+        logger.warning("Failed to read approvals.auto_approve: %s", exc)
+        if _last_known_good_auto_approve is not None:
+            return _last_known_good_auto_approve
+        return "legacy"
+
+
+# (config-signature, dropped-set) -> warned; keeps drop warnings at WARNING
+# once per distinct config rather than once per command (audit R3-18).
+_auto_approve_tags_warned: set[tuple] = set()
+
+
+def _get_auto_approve_tags() -> frozenset[str]:
+    """Read ``approvals.auto_approve_tags`` as a validated frozenset (T4, G13).
+
+    - A non-list value (e.g. the scalar string ``hermes config set`` writes)
+      is rejected wholesale with a warning naming ``/approvals tags enable`` —
+      never iterated (D11).
+    - Non-strings, unknown values, and anything in NEVER_AUTO_APPROVABLE or
+      NOT_WIRED are dropped with a warning.
+    - Any read failure returns ``frozenset()`` — never a raise.
+    """
+    try:
+        config = _get_approval_config()
+        from tools.action_tags import CONFIGURABLE_TAGS
+        value = config.get("auto_approve_tags", [])
+        if not isinstance(value, list):
+            if isinstance(value, str):
+                logger.warning(
+                    "approvals.auto_approve_tags is a string, not a list — "
+                    "ignored. Use /approvals tags enable <tag> (or hand-edit "
+                    "config.yaml) to set tags; `hermes config set` cannot write "
+                    "list values."
+                )
+            else:
+                logger.warning(
+                    "approvals.auto_approve_tags has type %s — ignored.",
+                    type(value).__name__,
+                )
+            return frozenset()
+        kept: list[str] = []
+        dropped: set[str] = set()
+        for entry in value:
+            if not isinstance(entry, str):
+                dropped.add(repr(entry))
+                continue
+            if entry in CONFIGURABLE_TAGS:
+                kept.append(entry)
+            else:
+                dropped.add(entry)
+        signature = (id(config),)
+        if dropped:
+            warn_key = (signature, frozenset(dropped))
+            if warn_key not in _auto_approve_tags_warned:
+                _auto_approve_tags_warned.add(warn_key)
+                logger.warning(
+                    "approvals.auto_approve_tags: dropping %s — not a "
+                    "configurable tag. Valid values: %s",
+                    sorted(dropped),
+                    ", ".join(sorted(CONFIGURABLE_TAGS)),
+                )
+        return frozenset(kept)
+    except Exception as exc:
+        logger.warning("Failed to read approvals.auto_approve_tags: %s", exc)
+        return frozenset()
+
+
+def _get_auto_approve_enabled_by() -> str:
+    """Attribution for the audit line (T9): the rule's enabled_by, or the config path."""
+    try:
+        value = _get_approval_config().get("auto_approve_enabled_by", "") or ""
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        try:
+            from hermes_cli.config import get_config_path
+            return f"config:{get_config_path()}"
+        except Exception:
+            return "config:<unresolved>"
+    except Exception:
+        return "config:<unresolved>"
+
+
+# ---------------------------------------------------------------------------
+# T3 — tag resolution + the config-write override (D8, D14)
+# ---------------------------------------------------------------------------
+
+# D14: any command naming the Hermes home directory itself (not just
+# config.yaml / .env) becomes config.write. The trailing slash is OPTIONAL on
+# every limb: a directory target has no filename after it, so a mandatory
+# slash would let `rm -rf $HERMES_HOME` keep its configurable tag and delete
+# the policy file (audit R4-1). `$HOME` alone is deliberately NOT a limb —
+# `rm -rf $HOME` is too broad to gate here — but `$HERMES_HOME` alone is,
+# because that variable IS the Hermes home. Accepted fail-closed over-match:
+# `~/.hermesbak` and `$HERMES_HOME_OLD` also lose auto-approval.
+_HERMES_HOME_TARGET = (
+    r'(?:~\/\.hermes/?|'
+    r'(?:\$home|\$\{home\})/\.hermes/?|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/?)'
+)
+
+
+def _tag_for_key(pattern_key: str) -> ActionTag:
+    """Thin call-through to the taxonomy (D2: action_tags imports nothing)."""
+    from tools.action_tags import tag_for_pattern_key
+    return tag_for_pattern_key(pattern_key)
+
+
+def _resolve_tags(warnings, command) -> frozenset[ActionTag]:
+    """Resolve the tag set for a warnings list (T3).
+
+    ``warnings`` is a list of 3-tuples ``(pattern_key, description, is_tirith)``
+    (approval.py:3740). Per entry, in order: ``tirith:`` → ``security.scan``;
+    ``plugin_rule:`` → ``plugin.rule``; exact ``"execute_code"`` → ``code.exec``;
+    exact ``"mcp_elicitation"`` → ``mcp.tool``; else the taxonomy lookup.
+
+    Then the D14 override, **unconditional on the resolved tag** and applied to
+    every non-tirith entry: if any variant from ``_command_detection_variants``
+    matches ``_HERMES_ENV_PATH``, ``_HERMES_CONFIG_PATH``, or
+    ``_HERMES_HOME_TARGET`` under ``_RE_FLAGS``, that entry's tag becomes
+    ``config.write``. The override runs on detection variants, not the raw
+    string (D8): ``_normalize_command_for_detection`` folds resolved absolute
+    homes to the tilde form first, so detection sees the same text the
+    patterns see.
+
+    Total (G13): any exception logs at WARNING and yields
+    ``frozenset({UNTAGGED})`` — this function is evaluated as an argument
+    before ``evaluate_dual_signal`` can short-circuit, so a raise here would
+    turn today's working auto-approval into a hot-path exception.
+    """
+    try:
+        from tools.action_tags import ActionTag
+        tags: set[ActionTag] = set()
+        for pattern_key, _desc, is_tirith in warnings:
+            if is_tirith:
+                tags.add(ActionTag.SECURITY_SCAN)
+                continue
+            if pattern_key.startswith("tirith:"):
+                tags.add(ActionTag.SECURITY_SCAN)
+                continue
+            if pattern_key.startswith("plugin_rule:"):
+                tags.add(ActionTag.PLUGIN_RULE)
+                continue
+            if pattern_key == "execute_code":
+                tags.add(ActionTag.CODE_EXEC)
+                continue
+            if pattern_key == "mcp_elicitation":
+                tags.add(ActionTag.MCP_TOOL)
+                continue
+            tag = _tag_for_key(pattern_key)
+            if tag is ActionTag.UNTAGGED:
+                tags.add(ActionTag.UNTAGGED)
+                continue
+            # D14 override: config/env/Hermes-home targets are never
+            # auto-approvable regardless of the tag they would otherwise get.
+            if _command_targets_hermes_home(command):
+                tags.add(ActionTag.CONFIG_WRITE)
+            else:
+                tags.add(tag)
+        return frozenset(tags)
+    except Exception as exc:
+        logger.warning("Tag resolution failed — treating as UNTAGGED: %s", exc)
+        from tools.action_tags import ActionTag
+        return frozenset({ActionTag.UNTAGGED})
+
+
+def _command_targets_hermes_home(command: str) -> bool:
+    """True when any detection variant names the Hermes home (D14).
+
+    Tests every variant ``_command_detection_variants`` yields, so the
+    override sees exactly what detection saw — a path form detection misses
+    is not a warning at all and never reaches the tag layer (R19).
+    """
+    try:
+        targets = (_HERMES_ENV_PATH, _HERMES_CONFIG_PATH, _HERMES_HOME_TARGET)
+        for variant in _command_detection_variants(command):
+            for target in targets:
+                if re.search(target, variant, _RE_FLAGS):
+                    return True
+    except Exception:
+        # Fail closed: an unparseable command is treated as targeting the
+        # Hermes home rather than racing a regex error on the hot path.
+        return True
+    return False
 
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
@@ -4010,8 +4389,9 @@ def _run_approval_gate(
         session_key=session_key,
         surface="cli",
     )
-    choice = prompt_dangerous_approval(display_target, description,
-                                       approval_callback=approval_callback)
+    with _manual_gate_scope(session_key):
+        choice = prompt_dangerous_approval(display_target, description,
+                                           approval_callback=approval_callback)
     _fire_approval_hook(
         "post_approval_response",
         command=display_target,
@@ -5075,18 +5455,49 @@ def check_all_command_guards(command: str, env_type: str,
             session_key=session_key,
         )
         verdict = _smart_approve(command, combined_desc_for_llm)
-        _observe_smart_approval_verdict(observer_payload, verdict)
         if verdict == "approve":
-            # Approve this command only. Pattern-level persistence would let one
-            # benign command suppress review of later commands that happen to
-            # match the same broad detector category.
-            _reset_denials(session_key)
-            logger.debug("Smart approval: auto-approved '%s' (%s)",
-                         command[:60], combined_desc_for_llm)
-            return {"approved": True, "message": None,
-                    "smart_approved": True,
-                    "description": combined_desc_for_llm}
-        elif verdict == "deny" and not (is_cli or is_gateway or is_ask):
+            # Dual-signal gate (T6 of the dual-signal plan): the guardian
+            # verdict is only signal A. Auto-approval additionally requires a
+            # user-enabled rule for EVERY resolved tag, and no open human
+            # decision ahead in this session. When the decision is not
+            # auto-approved, fall through to the manual gate at Phase 3.
+            from tools.auto_approval import evaluate_dual_signal
+            decision = evaluate_dual_signal(
+                tags=_resolve_tags(warnings, command),
+                author_verdict=True,
+                mode=_get_auto_approve_mode(),
+                enabled_tags=_get_auto_approve_tags(),
+                manual_gate_open=session_has_open_human_decision(session_key),
+                enabled_by=_get_auto_approve_enabled_by(),
+            )
+            # Single post hook carrying the decision fields (T9) — the
+            # plugin-hook contract asserts exactly one emission.
+            _observe_smart_approval_verdict(observer_payload, verdict, decision)
+            if decision.auto_approved:
+                # Approve this command only. Pattern-level persistence would let one
+                # benign command suppress review of later commands that happen to
+                # match the same broad detector category.
+                _reset_denials(session_key)
+                logger.debug("Smart approval: auto-approved '%s' (%s)",
+                             command[:60], combined_desc_for_llm)
+                logger.info(
+                    "Auto-approved under %s: tags=%s reason=%s enabled_by=%s",
+                    decision.reason,
+                    ",".join(decision.tags) or "UNTAGGED",
+                    decision.reason,
+                    decision.enabled_by,
+                )
+                return {"approved": True, "message": None,
+                        "smart_approved": True,
+                        "description": combined_desc_for_llm,
+                        "action_tags": list(decision.tags)}
+            logger.debug(
+                "Smart approval denied by dual-signal gate: reason=%s tags=%s",
+                decision.reason, decision.tags,
+            )
+        else:
+            _observe_smart_approval_verdict(observer_payload, verdict)
+        if verdict == "deny" and not (is_cli or is_gateway or is_ask):
             _record_denial(session_key)
             breaker_addendum = _denial_breaker_addendum(session_key)
             return {
@@ -5353,13 +5764,14 @@ def check_all_command_guards(command: str, env_type: str,
         session_key=session_key,
         surface="cli",
     )
-    choice = prompt_dangerous_approval(
-        command,
-        combined_desc,
-        allow_permanent=has_permanent_capable and not smart_denied_for_owner,
-        smart_denied=smart_denied_for_owner,
-        approval_callback=approval_callback,
-    )
+    with _manual_gate_scope(session_key):
+        choice = prompt_dangerous_approval(
+            command,
+            combined_desc,
+            allow_permanent=has_permanent_capable and not smart_denied_for_owner,
+            smart_denied=smart_denied_for_owner,
+            approval_callback=approval_callback,
+        )
     _fire_approval_hook(
         "post_approval_response",
         command=command,
@@ -5577,13 +5989,41 @@ def check_execute_code_guard(code: str, env_type: str,
             session_key=session_key,
         )
         verdict = _smart_approve(command, description)
-        _observe_smart_approval_verdict(observer_payload, verdict)
         if verdict == "approve":
-            _reset_denials(session_key)
-            logger.debug("Smart approval: auto-approved execute_code for session %s",
-                         session_key)
-            return {"approved": True, "message": None,
-                    "smart_approved": True, "description": description}
+            # Dual-signal gate (T7 of the dual-signal plan). code.exec is in
+            # NEVER_AUTO_APPROVABLE (D9): rule 5 denies every dual_signal/off
+            # case and rule 3 preserves legacy, so this call decides nothing
+            # the hardcoded path would not — it is made anyway so the reason
+            # string, audit line, and action_tags are uniform.
+            #
+            # NOTE: manual_gate_open can never change the outcome here —
+            # rule 5 (never_auto_approvable) precedes rule 6 (barrier) for a
+            # tag set that is always {code.exec}. Do NOT "fix" the rule order
+            # to make it matter.
+            from tools.auto_approval import evaluate_dual_signal
+            decision = evaluate_dual_signal(
+                tags=frozenset({ActionTag.CODE_EXEC}),
+                author_verdict=True,
+                mode=_get_auto_approve_mode(),
+                enabled_tags=_get_auto_approve_tags(),
+                manual_gate_open=session_has_open_human_decision(session_key),
+                enabled_by=_get_auto_approve_enabled_by(),
+            )
+            # Single post hook carrying the decision fields (T9).
+            _observe_smart_approval_verdict(observer_payload, verdict, decision)
+            if decision.auto_approved:
+                _reset_denials(session_key)
+                logger.debug("Smart approval: auto-approved execute_code for session %s",
+                             session_key)
+                return {"approved": True, "message": None,
+                        "smart_approved": True, "description": description,
+                        "action_tags": list(decision.tags)}
+            logger.debug(
+                "Smart approval denied by dual-signal gate for execute_code: "
+                "reason=%s", decision.reason,
+            )
+        else:
+            _observe_smart_approval_verdict(observer_payload, verdict)
         if verdict == "deny" and not (is_gateway or is_ask):
             _record_denial(session_key)
             breaker_addendum = _denial_breaker_addendum(session_key)
@@ -5936,12 +6376,13 @@ def request_elicitation_consent(
     # CLI / TUI path. allow_permanent=False because elicitation is a
     # per-call confirmation — there is no pattern to remember.
     try:
-        choice = prompt_dangerous_approval(
-            message,
-            description,
-            timeout_seconds=timeout_seconds,
-            allow_permanent=False,
-        )
+        with _manual_gate_scope(session_key):
+            choice = prompt_dangerous_approval(
+                message,
+                description,
+                timeout_seconds=timeout_seconds,
+                allow_permanent=False,
+            )
     except Exception as exc:
         logger.error(
             "Elicitation CLI prompt failed: %s", exc, exc_info=True,
