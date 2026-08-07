@@ -6150,6 +6150,17 @@ def request_elicitation_consent(
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
 
+    # Phase B (T11): tags for observability only. Row 6 of the surface
+    # inventory - a real human decision with no author verdict, so no
+    # auto-approval path is added (D4). _resolve_tags maps the hardcoded
+    # "mcp_elicitation" key to mcp.tool by exact match, above the D14
+    # Hermes-home override, so `message` is never pattern-matched here.
+    _observe_surface_tags(
+        "mcp_elicitation",
+        "mcp_elicitation",
+        _resolve_tags([("mcp_elicitation", description, False)], message),
+    )
+
     if _is_gateway_approval_context():
         with _lock:
             notify_cb = _gateway_notify_cbs.get(session_key)

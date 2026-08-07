@@ -181,3 +181,67 @@ class TestApprovalGateTags:
         monkeypatch.setattr(approval_module, "is_approved", lambda sk, pk: True)
         res = request_tool_approval("write_file", "sensitive path", rule_key="ssh")
         assert res == {"approved": True, "message": None}
+
+
+class TestElicitationParity:
+    """Control: dual_signal + every configurable tag changes no outcome here."""
+
+    @pytest.mark.parametrize("choice,expected", [
+        ("once", "accept"),
+        ("session", "accept"),
+        ("always", "accept"),
+        ("deny", "decline"),
+        ("timeout", "cancel"),
+    ])
+    def test_cli_outcome_unchanged_under_dual_signal(self, monkeypatch, choice, expected):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: choice)
+        assert request_elicitation_consent("confirm?", "server asks") == expected
+
+    def test_prompt_exception_still_declines_under_dual_signal(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+
+        def _raise(*a, **k):
+            raise RuntimeError("prompt exploded")
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval", _raise)
+        assert request_elicitation_consent("confirm?", "server asks") == "decline"
+
+
+class TestElicitationNoAutoApproval:
+    def test_dual_signal_gate_is_never_called(self, monkeypatch):
+        import tools.auto_approval as auto_approval_module
+
+        def _boom(**kwargs):
+            raise AssertionError(
+                "evaluate_dual_signal reached the elicitation gate - "
+                "D4 forbids an auto-approval path on this surface"
+            )
+        monkeypatch.setattr(auto_approval_module, "evaluate_dual_signal", _boom)
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "deny")
+        assert request_elicitation_consent("confirm?", "server asks") == "decline"
+
+
+class TestElicitationTags:
+    def test_audit_line_names_the_mcp_tool_tag(self, monkeypatch, caplog):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "once")
+        with caplog.at_level("INFO", logger="tools.approval"):
+            assert request_elicitation_consent("confirm?", "server asks") == "accept"
+        lines = [r.getMessage() for r in caplog.records
+                 if "action-tags surface=mcp_elicitation" in r.getMessage()]
+        assert len(lines) == 1
+        assert "tags=mcp.tool" in lines[0]
+        assert "pattern_key=mcp_elicitation" in lines[0]
+
+    def test_mcp_tool_tag_is_not_configurable(self):
+        from tools.action_tags import NOT_WIRED
+        assert "mcp.tool" in NOT_WIRED
+        assert "mcp.tool" not in CONFIGURABLE_TAGS
