@@ -190,7 +190,9 @@ jobs:
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        # No longer gated on there being fork-local tests: the lockfile/lint
+        # checks below need uv regardless.
+        if: steps.check.outputs.upstream_ahead != '0'
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
         with:
           version: "0.9.28"
@@ -198,6 +200,37 @@ jobs:
           cache-dependency-glob: |
             pyproject.toml
             uv.lock
+
+      # Run 30489618459 (2026-07-29) landed 8 simultaneous conflicts including a
+      # uv.lock pin drift that nothing caught: the rebase replayed our lock
+      # against upstream's new pyproject.toml and left them disagreeing. The
+      # fork-local test gate above structurally cannot see this — it isn't
+      # under tests/. Mirrors uv-lockfile-check.yml's retry loop: `uv lock
+      # --check` re-resolves against PyPI, so a registry blip must not read as
+      # "lockfile stale".
+      - name: Verify uv.lock against the rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          ok=false
+          for i in 1 2 3; do
+            if uv lock --check; then ok=true; break; fi
+            [ "$i" = 3 ] && break
+            echo "::warning::uv lock --check failed (attempt $i); retrying in 10s"
+            sleep 10
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::rebased tree: uv.lock is out of sync with pyproject.toml. The rebase replayed a lock pin against an upstream dependency change. Resolve per ci/UPSTREAM_SYNC_RUNBOOK.md, run \`uv lock\`, commit the result. origin/main left untouched."
+            exit 1
+          fi
+
+      # ci.yml's blocking lint (Python lints / ruff enforcement). A rebase that
+      # reintroduces a rule violation upstream just fixed is exactly the
+      # semantic-conflict shape this whole gate exists for.
+      - name: ruff check the rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          uv tool install ruff
+          ruff check . || { echo "::error::rebased tree fails \`ruff check .\` — ci.yml's blocking lint would go red on main. origin/main left untouched."; exit 1; }
 
       - name: Install dependencies
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
