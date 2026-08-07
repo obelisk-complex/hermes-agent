@@ -3774,6 +3774,37 @@ def _command_targets_hermes_home(command: str) -> bool:
     return False
 
 
+def _observe_surface_tags(surface: str, pattern_key: str,
+                          tags: frozenset[ActionTag], *, note: str = "") -> list[str]:
+    """Record the tags a no-author-verdict surface saw (Phase B, T11).
+
+    These surfaces (``_run_approval_gate``, the elicitation gate, the
+    non-smart ``check_execute_code_guard`` branches, and the write gate) have
+    no guardian verdict, so ``evaluate_dual_signal`` is never called on them
+    and no tag they emit can auto-approve anything (D4, spec line 390). The
+    tag exists so an operator can see what class of action each human decision
+    covered.
+
+    ``note`` carries a surface-specific observation (T12 passes the MCP
+    ``readOnlyHint``). Returns the sorted tag values so the caller can attach
+    them to its result dict.
+
+    Total by the same rule as ``_resolve_tags`` (G13): observability must
+    never raise onto an approval path, so a failure degrades to ``[]``.
+    """
+    try:
+        tag_values = sorted(tag.value for tag in tags)
+        logger.info(
+            "action-tags surface=%s pattern_key=%s tags=%s auto_approvable=no%s",
+            surface, pattern_key, ",".join(tag_values) or "none",
+            f" {note}" if note else "",
+        )
+        return tag_values
+    except Exception as exc:
+        logger.warning("Action-tag observation failed on surface %s: %s", surface, exc)
+        return []
+
+
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
     """Return whether one exact session bypasses Hermes approval prompts.
 
@@ -4061,6 +4092,15 @@ def _run_approval_gate(
         return {"approved": True, "message": None}
 
     approval_callback = _resolve_cli_approval_callback(approval_callback)
+    # Phase B (T11): tags for observability only. This surface has no author
+    # verdict (D4) so nothing below can auto-approve; the tag rides the result
+    # dict and one log line. Resolved AFTER the yolo and allowlist
+    # short-circuits so those two returns keep their exact historical shape.
+    action_tags = _observe_surface_tags(
+        "approval_gate",
+        pattern_key,
+        _resolve_tags([(pattern_key, description, False)], display_target),
+    )
 
     is_cli = _is_interactive_cli()
     is_gateway = _is_gateway_approval_context()
@@ -4101,6 +4141,7 @@ def _run_approval_gate(
                     "message": cron_deny_message,
                     "pattern_key": pattern_key,
                     "description": description,
+                    "action_tags": action_tags,
                 }
             # cron_mode: approve — fall through to auto-approve below.
         elif fail_closed_when_no_human:
@@ -4122,13 +4163,14 @@ def _run_approval_gate(
                 ),
                 "pattern_key": pattern_key,
                 "description": description,
+                "action_tags": action_tags,
             }
         logger.warning(
             "%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
             "HERMES_GATEWAY_SESSION to require approval.",
             autoapprove_log_prefix, pattern_key, description,
         )
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None, "action_tags": action_tags}
 
     if is_gateway or env_var_enabled("HERMES_EXEC_ASK"):
         # Interactive gateway round-trip when a notify callback is
@@ -4162,6 +4204,7 @@ def _run_approval_gate(
                     "description": description,
                     "outcome": "notify_failed",
                     "user_consent": False,
+                    "action_tags": action_tags,
                 }
             resolved = decision["resolved"]
             choice = decision["choice"]
@@ -4192,6 +4235,7 @@ def _run_approval_gate(
                     "outcome": outcome,
                     "user_consent": False,
                     "deny_reason": deny_reason,
+                    "action_tags": action_tags,
                 }
 
             if choice == "session":
@@ -4200,7 +4244,7 @@ def _run_approval_gate(
                 approve_session(session_key, pattern_key)
                 approve_permanent(pattern_key)
                 save_permanent_allowlist(_permanent_approved)
-            return {"approved": True, "message": None}
+            return {"approved": True, "message": None, "action_tags": action_tags}
 
         # No notify callback: interactive CLI with a panel callback should
         # still prompt locally instead of queuing a pending approval nobody
@@ -4227,6 +4271,7 @@ def _run_approval_gate(
                     f"⚠️ This action is potentially dangerous ({description}). "
                     f"Asking the user for approval.\n\n**Target:**\n```\n{display_target}\n```"
                 ),
+                "action_tags": action_tags,
             }
 
     _fire_approval_hook(
@@ -4265,6 +4310,7 @@ def _run_approval_gate(
             "description": description,
             "outcome": "timeout",
             "user_consent": False,
+            "action_tags": action_tags,
         }
 
     if choice == "deny":
@@ -4279,6 +4325,7 @@ def _run_approval_gate(
             "description": description,
             "outcome": "denied",
             "user_consent": False,
+            "action_tags": action_tags,
         }
 
     if choice == "session":
@@ -4288,7 +4335,7 @@ def _run_approval_gate(
         approve_permanent(pattern_key)
         save_permanent_allowlist(_permanent_approved)
 
-    return {"approved": True, "message": None}
+    return {"approved": True, "message": None, "action_tags": action_tags}
 
 
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
