@@ -4,7 +4,7 @@ Durable facts about this codebase and its conventions. Not a task log — keep
 entries that will still matter in future sessions. (2026-08-07: created after
 the dual-signal approval gate implementation.)
 
-## Dual-signal auto-approval gate (implemented, uncommitted as of 2026-08-07)
+## Dual-signal auto-approval gate (committed b0804f36b, pushed to obelisk-complex/hermes-agent branch feat/dual-signal-approval-gate-fresh, based on origin/main, 2026-08-07)
 
 Ported from Cloudflare OS's Gatekeeper. Design/audit trail:
 `/media/owner/Workspace/hermes-fixes-plans/2026-08-07-dual-signal-approval-gate-plan.md`
