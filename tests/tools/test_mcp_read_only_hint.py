@@ -6,7 +6,7 @@ NOT_WIRED, so no listing can make anything auto-approve.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -204,4 +204,129 @@ class TestHintReachesTheElicitationGate:
                  if "action-tags surface=mcp_elicitation" in r.getMessage()]
         assert len(lines) == 1
         assert "tags=mcp.tool" in lines[0]
+        assert "read_only_hint=True" in lines[0]
+
+
+def _patch_mcp_loop_run_directly():
+    """Match TestToolHandler._patch_mcp_loop in test_mcp_tool.py: run the
+    coroutine handed to _run_on_mcp_loop synchronously via asyncio.run, so a
+    handler built by _make_tool_handler actually executes its _call()
+    closure instead of being scheduled on a background loop."""
+    def fake_run(coro_or_factory, timeout=30):
+        coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+        return asyncio.run(coro)
+    return patch("tools.mcp_tool._run_on_mcp_loop", side_effect=fake_run)
+
+
+class TestPendingCallToolNameLifecycle:
+    """Fix-round Finding 1: the set/clear of _pending_call_tool_name inside
+    _make_tool_handler._call had zero coverage — every existing test set the
+    attribute by hand rather than driving a real call. Deleting either the
+    set line or the finally-clear line left all tests green. This test
+    drives a real session.call_tool through the real _call() closure and
+    observes the attribute from inside the mocked call itself, so it fails
+    if either line goes missing."""
+
+    def test_tool_name_is_set_during_the_call_and_cleared_after(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        server = MCPServerTask("call_lifecycle_srv")
+        seen_during_call = {}
+
+        async def _capture(name, arguments=None):
+            # Runs "inside" session.call_tool -- i.e. strictly after the
+            # real `server._pending_call_tool_name = tool_name` line and
+            # strictly before its `finally` clears it. If that set line is
+            # deleted, this observes None instead of "reader".
+            seen_during_call["tool_name"] = server._pending_call_tool_name
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok")], isError=False,
+            )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(side_effect=_capture)
+        server.session = mock_session
+        _servers["call_lifecycle_srv"] = server
+
+        try:
+            assert server._pending_call_tool_name is None  # sanity: pre-call
+            handler = _make_tool_handler("call_lifecycle_srv", "reader", 30)
+            with _patch_mcp_loop_run_directly():
+                handler({})
+        finally:
+            _servers.pop("call_lifecycle_srv", None)
+
+        assert seen_during_call["tool_name"] == "reader"
+        # The more important half: if the finally-clear is deleted, this
+        # stays "reader" and a later elicitation with no call in flight
+        # would silently inherit a stale tool's hint.
+        assert server._pending_call_tool_name is None
+
+
+class TestEndToEndCaptureThroughDecision:
+    """Fix-round Finding 2: T12's verify line ("a fake listing with
+    readOnlyHint: true cannot reach auto_approved=True, including through
+    the elicitation gate") needs one test that spans all three stages for
+    real: Task 5's capture at tool registration, this task's threading via
+    the genuine _pending_call_tool_name set inside _call(), and a genuine
+    request_elicitation_consent call reached only through the elicitation
+    handler -- never a literal read_only_hint kwarg, never a stubbed
+    request_elicitation_consent. Deleting the fake-listing setup would
+    change mcp_tool_read_only_hint's answer to None and this test would
+    catch that via the audit-line assertion.
+    """
+
+    def test_capture_and_a_real_call_drive_a_real_denial_with_the_hint_logged(
+        self, monkeypatch, caplog,
+    ):
+        from tools.mcp_tool import ElicitationHandler, _make_tool_handler, _servers
+        import tools.approval as approval_module
+
+        server = MCPServerTask("e2e_full_srv")
+        # Stage 1 (Task 5): the server's own tool listing declares
+        # readOnlyHint: true. This is the "fake listing" the spec's verify
+        # line names.
+        server._tools = [_tool("reader", SimpleNamespace(readOnlyHint=True))]
+        with patch("tools.registry.registry", ToolRegistry()):
+            _register_server_tools("e2e_full_srv", server, {})
+
+        handler = ElicitationHandler("e2e_full_srv", {"timeout": 5}, owner=server)
+        outcome = {}
+
+        async def _capture(name, arguments=None):
+            # Stage 2 (this task): fired from "inside" session.call_tool,
+            # while server._pending_call_tool_name is genuinely "reader" --
+            # set by _call()'s own set line, not poked by the test. This
+            # mirrors production: the MCP recv loop fires elicitation/create
+            # while the tool call is still in flight.
+            outcome["result"] = await handler(context=None, params=_form_params())
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="ok")], isError=False,
+            )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(side_effect=_capture)
+        server.session = mock_session
+        _servers["e2e_full_srv"] = server
+
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context",
+                            lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "deny")
+
+        try:
+            with caplog.at_level("INFO", logger="tools.approval"), \
+                 _patch_mcp_loop_run_directly():
+                tool_handler = _make_tool_handler("e2e_full_srv", "reader", 30)
+                tool_handler({})
+        finally:
+            _servers.pop("e2e_full_srv", None)
+
+        # Stage 3: the real decision. A readOnlyHint: true listing did not
+        # turn the stubbed denial into an approval.
+        assert outcome["result"].action == "decline"
+
+        lines = [r.getMessage() for r in caplog.records
+                 if "action-tags surface=mcp_elicitation" in r.getMessage()]
+        assert len(lines) == 1
         assert "read_only_hint=True" in lines[0]
