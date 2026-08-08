@@ -2319,6 +2319,16 @@ class ElicitationHandler:
         # contextvars.Context.run so the gateway-platform detection in
         # request_elicitation_consent picks up the right session.
         captured = getattr(self.owner, "_pending_call_context", None) if self.owner else None
+        # T12: the readOnlyHint the server declared for the tool whose call
+        # provoked this elicitation. Advisory: it rides the audit line and
+        # nothing reads it into the decision.
+        in_flight_tool = (
+            getattr(self.owner, "_pending_call_tool_name", None) if self.owner else None
+        )
+        read_only_hint = (
+            mcp_tool_read_only_hint(self.server_name, in_flight_tool)
+            if in_flight_tool else None
+        )
 
         def _invoke_consent() -> str:
             if captured is None:
@@ -2327,6 +2337,7 @@ class ElicitationHandler:
                     description,
                     timeout_seconds=int(self.timeout),
                     surface=f"mcp-elicitation/{self.server_name}",
+                    read_only_hint=read_only_hint,
                 )
             # Context.run can only execute a context once — copy to allow
             # multiple elicitations within a single tool call.
@@ -2336,6 +2347,7 @@ class ElicitationHandler:
                 description,
                 timeout_seconds=int(self.timeout),
                 surface=f"mcp-elicitation/{self.server_name}",
+                read_only_hint=read_only_hint,
             )
 
         try:
@@ -2389,7 +2401,7 @@ class MCPServerTask:
         "_sampling", "_elicitation",
         "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
-        "_pending_call_context",
+        "_pending_call_context", "_pending_call_tool_name",
         "_lifecycle_started_at", "_last_tool_call_at",
         "_idle_timeout_seconds", "_max_lifetime_seconds", "_recycled_reason",
         "initialize_result", "_ping_unsupported", "_list_cache_meta",
@@ -2474,6 +2486,11 @@ class MCPServerTask:
         # gateway-platform attribution and routes the approval prompt
         # to the right surface (Telegram, Slack, etc.).
         self._pending_call_context: Optional[contextvars.Context] = None
+        # Raw MCP name of the tool currently inside session.call_tool, set and
+        # cleared on the same lines as _pending_call_context. Lets the
+        # elicitation callback attribute the request to the tool that provoked
+        # it, so its captured readOnlyHint can ride the audit line (T12).
+        self._pending_call_tool_name: Optional[str] = None
         now = time.monotonic()
         self._lifecycle_started_at: float = now
         self._last_tool_call_at: float = now
@@ -6123,6 +6140,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # task, which doesn't inherit our contextvars) can replay
                 # it and detect the gateway platform / session for routing.
                 server._pending_call_context = contextvars.copy_context()
+                server._pending_call_tool_name = tool_name
                 try:
                     # Fast-fail (#81995): a stdio subprocess that is already
                     # dead must not own this call slot — fail immediately
@@ -6188,6 +6206,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                             )
                 finally:
                     server._pending_call_context = None
+                    server._pending_call_tool_name = None
             # The RPC round-trip completed — the session is demonstrably
             # healthy at the transport level (even if the tool itself
             # returned isError). Clear the rapid-drop budget (#62212).

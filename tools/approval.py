@@ -6149,6 +6149,7 @@ def request_elicitation_consent(
     *,
     timeout_seconds: int | None = None,
     surface: str = "mcp-elicitation",
+    read_only_hint: bool | None = None,
 ) -> str:
     """Route an MCP elicitation request to whichever approval surface owns
     the active session and return a normalized result.
@@ -6161,6 +6162,11 @@ def request_elicitation_consent(
     Always fails closed: missing notify_cb in a gateway session, timeouts,
     and exceptions all map to ``"decline"`` so a server treats them as
     "user did not approve" rather than retrying or hanging.
+
+    ``read_only_hint`` is the MCP server's own ``annotations.readOnlyHint``
+    declaration for the tool whose call provoked this elicitation (T12). It is
+    recorded in the audit line and read by nothing else: a server cannot
+    reduce its own friction by declaring itself read-only.
 
     Returns one of ``"accept" | "decline" | "cancel"``.
     """
@@ -6179,6 +6185,7 @@ def request_elicitation_consent(
         "mcp_elicitation",
         "mcp_elicitation",
         _resolve_tags([("mcp_elicitation", description, False)], message),
+        note=f"read_only_hint={read_only_hint}",
     )
 
     if _is_gateway_approval_context():
