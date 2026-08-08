@@ -5741,6 +5741,17 @@ def check_execute_code_guard(code: str, env_type: str,
             }
         return {"approved": True, "message": None}
 
+    # Phase B (T11): every branch below is a gate entry, so all of them carry
+    # code.exec. No author verdict exists outside the smart branch, so no
+    # auto-approval path is added here (D4). code.exec is in
+    # NEVER_AUTO_APPROVABLE (D9), so the tag cannot enable anything anywhere.
+    # The three returns ABOVE this line (isolated container backends, yolo,
+    # approvals.mode: off) are bypasses that never enter the gate and stay
+    # untagged, matching _run_approval_gate's short-circuits.
+    _observe_surface_tags(
+        "execute_code_guard", pattern_key, frozenset({ActionTag.CODE_EXEC}),
+    )
+
     # Cron: no user is present to approve arbitrary code.
     if _is_cron_approval_context():
         if _get_cron_approval_mode() == "deny":
@@ -5758,8 +5769,10 @@ def check_execute_code_guard(code: str, env_type: str,
                 "description": description,
                 "outcome": "blocked",
                 "user_consent": False,
+                "action_tags": [ActionTag.CODE_EXEC.value],
             }
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     # Only gateway/ask contexts get the one-shot whole-script approval.
     #   * CLI interactive: the script's terminal() calls are guarded per-call
@@ -5776,7 +5789,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # the script's own per-call terminal() guards are handled separately in
     # check_all_command_guards.
     if not is_gateway and not is_ask:
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     session_key = get_current_session_key()
     # Built only now (past the early-return gates) so the common non-approval
@@ -5787,7 +5801,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts the user (#39275).
     if is_approved(session_key, pattern_key):
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     # Smart mode: ask the aux LLM about the whole script. An APPROVE here only
     # suppresses the redundant whole-script prompt; the per-call terminal()
@@ -5850,6 +5865,7 @@ def check_execute_code_guard(code: str, env_type: str,
                 "description": description,
                 "outcome": "denied",
                 "user_consent": False,
+                "action_tags": [ActionTag.CODE_EXEC.value],
             }
         if verdict == "deny":
             # Guardian DENY that falls through to a one-operation human
@@ -6046,6 +6062,7 @@ def check_execute_code_guard(code: str, env_type: str,
                 "user's decision; if this turn must end, report that approval "
                 "is pending."
             ),
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
         if smart_denied_for_owner:
             result.update(smart_denied=True, allow_permanent=False)
@@ -6073,6 +6090,7 @@ def check_execute_code_guard(code: str, env_type: str,
             "description": description,
             "outcome": "notify_failed",
             "user_consent": False,
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
 
     resolved = decision["resolved"]
@@ -6099,6 +6117,7 @@ def check_execute_code_guard(code: str, env_type: str,
             "outcome": "timeout" if not resolved else "denied",
             "user_consent": False,
             "deny_reason": deny_reason,
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
 
     # Never persist a smart-DENY override under the coarse execute_code key;
@@ -6116,7 +6135,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # A human approval resets the consecutive-denial tally.
     _reset_denials(session_key)
     return {"approved": True, "message": None,
-            "user_approved": True, "description": description}
+            "user_approved": True, "description": description,
+            "action_tags": [ActionTag.CODE_EXEC.value]}
 
 
 # =========================================================================
