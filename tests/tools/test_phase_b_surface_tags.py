@@ -245,3 +245,136 @@ class TestElicitationTags:
         from tools.action_tags import NOT_WIRED
         assert "mcp.tool" in NOT_WIRED
         assert "mcp.tool" not in CONFIGURABLE_TAGS
+
+
+class TestExecuteCodeParity:
+    """Control: dual_signal + every configurable tag changes no outcome here.
+
+    code.exec is in NEVER_AUTO_APPROVABLE (D9), so no configuration can move
+    any of these branches.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _manual_mode(self, monkeypatch):
+        """Pin approvals.mode.
+
+        check_execute_code_guard reads the mode separately from the approvals
+        block (:4677), so an unpinned mode lets the machine's real config.yaml
+        move a branch: `off` returns above the gate, `smart` calls the real
+        guardian LLM. Every branch under test here returns before the smart
+        branch, so `manual` isolates the auto_approve axis.
+        """
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+
+    def test_container_backend_still_skips(self, monkeypatch):
+        _set_config(monkeypatch)
+        assert check_execute_code_guard("print(1)", "vercel_sandbox")["approved"] is True
+        assert check_execute_code_guard("print(1)", "singularity")["approved"] is True
+
+    def test_yolo_still_bypasses(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "is_current_session_yolo_enabled",
+                            lambda: True)
+        assert check_execute_code_guard("print(1)", "local")["approved"] is True
+
+    def test_cron_deny_still_blocks(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "deny")
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["approved"] is False
+        assert res["outcome"] == "blocked"
+
+    def test_cron_approve_still_allows(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "approve")
+        assert check_execute_code_guard("print(1)", "local")["approved"] is True
+
+    def test_local_non_gateway_still_allows(self, monkeypatch):
+        """R18: the documented pre-existing whole-script gap, asserted not hidden."""
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        assert check_execute_code_guard("print(1)", "local")["approved"] is True
+
+    def test_session_allowlist_hit_still_allows(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "is_approved", lambda sk, pk: True)
+        assert check_execute_code_guard("print(1)", "local")["approved"] is True
+
+    def test_gateway_without_notifier_still_pends(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["approved"] is False
+        assert res["status"] == "pending_approval"
+
+
+class TestExecuteCodeTags:
+    @pytest.fixture(autouse=True)
+    def _manual_mode(self, monkeypatch):
+        """Same pin as TestExecuteCodeParity: no unpinned mode, no live LLM."""
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+
+    def test_cron_deny_carries_code_exec(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "deny")
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["action_tags"] == ["code.exec"]
+
+    def test_cron_approve_carries_code_exec(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "approve")
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["action_tags"] == ["code.exec"]
+
+    def test_local_non_gateway_allow_carries_code_exec(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["action_tags"] == ["code.exec"]
+
+    def test_session_allowlist_hit_carries_code_exec(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "is_approved", lambda sk, pk: True)
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["action_tags"] == ["code.exec"]
+
+    def test_pending_result_carries_code_exec(self, monkeypatch):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        res = check_execute_code_guard("print(1)", "local")
+        assert res["action_tags"] == ["code.exec"]
+
+    def test_audit_line_names_code_exec(self, monkeypatch, caplog):
+        _set_config(monkeypatch)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_module, "_is_cron_approval_context", lambda: False)
+        with caplog.at_level("INFO", logger="tools.approval"):
+            check_execute_code_guard("print(1)", "local")
+        lines = [r.getMessage() for r in caplog.records
+                 if "action-tags surface=execute_code_guard" in r.getMessage()]
+        assert len(lines) == 1
+        assert "tags=code.exec" in lines[0]
+
+    def test_bypass_returns_stay_untagged(self, monkeypatch):
+        """Container skip and yolo return before the gate is entered."""
+        _set_config(monkeypatch)
+        assert "action_tags" not in check_execute_code_guard("print(1)", "vercel_sandbox")
+        monkeypatch.setattr(approval_module, "is_current_session_yolo_enabled",
+                            lambda: True)
+        assert "action_tags" not in check_execute_code_guard("print(1)", "local")
