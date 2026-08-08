@@ -7252,7 +7252,8 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     # T12: record what this listing declared, replacing any earlier capture
     # for this server so a refresh cannot leave a stale hint behind. Only
     # tools that passed the include/exclude filter are recorded, which is
-    # exactly the set that can be called.
+    # close to but not exactly the set that can be called — the collision
+    # preflight below can still drop a candidate after this point.
     _track_mcp_tool_read_only_hints(name, read_only_hints)
 
     # Generated resource/prompt utility tools share the same namespace as raw

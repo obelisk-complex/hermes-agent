@@ -4368,7 +4368,13 @@ def check_dangerous_command(command: str, env_type: str,
             so its commands can reach the host and must not skip approval.
 
     Returns:
-        {"approved": True/False, "message": str or None, ...}
+        {"approved": True/False, "message": str or None, ...}. Branches that
+        go through ``_run_approval_gate`` also carry an ``action_tags`` key
+        (a single resolved tag set for the matched pattern, per Phase B T11)
+        — absent on the earlier bypass/hardline/allowlist returns above. It
+        records what class of action the decision covered, for audit/
+        observability only: it is never an input to any approval decision
+        here and must never be read as one.
     """
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
@@ -4467,7 +4473,12 @@ def request_tool_approval(
         ``{"approved": True, "message": None}`` when allowed, or
         ``{"approved": False, "message": <reason>, ...}`` when denied /
         blocked. Shape matches ``check_dangerous_command`` so callers handle
-        both paths identically.
+        both paths identically. Gated branches also carry an
+        ``action_tags`` key inherited from ``_run_approval_gate`` (single-
+        pattern tag resolution, Phase B T11). It records what class of
+        action the decision covered, for audit/observability only: it is
+        never an input to any approval decision here and must never be
+        read as one.
 
     Non-interactive contexts: cron jobs honor ``approvals.cron_mode`` (parity
     with dangerous commands); any OTHER non-interactive non-gateway context
@@ -5693,6 +5704,18 @@ def check_execute_code_guard(code: str, env_type: str,
     issues; running arbitrary code headlessly without any approval surface is
     trusted-by-config (set a gateway/ask surface or ``approvals.cron_mode`` to
     require approval).
+
+    Returns:
+        Same dict contract as ``check_all_command_guards``, with one
+        difference: the ``action_tags`` key here (when present — absent on
+        the isolated-backend/yolo/mode-off bypasses above the gate) is a
+        single resolved tag set for this call — either the smart branch's
+        ``list(decision.tags)`` or the hardcoded ``[ActionTag.CODE_EXEC.value]``
+        on every other gated branch — not the full per-warning list
+        ``check_all_command_guards`` returns on its own (Phase A) surface.
+        It records what class of action the decision covered, for audit/
+        observability only (Phase B T11): it is never an input to any
+        approval decision here and must never be read as one.
     """
     pattern_key = "execute_code"
     description = (
@@ -6185,7 +6208,7 @@ def request_elicitation_consent(
         "mcp_elicitation",
         "mcp_elicitation",
         _resolve_tags([("mcp_elicitation", description, False)], message),
-        note=f"read_only_hint={read_only_hint}",
+        note=f"caller_surface={surface} read_only_hint={read_only_hint}",
     )
 
     if _is_gateway_approval_context():
