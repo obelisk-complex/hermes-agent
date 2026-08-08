@@ -78,3 +78,130 @@ class TestCaptureThroughRegistration:
         with patch("tools.registry.registry", ToolRegistry()):
             _register_server_tools("hint_srv2", server, {})
         assert mcp_tool_read_only_hint("hint_srv2", "reader") is False
+
+
+import asyncio  # noqa: E402  -- top-level imports above are importorskip-gated
+
+from mcp.types import ElicitResult  # noqa: E402
+from tools.mcp_tool import ElicitationHandler  # noqa: E402
+
+
+def _form_params(message="please confirm"):
+    return SimpleNamespace(mode="form", message=message, requested_schema={})
+
+
+class TestReadOnlyHintCannotAutoApprove:
+    """T12's verify line: a fake listing declaring readOnlyHint: true cannot
+    reach auto_approved=True, including through the elicitation gate."""
+
+    def test_hint_true_does_not_change_the_elicitation_outcome(self, monkeypatch):
+        import tools.approval as approval_module
+        from tools.action_tags import CONFIGURABLE_TAGS
+
+        server = MCPServerTask("ro_srv")
+        server.session = MagicMock()
+        server._tools = [_tool("reader", SimpleNamespace(readOnlyHint=True))]
+        with patch("tools.registry.registry", ToolRegistry()):
+            _register_server_tools("ro_srv", server, {})
+
+        def fake_config():
+            return {
+                "mode": "smart",
+                "auto_approve": "dual_signal",
+                "auto_approve_tags": sorted(CONFIGURABLE_TAGS),
+                "auto_approve_enabled_by": "",
+            }
+        monkeypatch.setattr(approval_module, "_get_approval_config", fake_config)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context",
+                            lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "deny")
+
+        # A readOnlyHint of True must not turn a denial into an approval.
+        assert approval_module.request_elicitation_consent(
+            "confirm?", "server asks", read_only_hint=True,
+        ) == "decline"
+
+    def test_elicitation_never_calls_the_dual_signal_gate(self, monkeypatch):
+        import tools.approval as approval_module
+        import tools.auto_approval as auto_approval_module
+
+        def _boom(**kwargs):
+            raise AssertionError(
+                "evaluate_dual_signal reached the elicitation gate - "
+                "readOnlyHint is advisory and mcp.tool is in NOT_WIRED"
+            )
+        monkeypatch.setattr(auto_approval_module, "evaluate_dual_signal", _boom)
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context",
+                            lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "deny")
+        assert approval_module.request_elicitation_consent(
+            "confirm?", "server asks", read_only_hint=True,
+        ) == "decline"
+
+    def test_handler_outcome_is_unchanged_by_the_hint(self):
+        """The handler's accept/decline/cancel mapping does not move."""
+        handler = ElicitationHandler("ro_srv", {"timeout": 5})
+        with patch("tools.approval.request_elicitation_consent",
+                   return_value="accept"):
+            result = asyncio.run(handler(context=None, params=_form_params()))
+        assert isinstance(result, ElicitResult)
+        assert result.action == "accept"
+
+
+class TestHintReachesTheElicitationGate:
+    def test_in_flight_tool_hint_is_passed_through(self):
+        server = MCPServerTask("e2e_srv")
+        server.session = MagicMock()
+        server._tools = [_tool("reader", SimpleNamespace(readOnlyHint=True))]
+        with patch("tools.registry.registry", ToolRegistry()):
+            _register_server_tools("e2e_srv", server, {})
+        server._pending_call_tool_name = "reader"
+
+        handler = ElicitationHandler("e2e_srv", {"timeout": 5}, owner=server)
+        seen = {}
+
+        def _record(message, description, **kwargs):
+            seen.update(kwargs)
+            return "decline"
+
+        with patch("tools.approval.request_elicitation_consent", _record):
+            result = asyncio.run(handler(context=None, params=_form_params()))
+
+        assert result.action == "decline"
+        assert seen["read_only_hint"] is True
+
+    def test_no_in_flight_tool_passes_none(self):
+        server = MCPServerTask("e2e_srv2")
+        server.session = MagicMock()
+        server._tools = [_tool("reader", SimpleNamespace(readOnlyHint=True))]
+        with patch("tools.registry.registry", ToolRegistry()):
+            _register_server_tools("e2e_srv2", server, {})
+        # No call in flight: _pending_call_tool_name is None from __init__.
+        handler = ElicitationHandler("e2e_srv2", {"timeout": 5}, owner=server)
+        seen = {}
+
+        def _record(message, description, **kwargs):
+            seen.update(kwargs)
+            return "decline"
+
+        with patch("tools.approval.request_elicitation_consent", _record):
+            asyncio.run(handler(context=None, params=_form_params()))
+        assert seen["read_only_hint"] is None
+
+    def test_audit_line_records_the_hint(self, monkeypatch, caplog):
+        import tools.approval as approval_module
+        monkeypatch.setattr(approval_module, "_is_gateway_approval_context",
+                            lambda: False)
+        monkeypatch.setattr(approval_module, "prompt_dangerous_approval",
+                            lambda *a, **k: "once")
+        with caplog.at_level("INFO", logger="tools.approval"):
+            approval_module.request_elicitation_consent(
+                "confirm?", "server asks", read_only_hint=True,
+            )
+        lines = [r.getMessage() for r in caplog.records
+                 if "action-tags surface=mcp_elicitation" in r.getMessage()]
+        assert len(lines) == 1
+        assert "tags=mcp.tool" in lines[0]
+        assert "read_only_hint=True" in lines[0]
