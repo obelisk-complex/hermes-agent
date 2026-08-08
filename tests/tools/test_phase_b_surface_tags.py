@@ -267,9 +267,17 @@ class TestExecuteCodeParity:
         monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
 
     def test_container_backend_still_skips(self, monkeypatch):
+        """Untagged distinguishes the container-skip bypass from the local-CLI
+        allow branch (:4770), which also returns approved=True under this
+        fixture but goes through the gate and is tagged.
+        """
         _set_config(monkeypatch)
-        assert check_execute_code_guard("print(1)", "vercel_sandbox")["approved"] is True
-        assert check_execute_code_guard("print(1)", "singularity")["approved"] is True
+        res_vercel = check_execute_code_guard("print(1)", "vercel_sandbox")
+        assert res_vercel["approved"] is True
+        assert "action_tags" not in res_vercel
+        res_singularity = check_execute_code_guard("print(1)", "singularity")
+        assert res_singularity["approved"] is True
+        assert "action_tags" not in res_singularity
 
     def test_yolo_still_bypasses(self, monkeypatch):
         _set_config(monkeypatch)
@@ -372,9 +380,14 @@ class TestExecuteCodeTags:
         assert "tags=code.exec" in lines[0]
 
     def test_bypass_returns_stay_untagged(self, monkeypatch):
-        """Container skip and yolo return before the gate is entered."""
+        """All three pre-gate bypasses return before the gate is entered.
+
+        vercel_sandbox and _should_skip_container_guards (singularity here)
+        are distinct return statements (:4719-4722); yolo is a third.
+        """
         _set_config(monkeypatch)
         assert "action_tags" not in check_execute_code_guard("print(1)", "vercel_sandbox")
+        assert "action_tags" not in check_execute_code_guard("print(1)", "singularity")
         monkeypatch.setattr(approval_module, "is_current_session_yolo_enabled",
                             lambda: True)
         assert "action_tags" not in check_execute_code_guard("print(1)", "local")
