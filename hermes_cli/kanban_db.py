@@ -10449,9 +10449,13 @@ def _dispatch_once_locked(
         # the review logic (AC verification, merge, etc.). The mandatory
         # kanban lifecycle is already injected into every worker's system
         # prompt via KANBAN_GUIDANCE, so this is the only extra skill the
-        # review agent needs. (This intentionally overrides any skills set by
-        # the pre_kanban_spawn override above.)
-        claimed.skills = ["sdlc-review"]
+        # review agent needs. Task skills are preserved (upstream contract:
+        # review dispatch must not drop the implementer's domain skills);
+        # sdlc-review is appended, deduped, and wins over any pre_kanban_spawn
+        # override that tried to replace it.
+        claimed.skills = list(
+            dict.fromkeys([*(claimed.skills or []), "sdlc-review"])
+        )
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect
