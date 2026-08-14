@@ -1,7 +1,14 @@
 ---
 name: self-checking-harness
-description: "5-gate validation protocol for subagents plus information retrieval chain. Every delegate_task subagent must complete validation gates; every information fetch follows local-wiki → curl → web_extract → browser."
+description: 5-gate validation protocol for subagents plus retrieval.
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+platforms: [linux, macos]
 category: software-development
+metadata:
+  hermes:
+    tags: [delegation, validation, subagents, retrieval]
 ---
 
 # Self-Checking Harness — 5-Gate Validation + Retrieval Protocol

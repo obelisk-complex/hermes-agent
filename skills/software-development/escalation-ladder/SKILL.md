@@ -1,13 +1,14 @@
 ---
 name: escalation-ladder
-description: Use when dispatching subagents via delegate_task. Automatically routes tasks through a capability-tiered cascade — local classifier → cheap cloud → capable cloud → frontier — based on task difficulty. Wraps delegate_task so every subagent dispatch picks the right model tier without manual model selection.
+description: Route delegate_task calls through a capability cascade.
 version: 1.0.0
 author: Hermes Agent
 license: MIT
+platforms: [linux, macos]
 metadata:
   hermes:
     tags: [delegation, routing, cost-optimization, model-selection, cascade]
-    related_skills: [self-checking-harness, plan-audit-loop]
+    related_skills: [self-checking-harness]
 ---
 
 # Escalation Ladder
