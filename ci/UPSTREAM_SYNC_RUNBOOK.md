@@ -20,16 +20,43 @@ dispatch. Each run:
    tests. The force-push happens only if this passes, so a broken rebase never
    lands on `origin/main`.
 5. Force-pushes the validated, rebased tree to `origin/main`.
+6. **Post-push CI gate:** the push above is `SYNC_PAT`-authored, which
+   triggers a full `ci.yml` run on `main` within ~1s. The sync job watches
+   that run's `All required checks pass` job (up to 45 min) and fails itself
+   — with a distinctly-worded alert — if the gate doesn't go green. This is
+   deliberately NOT a "never let a red main happen" guarantee: the pre-push
+   gate is fast and partial (fork-local tests + lockfile/lint only, one job,
+   one Python version), so `main` **can** still go red here, briefly, on
+   things only the full suite catches (e.g. `tests.yml`'s `save-durations`,
+   which is `main`-only and structurally invisible to any pre-push check).
+   What this guarantees is that a red `main` is *announced* within minutes
+   instead of sitting unnoticed.
 
-A conflict with **no** recorded resolution makes the rebase abort, fail loud,
-and leave `origin/main` untouched. That is the failure you are here to fix.
+There are now **two distinct failure shapes**, and the tracking issue text
+tells you which one you're looking at:
 
-A failed run also opens (or comments on) a single issue labelled
+- **Rebase or pre-push gate failed → `origin/main` was NOT updated.** A
+  conflict with no recorded resolution, or a pre-push check failure, aborts
+  the job before the push. This is the failure most of this doc is about.
+- **Post-push CI gate failed → `origin/main` WAS updated and is currently
+  red.** The rebase and pre-push gate both passed, the push happened, and
+  the full `ci.yml` run on that pushed SHA didn't come back green (or never
+  appeared, or hung past 45 min — the issue body names which). `origin/main`
+  is live and every `hermes update` consumer hard-resets to it. **Roll back
+  first, investigate second:** `git push --force origin <pre-sync-sha>:main`
+  using the SHA recorded in the sync run's own log (the step before "Push
+  validated rebase" prints `origin/main` before the force-push). Then
+  diagnose the failing `ci.yml` run linked in the issue like any other CI
+  failure — it is not a rebase problem, so the "Fixing it" section below
+  (rerere, `ci/rerere-cache/`) does not apply.
+
+Both failure shapes open or update the **same** single issue labelled
 `sync-upstream-blocked` — the Actions tab alone went unwatched for a 12-day
 failure streak (2026-07-22 to 2026-08-02) before anyone noticed, so the
-workflow now self-announces. It auto-closes on the next successful sync; it
-does not attempt to resolve the conflict itself (see the "Fixing it" section
-below — this is still a one-time human step, deliberately: auto-resolving a
+workflow now self-announces. It auto-closes on the next sync that is green
+through the post-push gate; it does not attempt to resolve either failure
+shape itself (see the "Fixing it" section below for the rebase-conflict
+case — this is still a one-time human step, deliberately: auto-resolving a
 semantic conflict is how the fork previously lost real hunks silently).
 
 ## Reading a failure
