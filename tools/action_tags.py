@@ -152,6 +152,12 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "recursive delete (flags after operands)": ActionTag.COMMAND_DELETE,
     "Windows cmd destructive delete": ActionTag.COMMAND_DELETE,
     "Windows PowerShell destructive delete": ActionTag.COMMAND_DELETE,
+    "Windows destructive delete (recursive/quiet switch)": ActionTag.COMMAND_DELETE,
+    "PowerShell destructive delete (Remove-Item)": ActionTag.COMMAND_DELETE,
+    "delete backups (wbadmin)": ActionTag.COMMAND_DELETE,
+    "delete volume shadow copies (vssadmin)": ActionTag.COMMAND_DELETE,
+    "registry delete (reg delete)": ActionTag.COMMAND_DELETE,
+    "registry value delete (Remove-ItemProperty -Force)": ActionTag.COMMAND_DELETE,
     "xargs with rm": ActionTag.COMMAND_DELETE,
     "find -exec/-execdir rm": ActionTag.COMMAND_DELETE,
     "find -delete": ActionTag.COMMAND_DELETE,
@@ -161,8 +167,15 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "recursive chown to root": ActionTag.COMMAND_PERMS,
     "recursive chown to root (long flag)": ActionTag.COMMAND_PERMS,
     "chmod +x followed by immediate execution": ActionTag.COMMAND_PERMS,
+    "grant Everyone access (icacls)": ActionTag.COMMAND_PERMS,
+    "reset ACLs recursively (icacls /reset)": ActionTag.COMMAND_PERMS,
     # disk
     "format filesystem": ActionTag.COMMAND_DISK,
+    "format filesystem (Format-Volume)": ActionTag.COMMAND_DISK,
+    "format drive (format.com)": ActionTag.COMMAND_DISK,
+    "wipe disk (Clear-Disk)": ActionTag.COMMAND_DISK,
+    "wipe free space (cipher /w)": ActionTag.COMMAND_DISK,
+    "disk partitioning (diskpart)": ActionTag.COMMAND_DISK,
     "disk copy": ActionTag.COMMAND_DISK,
     "write to block device": ActionTag.COMMAND_DISK,
     # SQL / catch-all command.exec
@@ -172,6 +185,8 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "fork bomb": ActionTag.COMMAND_EXEC,
     # egress
     "pipe remote content to shell": ActionTag.NET_EGRESS,
+    "pipe remote content to PowerShell (iwr | iex)": ActionTag.NET_EGRESS,
+    "execute remote content via Invoke-Expression": ActionTag.NET_EGRESS,
     "execute remote script via process substitution": ActionTag.NET_EGRESS,
     "execute remote content via command substitution": ActionTag.NET_EGRESS,
     "pipe decoded content to shell (possible command obfuscation)": ActionTag.NET_EGRESS,
@@ -189,6 +204,10 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "stop/restart system service": ActionTag.PROC_CONTROL,
     "kill all processes": ActionTag.PROC_CONTROL,
     "force kill processes": ActionTag.PROC_CONTROL,
+    "force kill processes (Stop-Process -Force)": ActionTag.PROC_CONTROL,
+    "force kill processes (taskkill /F)": ActionTag.PROC_CONTROL,
+    "force stop service (Stop-Service -Force)": ActionTag.PROC_CONTROL,
+    "stop/delete service (sc)": ActionTag.PROC_CONTROL,
     "force kill processes (killall -KILL)": ActionTag.PROC_CONTROL,
     "force kill processes (killall -s KILL)": ActionTag.PROC_CONTROL,
     "kill processes by regex (killall -r)": ActionTag.PROC_CONTROL,
@@ -212,6 +231,9 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "in-place edit of sensitive credential/SSH/shell-rc path": ActionTag.FILE_WRITE,
     "in-place edit of sensitive credential/SSH/shell-rc path (long flag)": ActionTag.FILE_WRITE,
     "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)": ActionTag.FILE_WRITE,
+    # secret reads (Windows paths)
+    "access to Hermes secrets (Windows path)": ActionTag.SECRET_READ,
+    "access to SSH keys (Windows path)": ActionTag.SECRET_READ,
     # config writes (static; the D14 override adds the dynamic Hermes-home route)
     "overwrite project env/config via tee": ActionTag.CONFIG_WRITE,
     "overwrite project env/config via redirection": ActionTag.CONFIG_WRITE,
@@ -235,6 +257,9 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "sudo with privilege flag (stdin/askpass/shell/list)": ActionTag.PRIV_ESCALATE,
     "sudo with combined-flag privilege escalation": ActionTag.PRIV_ESCALATE,
     "PowerShell encoded command execution": ActionTag.PRIV_ESCALATE,
+    # boot configuration (bcdedit /set) — system-level state mutation, no
+    # more specific tag
+    "modify boot configuration (bcdedit /set)": ActionTag.COMMAND_EXEC,
 }
 
 # Literals emitted by _execution_flag_findings / the parser-limit family
