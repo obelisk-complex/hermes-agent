@@ -4787,7 +4787,7 @@ def show_config():
         _managed_dir = managed_scope.get_managed_dir()
         print()
         print(color(
-            f"  ⚷ Some settings are managed by your administrator ({_managed_dir}) "
+            f"  [admin] Some settings are managed by your administrator ({_managed_dir}) "
             f"and cannot be changed",
             Colors.YELLOW,
             Colors.BOLD,
