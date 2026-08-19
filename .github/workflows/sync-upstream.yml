@@ -56,7 +56,7 @@ jobs:
           HAS_PAT: ${{ secrets.SYNC_PAT != '' }}
         run: |
           if [ "$HAS_PAT" != "true" ]; then
-            echo "::warning::SYNC_PAT is unset — the push to main will be GITHUB_TOKEN-authored and will NOT trigger ci.yml. The post-push CI gate will report 'no CI run appeared'."
+            echo "::warning::SYNC_PAT is unset — the push to main will be GITHUB_TOKEN-authored and will NOT trigger ci.yaml. The post-push CI gate will report 'no CI run appeared'."
           fi
 
       # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
@@ -194,7 +194,7 @@ jobs:
       # Python version. It cannot see upstream-owned tests, the JS/TS matrix,
       # the docs site, or the main-only jobs (e.g. tests.yml's save-durations,
       # which is what actually broke main on 2026-08-07). The SYNC_PAT push
-      # above already creates a full ci.yml run on main within ~1s (measured
+      # above already creates a full ci.yaml run on main within ~1s (measured
       # against runs 31103795631, 31007893479, 30912081013). Watch that run to
       # its gate and fail this job — and therefore fire the tracking-issue
       # notifier below — if it goes red.
@@ -216,7 +216,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ steps.push.outputs.sha }}
-          # ci.yml's aggregate gate — its own comment says branch protection
+          # ci.yaml's aggregate gate — its own comment says branch protection
           # should require only this check, so it's the correct thing to gate
           # on. Not the same as the run's overall conclusion (see below).
           GATE_JOB: All required checks pass
@@ -233,7 +233,7 @@ jobs:
           set -uo pipefail
 
           # ── 1. Find OUR run, by head SHA ─────────────────────────────────
-          # Query ci.yml's runs directly: tests.yml is workflow_call-only and
+          # Query ci.yaml's runs directly: tests.yml is workflow_call-only and
           # has no runs of its own. head_sha + event=push + head_branch=main
           # is an exact match; newest by run_started_at handles the (benign)
           # case of a manual re-dispatch racing us.
@@ -241,13 +241,13 @@ jobs:
           appear_deadline=$(( $(date +%s) + APPEAR_SECONDS ))
           while : ; do
             run_id=$(gh api \
-              "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$HEAD_SHA&event=push&per_page=100" \
+              "repos/$REPO/actions/workflows/ci.yaml/runs?head_sha=$HEAD_SHA&event=push&per_page=100" \
               --jq '[.workflow_runs[] | select(.head_branch=="main")]
                     | sort_by(.run_started_at) | last | .id // empty' 2>/dev/null || true)
             [ -n "$run_id" ] && break
             if [ "$(date +%s)" -ge "$appear_deadline" ]; then
               echo "reason=no-run" >> "$GITHUB_OUTPUT"
-              echo "::error::No ci.yml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED."
+              echo "::error::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yaml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED."
               exit 1
             fi
             sleep "$POLL_SECONDS"
@@ -258,7 +258,7 @@ jobs:
           echo "Watching CI run $run_id — $run_url"
 
           # ── 2. Poll the GATE JOB, not the run's conclusion ───────────────
-          # Deliberate: ci.yml's "CI timing report" job is NOT in
+          # Deliberate: ci.yaml's "CI timing report" job is NOT in
           # all-checks-pass's needs list, so an API blip there can take the
           # RUN's conclusion to failure while the gate itself was green.
           # Gating on the run would turn that into a false "main is red"
@@ -376,7 +376,7 @@ jobs:
             case "$REASON" in
               ci-red)     detail="\`All required checks pass\` concluded RED on \`main@$PUSHED_SHA\`. Failing jobs: $CI_RUN_URL" ;;
               ci-timeout) detail="\`All required checks pass\` did not conclude within 45 minutes on \`main@$PUSHED_SHA\` — the run is HUNG, not failed. Inspect and cancel/re-run: $CI_RUN_URL" ;;
-              no-run)     detail="No \`ci.yml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI gate is silently non-functional — fix this first.**" ;;
+              no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yaml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI gate is silently non-functional — fix this first.**" ;;
               *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
             esac
             body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED.**

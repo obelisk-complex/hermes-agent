@@ -21,7 +21,7 @@ dispatch. Each run:
    lands on `origin/main`.
 5. Force-pushes the validated, rebased tree to `origin/main`.
 6. **Post-push CI gate:** the push above is `SYNC_PAT`-authored, which
-   triggers a full `ci.yml` run on `main` within ~1s. The sync job watches
+   triggers a full `ci.yaml` run on `main` within ~1s. The sync job watches
    that run's `All required checks pass` job (up to 45 min) and fails itself
    — with a distinctly-worded alert — if the gate doesn't go green. This is
    deliberately NOT a "never let a red main happen" guarantee: the pre-push
@@ -40,13 +40,13 @@ tells you which one you're looking at:
   the job before the push. This is the failure most of this doc is about.
 - **Post-push CI gate failed → `origin/main` WAS updated and is currently
   red.** The rebase and pre-push gate both passed, the push happened, and
-  the full `ci.yml` run on that pushed SHA didn't come back green (or never
+  the full `ci.yaml` run on that pushed SHA didn't come back green (or never
   appeared, or hung past 45 min — the issue body names which). `origin/main`
   is live and every `hermes update` consumer hard-resets to it. **Roll back
   first, investigate second:** `git push --force origin <pre-sync-sha>:main`
   using the SHA recorded in the sync run's own log (the step before "Push
   validated rebase" prints `origin/main` before the force-push). Then
-  diagnose the failing `ci.yml` run linked in the issue like any other CI
+  diagnose the failing `ci.yaml` run linked in the issue like any other CI
   failure — it is not a rebase problem, so the "Fixing it" section below
   (rerere, `ci/rerere-cache/`) does not apply.
 
