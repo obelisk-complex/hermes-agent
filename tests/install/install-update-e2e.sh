@@ -246,6 +246,23 @@ require_hermes_works() {
   ok "hermes runs $when"
 }
 
+# Node's TLS through the sandbox proxy: npm must be able to reach the registry.
+# The proxy MITMs HTTPS with a cert minted from the sandbox CA; Node only trusts
+# it via NODE_EXTRA_CA_CERTS (it ignores SSL_CERT_FILE). If that env var points
+# at the wrong bundle, every npm handshake dies with SSLEOFError in proxy.log
+# and the install fails (or, on older installers, silently degrades browser
+# tools). npm ping is a pure TLS reachability check against the exact failing
+# path -- no resolution, no ETARGET risk. Time-boxed: a stalled registry fetch
+# would otherwise hang the job (same #39219 stall class as the install steps).
+require_node_tls_works() {
+  local when="$1" out
+  out="$(in_sandbox "export PATH=\$HOME/.hermes/node/bin:\$PATH && timeout 60 npm ping --registry https://registry.npmjs.org" 2>&1)" \
+    || { printf '%s\n' "$out" >&2; fail "npm ping failed $when (Node does not trust the sandbox CA?)"; }
+  printf '%s\n' "$out" | sed 's/^/    /'
+  echo "$out" | grep -q 'PONG' || fail "npm ping did not report PONG $when"
+  ok "npm reaches the registry $when"
+}
+
 # ── install the earlier Hermes ─────────────────────────────────────────────
 step "installing upstream $INSTALL_REF (real curl | install.sh: uv, Python, Node, venv)"
 install_in_sandbox "install of upstream $INSTALL_REF" "$INSTALL_REF" install
@@ -257,6 +274,7 @@ TARGET="$(sandbox_target)"
   || fail "install landed on the update target ($BASE); base and target must differ"
 ok "installed ${BASE:0:12}; update target is ${TARGET:0:12}"
 require_hermes_works 'after install'
+require_node_tls_works 'after install'
 
 # ── apply exactly one update route ─────────────────────────────────────────
 case "$ROUTE" in
