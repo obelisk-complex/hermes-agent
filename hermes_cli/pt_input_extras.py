@@ -176,6 +176,66 @@ def install_cmd_backspace_alias() -> int:
     return changed
 
 
+def install_literal_key_data_patch() -> bool:
+    """Make character-valued ``ANSI_SEQUENCES`` entries type their character.
+
+    prompt_toolkit's ``Vt100Parser._call_handler`` reports every exact match
+    as ``KeyPress(key=<table value>, data=<matched prefix>)`` — the data
+    payload is the RAW escape bytes, not the decoded key. The default
+    ``Keys.Any`` self-insert binding inserts ``event.data`` (named_commands
+    ``self_insert``), so mapping ``ESC[27;2;65~`` -> ``'A'`` decodes the key
+    but still inserts the raw bytes — the Shift+letter ``[27;2;<cp>~`` leak
+    (#87390 / #86866).
+
+    This patch narrows ``data`` to the decoded character for plain
+    single-character string keys, so self-insert types the capital instead
+    of the escape sequence. Everything else is untouched:
+
+    - prompt_toolkit ``Keys`` enums subclass ``str`` but are not ``str``
+      instances, so the ``type(key) is str`` guard (deliberately NOT
+      ``isinstance``) leaves Ctrl/Alt/functional-key data alone.
+    - Tuple mappings (``(Keys.Escape, ' ')`` etc.) recurse through the
+      wrapper per element; each plain-character element gains its decoded
+      data, which makes Alt+Space / Shift+Alt+letter match the behaviour of
+      the bare ``ESC`` + char form they emulate (previously inert).
+    - The parser fallback path already passes ``key is data`` for ordinary
+      typing, so plain characters are unchanged.
+
+    Hardening (per review):
+
+    - ``Vt100Parser`` is resolved per call, so an ``importlib.reload`` of
+      ``prompt_toolkit.input.vt100_parser`` (tests/cli/
+      test_bracketed_paste_timeout.py does this) re-wraps the new class
+      instead of patching a dead one.
+    - The idempotency marker lives ON the wrapper, so if anything replaces
+      ``_call_handler`` the marker goes with it and the next install wraps
+      the replacement rather than skipping on a stale class-level flag.
+    - The fetch uses ``getattr(..., None)`` with a None-guard so a future
+      prompt_toolkit that renames the private method degrades to the same
+      no-op a missing module returns, instead of raising through the
+      installers.
+
+    Returns True if the patch was (re)installed, False otherwise.
+    """
+    try:
+        import prompt_toolkit.input.vt100_parser as _vt100_mod
+    except Exception:
+        return False
+
+    original = getattr(_vt100_mod.Vt100Parser, "_call_handler", None)
+    if original is None or getattr(original, "_hermes_literal_key_data", False):
+        return False
+
+    def _patched_call_handler(self_parser, key, insert_text):
+        if type(key) is str and len(key) == 1:
+            insert_text = key
+        return original(self_parser, key, insert_text)
+
+    _patched_call_handler._hermes_literal_key_data = True
+    _vt100_mod.Vt100Parser._call_handler = _patched_call_handler
+    return True
+
+
 def install_modify_other_keys_aliases() -> int:
     """Map Ctrl+key and Alt+key sequences emitted under ``modifyOtherKeys`` level 2
     and Kitty CSI-u to the same ``Keys``.* values that the raw control bytes
@@ -332,6 +392,26 @@ def install_modify_other_keys_aliases() -> int:
         shift_map[ch] = upper_char
         shift_map[ch - 32] = upper_char
     _install_paired(2, shift_map)
+    # Shifted symbols under modifyOtherKeys: Ghostty escapes ANY codepoint in
+    # 0x40-0x7F when a modifier is held (src/input/key_encode.zig, v1.3.1), and
+    # the tilde form's codepoint is the ALREADY-SHIFTED, layout-resolved text
+    # (event.utf8) — so cp -> chr(cp) is layout-correct for these. Map the
+    # remaining unmapped shifted symbols: @ [ \\ ] ^ _ ` { | } ~
+    # (64, 91-96, 123-126). Shift+digit symbols (US: '!', AZERTY: '¹', ...) stay
+    # unmapped — the terminal sends the shifted glyph but the codepoint-to-char
+    # mapping is layout-specific there, so wrong input would be worse than a
+    # leak. TILDE FORM ONLY — deliberately NOT routed through _install_paired:
+    # the kitty CSI-u twin (ESC[<cp>;2u) would report the UNSHIFTED base-layout
+    # codepoint, which is dead weight at best and actively wrong for layouts
+    # where the shifted symbol lives on a different key (e.g. cp 45 for '_' on
+    # US is Shift+minus, but AZERTY has '_' on a different key). Modifier-2
+    # tilde entries carry no lock bits, matching the code comment above
+    # _LOCK_BIT_OFFSETS.
+    for cp in (64, 91, 92, 93, 94, 95, 96, 123, 124, 125, 126):
+        seq = f"\x1b[27;2;{cp}~"
+        if seq not in ANSI_SEQUENCES:
+            ANSI_SEQUENCES[seq] = chr(cp)
+            changed += 1
 
     # -- Multi-modifier letters: Shift+Alt (4), Ctrl+Shift (6),
     # Ctrl+Alt (7), Ctrl+Alt+Shift (8) ----
@@ -491,6 +571,13 @@ def install_modify_other_keys_aliases() -> int:
     # created before this install (or in earlier tests) can't misparse.
     if changed:
         _clear_vt100_prefix_cache()
+
+    # Character-valued entries decode the KEY but self-insert types the RAW
+    # data bytes — install the parser-level data patch so Shift+letter (and
+    # every other character mapping) actually types its character (#87390).
+    # Runs unconditionally (idempotent inside), so a re-install after a
+    # prompt_toolkit reload re-wraps the parser.
+    install_literal_key_data_patch()
 
     return changed
 
