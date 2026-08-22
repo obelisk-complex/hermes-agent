@@ -15,7 +15,10 @@ description: "Auto-loads the self-checking-harness skill and enforces gate
   v3.5.2: on_output double-fire fix; v3.3: subagent_stop, verifies_task, tokens."
 author: hermes
 kind: standalone
-hooks:
+# NOTE: the loader reads ``provides_hooks`` (plugins.py:1479), NOT ``hooks``.
+# ``hooks`` is not a recognised manifest key, so doctor warns that every
+# registered hook is undeclared. Use the correct key for accurate introspection.
+provides_hooks:
   - pre_tool_call
   - post_tool_call
   - pre_llm_call
