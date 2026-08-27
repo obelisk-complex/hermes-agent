@@ -2319,6 +2319,16 @@ class ElicitationHandler:
         # contextvars.Context.run so the gateway-platform detection in
         # request_elicitation_consent picks up the right session.
         captured = getattr(self.owner, "_pending_call_context", None) if self.owner else None
+        # T12: the readOnlyHint the server declared for the tool whose call
+        # provoked this elicitation. Advisory: it rides the audit line and
+        # nothing reads it into the decision.
+        in_flight_tool = (
+            getattr(self.owner, "_pending_call_tool_name", None) if self.owner else None
+        )
+        read_only_hint = (
+            mcp_tool_read_only_hint(self.server_name, in_flight_tool)
+            if in_flight_tool else None
+        )
 
         def _invoke_consent() -> str:
             if captured is None:
@@ -2327,6 +2337,7 @@ class ElicitationHandler:
                     description,
                     timeout_seconds=int(self.timeout),
                     surface=f"mcp-elicitation/{self.server_name}",
+                    read_only_hint=read_only_hint,
                 )
             # Context.run can only execute a context once — copy to allow
             # multiple elicitations within a single tool call.
@@ -2336,6 +2347,7 @@ class ElicitationHandler:
                 description,
                 timeout_seconds=int(self.timeout),
                 surface=f"mcp-elicitation/{self.server_name}",
+                read_only_hint=read_only_hint,
             )
 
         try:
@@ -2389,7 +2401,7 @@ class MCPServerTask:
         "_sampling", "_elicitation",
         "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
-        "_pending_call_context",
+        "_pending_call_context", "_pending_call_tool_name",
         "_lifecycle_started_at", "_last_tool_call_at",
         "_idle_timeout_seconds", "_max_lifetime_seconds", "_recycled_reason",
         "initialize_result", "_ping_unsupported", "_list_cache_meta",
@@ -2474,6 +2486,11 @@ class MCPServerTask:
         # gateway-platform attribution and routes the approval prompt
         # to the right surface (Telegram, Slack, etc.).
         self._pending_call_context: Optional[contextvars.Context] = None
+        # Raw MCP name of the tool currently inside session.call_tool, set and
+        # cleared on the same lines as _pending_call_context. Lets the
+        # elicitation callback attribute the request to the tool that provoked
+        # it, so its captured readOnlyHint can ride the audit line (T12).
+        self._pending_call_tool_name: Optional[str] = None
         now = time.monotonic()
         self._lifecycle_started_at: float = now
         self._last_tool_call_at: float = now
@@ -5207,12 +5224,21 @@ _parallel_safe_servers: set = set()
 # on parsing or re-sanitizing the generated name.
 _mcp_tool_server_names: Dict[str, str] = {}
 
+# Advisory ``annotations.readOnlyHint`` values captured at tool-discovery time
+# (T12), keyed raw server name -> raw MCP tool name. This is self-declaration
+# by an untrusted server, recorded for observation only: it is never an input
+# to evaluate_dual_signal, and ``mcp.tool`` is in NOT_WIRED, so no listing can
+# make anything auto-approve. ``None`` means the server declared nothing
+# usable. Guarded by ``_lock`` alongside _mcp_tool_server_names.
+_mcp_tool_read_only_hints: Dict[str, Dict[str, Optional[bool]]] = {}
+
 # Dedicated event loop running in a background daemon thread.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
 
 # Protects _mcp_loop, _mcp_thread, _servers, MCP connection status maps,
-# _parallel_safe_servers, _mcp_tool_server_names, and _stdio_pids.
+# _parallel_safe_servers, _mcp_tool_server_names, _mcp_tool_read_only_hints,
+# and _stdio_pids.
 _lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -6114,6 +6140,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # task, which doesn't inherit our contextvars) can replay
                 # it and detect the gateway platform / session for routing.
                 server._pending_call_context = contextvars.copy_context()
+                server._pending_call_tool_name = tool_name
                 try:
                     # Fast-fail (#81995): a stdio subprocess that is already
                     # dead must not own this call slot — fail immediately
@@ -6179,6 +6206,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                             )
                 finally:
                     server._pending_call_context = None
+                    server._pending_call_tool_name = None
             # The RPC round-trip completed — the session is demonstrably
             # healthy at the transport level (even if the tool itself
             # returned isError). Clear the rapid-drop budget (#62212).
@@ -7017,6 +7045,48 @@ def _forget_mcp_tool_server(tool_name: str) -> None:
         _mcp_tool_server_names.pop(tool_name, None)
 
 
+def _extract_read_only_hint(mcp_tool) -> Optional[bool]:
+    """Read ``annotations.readOnlyHint`` from an MCP tool listing (T12).
+
+    Returns the boolean the server declared, or ``None`` when it declared
+    nothing usable: no annotations, no key, or a non-boolean value. The SDK
+    models annotations as a pydantic object; cache-loaded and duck-typed
+    listings carry a plain dict or nothing at all, so all three shapes are
+    handled.
+
+    The value is advisory. A server that wants friction can set it False; a
+    server that wants less friction cannot get any, because nothing reads this
+    into an approval decision.
+    """
+    annotations = getattr(mcp_tool, "annotations", None)
+    if annotations is None:
+        return None
+    if isinstance(annotations, dict):
+        hint = annotations.get("readOnlyHint")
+    else:
+        hint = getattr(annotations, "readOnlyHint", None)
+    return hint if isinstance(hint, bool) else None
+
+
+def _track_mcp_tool_read_only_hints(
+    server_name: str, hints: Dict[str, Optional[bool]]
+) -> None:
+    """Replace the captured hints for one server (discovery and refresh)."""
+    with _lock:
+        _mcp_tool_read_only_hints[server_name] = dict(hints)
+
+
+def mcp_tool_read_only_hint(server_name: str, tool_name: str) -> Optional[bool]:
+    """Return the advisory ``readOnlyHint`` captured for one raw tool name.
+
+    ``None`` when the server declared nothing, when the tool is unknown, or
+    when the server was registered from the schema cache (which does not
+    persist annotations).
+    """
+    with _lock:
+        return _mcp_tool_read_only_hints.get(server_name, {}).get(tool_name)
+
+
 def _select_utility_schemas(server_name: str, server: MCPServerTask, config: dict) -> List[dict]:
     """Select utility schemas based on config and server capabilities."""
     tools_filter = config.get("tools") or {}
@@ -7147,6 +7217,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
 
     check_fn = _make_check_fn(name)
     candidates: List[dict] = []
+    read_only_hints: Dict[str, Optional[bool]] = {}
 
     # Trust-tier metadata (security boundary): capture the server's
     # configured trust tier and each tool's readOnlyHint annotation NOW,
@@ -7164,6 +7235,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             continue
 
         _scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
+        read_only_hints[mcp_tool.name] = _extract_read_only_hint(mcp_tool)
         schema = _convert_mcp_schema(name, mcp_tool)
         candidates.append(
             {
@@ -7176,6 +7248,13 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
                 "check_fn": check_fn,
             }
         )
+
+    # T12: record what this listing declared, replacing any earlier capture
+    # for this server so a refresh cannot leave a stale hint behind. Only
+    # tools that passed the include/exclude filter are recorded, which is
+    # close to but not exactly the set that can be called — the collision
+    # preflight below can still drop a candidate after this point.
+    _track_mcp_tool_read_only_hints(name, read_only_hints)
 
     # Generated resource/prompt utility tools share the same namespace as raw
     # MCP tools, so they must participate in the same collision preflight.
