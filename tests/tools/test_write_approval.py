@@ -293,3 +293,126 @@ class TestSkillGist:
         assert wa.skill_gist("remove_file", "demo", file_path="a.py") == "remove a.py from 'demo'"
         assert wa.skill_gist("delete", "demo") == "delete skill 'demo'"
         assert wa.skill_gist("unknown", "demo") == "unknown 'demo'"
+
+
+# ---------------------------------------------------------------------------
+# Phase B (T11): tags on the write gate. This surface has no author verdict,
+# so it gains no auto-approval path (D4, spec line 390).
+# ---------------------------------------------------------------------------
+
+def _set_dual_signal_all_tags():
+    """Turn dual_signal on with every configurable tag enabled."""
+    import hermes_cli.config as cfg
+    from tools.action_tags import CONFIGURABLE_TAGS
+    c = cfg.load_config()
+    approvals = c.setdefault("approvals", {})
+    approvals["auto_approve"] = "dual_signal"
+    approvals["auto_approve_tags"] = sorted(CONFIGURABLE_TAGS)
+    cfg.save_config(c)
+
+
+def test_gate_off_still_allows_under_dual_signal(hermes_home):
+    from tools import write_approval as wa
+    _set_dual_signal_all_tags()
+    decision = wa.evaluate_gate(wa.MEMORY)
+    assert decision.allow is True
+    assert decision.stage is False
+    assert decision.blocked is False
+
+
+def test_skills_still_stage_under_dual_signal(hermes_home):
+    from tools import write_approval as wa
+    _set_approval("skills", True)
+    _set_dual_signal_all_tags()
+    decision = wa.evaluate_gate(wa.SKILLS)
+    assert decision.stage is True
+    assert decision.allow is False
+
+
+def test_memory_background_still_stages_under_dual_signal(hermes_home, monkeypatch):
+    from tools import write_approval as wa
+    _set_approval("memory", True)
+    _set_dual_signal_all_tags()
+    monkeypatch.setattr(wa, "is_background", lambda: True)
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary="s", inline_detail="d")
+    assert decision.stage is True
+
+
+def test_memory_inline_deny_still_blocks_under_dual_signal(hermes_home, monkeypatch):
+    from tools import write_approval as wa
+    _set_approval("memory", True)
+    _set_dual_signal_all_tags()
+    monkeypatch.setattr(wa, "is_background", lambda: False)
+    monkeypatch.setattr(wa, "_interactive_approval_available", lambda: True)
+    monkeypatch.setattr(wa, "_prompt_inline_memory_approval", lambda s, d: False)
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary="s", inline_detail="d")
+    assert decision.blocked is True
+    assert decision.allow is False
+
+
+def test_write_gate_never_calls_the_dual_signal_gate(hermes_home, monkeypatch):
+    """D4 / spec line 390: no auto-approval path exists on this surface."""
+    import tools.auto_approval as auto_approval_module
+    from tools import write_approval as wa
+
+    def _boom(**kwargs):
+        raise AssertionError("evaluate_dual_signal reached the write gate")
+    monkeypatch.setattr(auto_approval_module, "evaluate_dual_signal", _boom)
+    _set_approval("memory", True)
+    _set_dual_signal_all_tags()
+    monkeypatch.setattr(wa, "is_background", lambda: True)
+    assert wa.evaluate_gate(wa.MEMORY).stage is True
+
+
+def test_tag_for_write_subsystem_maps_both_subsystems():
+    from tools.action_tags import ActionTag, tag_for_write_subsystem
+    from tools import write_approval as wa
+    assert tag_for_write_subsystem(wa.MEMORY) is ActionTag.MEMORY_WRITE
+    assert tag_for_write_subsystem(wa.SKILLS) is ActionTag.SKILL_WRITE
+    assert tag_for_write_subsystem("bogus") is ActionTag.UNTAGGED
+
+
+def test_write_tags_are_not_configurable():
+    from tools.action_tags import CONFIGURABLE_TAGS, NOT_WIRED
+    for value in ("memory.write", "skill.write"):
+        assert value in NOT_WIRED
+        assert value not in CONFIGURABLE_TAGS
+
+
+def test_gate_off_decision_carries_the_tag(hermes_home):
+    from tools import write_approval as wa
+    assert wa.evaluate_gate(wa.MEMORY).tags == ("memory.write",)
+    assert wa.evaluate_gate(wa.SKILLS).tags == ("skill.write",)
+
+
+def test_staged_decision_carries_the_tag(hermes_home):
+    from tools import write_approval as wa
+    _set_approval("skills", True)
+    assert wa.evaluate_gate(wa.SKILLS).tags == ("skill.write",)
+
+
+def test_blocked_decision_carries_the_tag(hermes_home, monkeypatch):
+    from tools import write_approval as wa
+    _set_approval("memory", True)
+    monkeypatch.setattr(wa, "is_background", lambda: False)
+    monkeypatch.setattr(wa, "_interactive_approval_available", lambda: True)
+    monkeypatch.setattr(wa, "_prompt_inline_memory_approval", lambda s, d: False)
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary="s", inline_detail="d")
+    assert decision.blocked is True
+    assert decision.tags == ("memory.write",)
+
+
+def test_audit_line_fires_only_when_the_gate_is_on(hermes_home, caplog):
+    from tools import write_approval as wa
+    with caplog.at_level("INFO", logger="tools.write_approval"):
+        wa.evaluate_gate(wa.MEMORY)          # gate off - no line
+    assert not [r for r in caplog.records
+                if "action-tags surface=write_approval" in r.getMessage()]
+    _set_approval("skills", True)
+    caplog.clear()
+    with caplog.at_level("INFO", logger="tools.write_approval"):
+        wa.evaluate_gate(wa.SKILLS)          # gate on - one line
+    lines = [r.getMessage() for r in caplog.records
+             if "action-tags surface=write_approval" in r.getMessage()]
+    assert len(lines) == 1
+    assert "tags=skill.write" in lines[0]

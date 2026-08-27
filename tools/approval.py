@@ -3832,6 +3832,37 @@ def _command_targets_hermes_home(command: str) -> bool:
     return False
 
 
+def _observe_surface_tags(surface: str, pattern_key: str,
+                          tags: frozenset[ActionTag], *, note: str = "") -> list[str]:
+    """Record the tags a no-author-verdict surface saw (Phase B, T11).
+
+    These surfaces (``_run_approval_gate``, the elicitation gate, the
+    non-smart ``check_execute_code_guard`` branches, and the write gate) have
+    no guardian verdict, so ``evaluate_dual_signal`` is never called on them
+    and no tag they emit can auto-approve anything (D4, spec line 390). The
+    tag exists so an operator can see what class of action each human decision
+    covered.
+
+    ``note`` carries a surface-specific observation (T12 passes the MCP
+    ``readOnlyHint``). Returns the sorted tag values so the caller can attach
+    them to its result dict.
+
+    Total by the same rule as ``_resolve_tags`` (G13): observability must
+    never raise onto an approval path, so a failure degrades to ``[]``.
+    """
+    try:
+        tag_values = sorted(tag.value for tag in tags)
+        logger.info(
+            "action-tags surface=%s pattern_key=%s tags=%s auto_approvable=no%s",
+            surface, pattern_key, ",".join(tag_values) or "none",
+            f" {note}" if note else "",
+        )
+        return tag_values
+    except Exception as exc:
+        logger.warning("Action-tag observation failed on surface %s: %s", surface, exc)
+        return []
+
+
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
     """Return whether one exact session bypasses Hermes approval prompts.
 
@@ -4192,6 +4223,15 @@ def _run_approval_gate(
         return {"approved": True, "message": None}
 
     approval_callback = _resolve_cli_approval_callback(approval_callback)
+    # Phase B (T11): tags for observability only. This surface has no author
+    # verdict (D4) so nothing below can auto-approve; the tag rides the result
+    # dict and one log line. Resolved AFTER the yolo and allowlist
+    # short-circuits so those two returns keep their exact historical shape.
+    action_tags = _observe_surface_tags(
+        "approval_gate",
+        pattern_key,
+        _resolve_tags([(pattern_key, description, False)], display_target),
+    )
 
     is_cli = _is_interactive_cli()
     is_gateway = _is_gateway_approval_context()
@@ -4232,6 +4272,7 @@ def _run_approval_gate(
                     "message": cron_deny_message,
                     "pattern_key": pattern_key,
                     "description": description,
+                    "action_tags": action_tags,
                 }
             # cron_mode: approve — fall through to auto-approve below.
         elif _is_unattended_platform_approval_context():
@@ -4273,13 +4314,14 @@ def _run_approval_gate(
                 ),
                 "pattern_key": pattern_key,
                 "description": description,
+                "action_tags": action_tags,
             }
         logger.warning(
             "%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
             "HERMES_GATEWAY_SESSION to require approval.",
             autoapprove_log_prefix, pattern_key, description,
         )
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None, "action_tags": action_tags}
 
     if is_gateway or env_var_enabled("HERMES_EXEC_ASK"):
         # Interactive gateway round-trip when a notify callback is
@@ -4313,6 +4355,7 @@ def _run_approval_gate(
                     "description": description,
                     "outcome": "notify_failed",
                     "user_consent": False,
+                    "action_tags": action_tags,
                 }
             resolved = decision["resolved"]
             choice = decision["choice"]
@@ -4343,6 +4386,7 @@ def _run_approval_gate(
                     "outcome": outcome,
                     "user_consent": False,
                     "deny_reason": deny_reason,
+                    "action_tags": action_tags,
                 }
 
             if choice == "session":
@@ -4351,7 +4395,7 @@ def _run_approval_gate(
                 approve_session(session_key, pattern_key)
                 approve_permanent(pattern_key)
                 save_permanent_allowlist(_permanent_approved)
-            return {"approved": True, "message": None}
+            return {"approved": True, "message": None, "action_tags": action_tags}
 
         # No notify callback: interactive CLI with a panel callback should
         # still prompt locally instead of queuing a pending approval nobody
@@ -4378,6 +4422,7 @@ def _run_approval_gate(
                     f"⚠️ This action is potentially dangerous ({description}). "
                     f"Asking the user for approval.\n\n**Target:**\n```\n{display_target}\n```"
                 ),
+                "action_tags": action_tags,
             }
 
     _fire_approval_hook(
@@ -4416,6 +4461,7 @@ def _run_approval_gate(
             "description": description,
             "outcome": "timeout",
             "user_consent": False,
+            "action_tags": action_tags,
         }
 
     if choice == "deny":
@@ -4430,6 +4476,7 @@ def _run_approval_gate(
             "description": description,
             "outcome": "denied",
             "user_consent": False,
+            "action_tags": action_tags,
         }
 
     if choice == "session":
@@ -4439,7 +4486,7 @@ def _run_approval_gate(
         approve_permanent(pattern_key)
         save_permanent_allowlist(_permanent_approved)
 
-    return {"approved": True, "message": None}
+    return {"approved": True, "message": None, "action_tags": action_tags}
 
 
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
@@ -4472,7 +4519,13 @@ def check_dangerous_command(command: str, env_type: str,
             so its commands can reach the host and must not skip approval.
 
     Returns:
-        {"approved": True/False, "message": str or None, ...}
+        {"approved": True/False, "message": str or None, ...}. Branches that
+        go through ``_run_approval_gate`` also carry an ``action_tags`` key
+        (a single resolved tag set for the matched pattern, per Phase B T11)
+        — absent on the earlier bypass/hardline/allowlist returns above. It
+        records what class of action the decision covered, for audit/
+        observability only: it is never an input to any approval decision
+        here and must never be read as one.
     """
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
@@ -4571,7 +4624,12 @@ def request_tool_approval(
         ``{"approved": True, "message": None}`` when allowed, or
         ``{"approved": False, "message": <reason>, ...}`` when denied /
         blocked. Shape matches ``check_dangerous_command`` so callers handle
-        both paths identically.
+        both paths identically. Gated branches also carry an
+        ``action_tags`` key inherited from ``_run_approval_gate`` (single-
+        pattern tag resolution, Phase B T11). It records what class of
+        action the decision covered, for audit/observability only: it is
+        never an input to any approval decision here and must never be
+        read as one.
 
     Non-interactive contexts: cron jobs honor ``approvals.cron_mode`` (parity
     with dangerous commands); any OTHER non-interactive non-gateway context
@@ -5857,6 +5915,18 @@ def check_execute_code_guard(code: str, env_type: str,
     issues; running arbitrary code headlessly without any approval surface is
     trusted-by-config (set a gateway/ask surface or ``approvals.cron_mode`` to
     require approval).
+
+    Returns:
+        Same dict contract as ``check_all_command_guards``, with one
+        difference: the ``action_tags`` key here (when present — absent on
+        the isolated-backend/yolo/mode-off bypasses above the gate) is a
+        single resolved tag set for this call — either the smart branch's
+        ``list(decision.tags)`` or the hardcoded ``[ActionTag.CODE_EXEC.value]``
+        on every other gated branch — not the full per-warning list
+        ``check_all_command_guards`` returns on its own (Phase A) surface.
+        It records what class of action the decision covered, for audit/
+        observability only (Phase B T11): it is never an input to any
+        approval decision here and must never be read as one.
     """
     pattern_key = "execute_code"
     description = (
@@ -5905,6 +5975,17 @@ def check_execute_code_guard(code: str, env_type: str,
             }
         return {"approved": True, "message": None}
 
+    # Phase B (T11): every branch below is a gate entry, so all of them carry
+    # code.exec. No author verdict exists outside the smart branch, so no
+    # auto-approval path is added here (D4). code.exec is in
+    # NEVER_AUTO_APPROVABLE (D9), so the tag cannot enable anything anywhere.
+    # The three returns ABOVE this line (isolated container backends, yolo,
+    # approvals.mode: off) are bypasses that never enter the gate and stay
+    # untagged, matching _run_approval_gate's short-circuits.
+    _observe_surface_tags(
+        "execute_code_guard", pattern_key, frozenset({ActionTag.CODE_EXEC}),
+    )
+
     # Cron: no user is present to approve arbitrary code.
     if _is_cron_approval_context():
         if _get_cron_approval_mode() == "deny":
@@ -5922,8 +6003,10 @@ def check_execute_code_guard(code: str, env_type: str,
                 "description": description,
                 "outcome": "blocked",
                 "user_consent": False,
+                "action_tags": [ActionTag.CODE_EXEC.value],
             }
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     # Unattended programmatic platforms (webhook/msgraph_webhook/api_server):
     # no user is present to approve arbitrary code either. Mirrors the cron
@@ -5963,7 +6046,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # the script's own per-call terminal() guards are handled separately in
     # check_all_command_guards.
     if not is_gateway and not is_ask:
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     session_key = get_current_session_key()
     # Built only now (past the early-return gates) so the common non-approval
@@ -5974,7 +6058,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts the user (#39275).
     if is_approved(session_key, pattern_key):
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None,
+                "action_tags": [ActionTag.CODE_EXEC.value]}
 
     # Smart mode: ask the aux LLM about the whole script. An APPROVE here only
     # suppresses the redundant whole-script prompt; the per-call terminal()
@@ -6037,6 +6122,7 @@ def check_execute_code_guard(code: str, env_type: str,
                 "description": description,
                 "outcome": "denied",
                 "user_consent": False,
+                "action_tags": [ActionTag.CODE_EXEC.value],
             }
         if verdict == "deny":
             # Guardian DENY that falls through to a one-operation human
@@ -6233,6 +6319,7 @@ def check_execute_code_guard(code: str, env_type: str,
                 "user's decision; if this turn must end, report that approval "
                 "is pending."
             ),
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
         if smart_denied_for_owner:
             result.update(smart_denied=True, allow_permanent=False)
@@ -6260,6 +6347,7 @@ def check_execute_code_guard(code: str, env_type: str,
             "description": description,
             "outcome": "notify_failed",
             "user_consent": False,
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
 
     resolved = decision["resolved"]
@@ -6286,6 +6374,7 @@ def check_execute_code_guard(code: str, env_type: str,
             "outcome": "timeout" if not resolved else "denied",
             "user_consent": False,
             "deny_reason": deny_reason,
+            "action_tags": [ActionTag.CODE_EXEC.value],
         }
 
     # Never persist a smart-DENY override under the coarse execute_code key;
@@ -6303,7 +6392,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # A human approval resets the consecutive-denial tally.
     _reset_denials(session_key)
     return {"approved": True, "message": None,
-            "user_approved": True, "description": description}
+            "user_approved": True, "description": description,
+            "action_tags": [ActionTag.CODE_EXEC.value]}
 
 
 # =========================================================================
@@ -6316,6 +6406,7 @@ def request_elicitation_consent(
     *,
     timeout_seconds: int | None = None,
     surface: str = "mcp-elicitation",
+    read_only_hint: bool | None = None,
 ) -> str:
     """Route an MCP elicitation request to whichever approval surface owns
     the active session and return a normalized result.
@@ -6329,6 +6420,11 @@ def request_elicitation_consent(
     and exceptions all map to ``"decline"`` so a server treats them as
     "user did not approve" rather than retrying or hanging.
 
+    ``read_only_hint`` is the MCP server's own ``annotations.readOnlyHint``
+    declaration for the tool whose call provoked this elicitation (T12). It is
+    recorded in the audit line and read by nothing else: a server cannot
+    reduce its own friction by declaring itself read-only.
+
     Returns one of ``"accept" | "decline" | "cancel"``.
     """
     try:
@@ -6336,6 +6432,18 @@ def request_elicitation_consent(
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
+
+    # Phase B (T11): tags for observability only. Row 6 of the surface
+    # inventory - a real human decision with no author verdict, so no
+    # auto-approval path is added (D4). _resolve_tags maps the hardcoded
+    # "mcp_elicitation" key to mcp.tool by exact match, above the D14
+    # Hermes-home override, so `message` is never pattern-matched here.
+    _observe_surface_tags(
+        "mcp_elicitation",
+        "mcp_elicitation",
+        _resolve_tags([("mcp_elicitation", description, False)], message),
+        note=f"caller_surface={surface} read_only_hint={read_only_hint}",
+    )
 
     if _is_gateway_approval_context():
         with _lock:
