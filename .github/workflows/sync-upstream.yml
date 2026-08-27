@@ -188,23 +188,28 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
 
-      # ── Post-push CI gate ────────────────────────────────────────────────
+      # ── Post-push CI watch (ADVISORY) ────────────────────────────────────
       # The pre-push gate above is fast and cheap but structurally partial: it
       # runs fork-local tests + a lockfile/lint check, in one job, on one
       # Python version. It cannot see upstream-owned tests, the JS/TS matrix,
       # the docs site, or the main-only jobs (e.g. tests.yml's save-durations,
       # which is what actually broke main on 2026-08-07). The SYNC_PAT push
       # above already creates a full ci.yaml run on main within ~1s (measured
-      # against runs 31103795631, 31007893479, 30912081013). Watch that run to
-      # its gate and fail this job — and therefore fire the tracking-issue
-      # notifier below — if it goes red.
+      # against runs 31103795631, 31007893479, 30912081013).
       #
-      # This does NOT prevent a red main; it guarantees a red main is
-      # ANNOUNCED within minutes instead of sitting unnoticed (cf. the 12-day
-      # silent streak 2026-07-22 -> 2026-08-02). Rolling back is the runbook's
-      # job: ci/UPSTREAM_SYNC_RUNBOOK.md already documents recording the
-      # pre-sync origin/main SHA for exactly this.
-      - name: Wait for post-push CI gate on main
+      # The sync's job is to rebase the fork's customisation onto upstream
+      # latest and push it; it is NOT to gate on the health of upstream's
+      # suite. Upstream runs its own CI, and a red upstream or runner issue
+      # (e.g. larger-runner labels a personal account cannot provision,
+      # 2026-08-22 streak) must never block the daily patch application.
+      # So this step only WATCHES the run that the push created: a red or
+      # hung run is reported through the tracking issue (see below) so a
+      # broken main is ANNOUNCED within minutes instead of sitting unnoticed
+      # (cf. the 12-day silent streak 2026-07-22 -> 2026-08-02), but the sync
+      # itself stays green. Rolling back is the runbook's job:
+      # ci/UPSTREAM_SYNC_RUNBOOK.md documents recording the pre-sync
+      # origin/main SHA for exactly this.
+      - name: Watch post-push CI on main (advisory)
         id: postci
         if: success() && steps.check.outputs.upstream_ahead != '0'
         # Backstop only — the internal DEADLINE_SECONDS below must always win,
@@ -217,8 +222,8 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ steps.push.outputs.sha }}
           # ci.yaml's aggregate gate — its own comment says branch protection
-          # should require only this check, so it's the correct thing to gate
-          # on. Not the same as the run's overall conclusion (see below).
+          # should require only this check, so it's the correct thing to watch.
+          # Not the same as the run's overall conclusion (see below).
           GATE_JOB: All required checks pass
           # 45 min: the gate has concluded within 12.8 min on every observed
           # main push over the last three weeks (median 7.1, n=11, max 12.8).
@@ -247,8 +252,8 @@ jobs:
             [ -n "$run_id" ] && break
             if [ "$(date +%s)" -ge "$appear_deadline" ]; then
               echo "reason=no-run" >> "$GITHUB_OUTPUT"
-              echo "::error::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yaml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED."
-              exit 1
+              echo "::warning::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yaml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED — see the tracking issue."
+              exit 0
             fi
             sleep "$POLL_SECONDS"
           done
@@ -261,8 +266,7 @@ jobs:
           # Deliberate: ci.yaml's "CI timing report" job is NOT in
           # all-checks-pass's needs list, so an API blip there can take the
           # RUN's conclusion to failure while the gate itself was green.
-          # Gating on the run would turn that into a false "main is red"
-          # alert. Polling the job also returns ~0.3-1.5 min sooner and lets
+          # Watching the job also returns ~0.3-1.5 min sooner and lets
           # us distinguish failure shapes (see `reason` below) that
           # `gh run watch` collapses into one.
           deadline=$(( $(date +%s) + DEADLINE_SECONDS ))
@@ -275,30 +279,32 @@ jobs:
               || echo "api-error:")
             case "$gate" in
               completed:success)
+                echo "reason=" >> "$GITHUB_OUTPUT"
                 echo "✓ CI gate green on main@$HEAD_SHA — $run_url"
                 exit 0 ;;
               completed:*)
                 echo "reason=ci-red" >> "$GITHUB_OUTPUT"
-                echo "::error::CI gate concluded '${gate#completed:}' on main@$HEAD_SHA. origin/main is RED. $run_url"
-                exit 1 ;;
+                echo "::warning::CI gate concluded '${gate#completed:}' on main@$HEAD_SHA. origin/main is RED — see the tracking issue. $run_url"
+                exit 0 ;;
             esac
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "reason=ci-timeout" >> "$GITHUB_OUTPUT"
-              echo "::error::CI gate did not conclude within $((DEADLINE_SECONDS/60))m (last observed state: '$gate'). Run is hung, not failed. origin/main HAS been updated and is UNVALIDATED. $run_url"
-              exit 1
+              echo "::warning::CI gate did not conclude within $((DEADLINE_SECONDS/60))m (last observed state: '$gate'). Run is hung, not failed. origin/main HAS been updated and is UNVALIDATED — see the tracking issue. $run_url"
+              exit 0
             fi
             sleep "$POLL_SECONDS"
           done
 
-      # Closes the self-heal gap this pairs with (see "Notify sync failure"
-      # below): a blocked sync used to only show up as a red run in the
-      # Actions tab, which nobody was watching daily — it repeated silently
-      # for a 12-day streak (2026-07-22 to 2026-08-02) before a human noticed.
-      # A successful sync after a blocked streak means the conflict was
-      # resolved (by whatever fixed it), so auto-close the tracking issue
-      # rather than leaving it for someone to remember.
+      # Closes the self-heal gap this pairs with (see "Notify on red CI"
+      # below): a red main used to only show up as a red run in the Actions
+      # tab, which nobody was watching daily — it repeated silently for a
+      # 12-day streak (2026-07-22 to 2026-08-02) before a human noticed.
+      # A sync that pushed successfully AND observed a green CI gate means
+      # the fork is in a known-good state, so auto-close the tracking issue
+      # rather than leaving it for someone to remember. A sync that pushed
+      # but could not confirm green CI (reason set) leaves it open.
       - name: Close tracking issue on successful sync
-        if: success() && steps.check.outputs.upstream_ahead != '0'
+        if: success() && steps.check.outputs.upstream_ahead != '0' && steps.postci.outputs.reason == ''
         # A notification hiccup (e.g. the gh API, or Issues toggled off again)
         # must never flip an actually-successful sync to a failed run — that
         # would make the cure worse than the disease this step exists to fix.
@@ -311,7 +317,7 @@ jobs:
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${{ github.repository }}" \
-              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, pushed, and green through the full CI gate on \`origin/main\`. Closing."
+              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, pushed, and the CI gate on \`origin/main\` came back green. Closing."
             gh issue close "$existing" --repo "${{ github.repository }}"
             echo "Closed tracking issue #$existing"
           fi
@@ -328,19 +334,8 @@ jobs:
 
       - name: Report sync failure
         if: failure()
-        env:
-          # 'failure' only when the post-push watch is what went wrong. If an
-          # earlier step failed, postci was skipped -> 'skipped'. If
-          # upstream_ahead == 0, also 'skipped'. Both fall to the else
-          # branch, which is the pre-existing message, unchanged.
-          MODE: ${{ steps.postci.outcome }}
-          CI_RUN_URL: ${{ steps.postci.outputs.run_url }}
         run: |
-          if [ "$MODE" = "failure" ]; then
-            echo "::error::Upstream sync rebased and pushed successfully, but the FULL CI gate on origin/main did not go green. origin/main HAS been updated and is currently unvalidated/red. This is NOT a rebase conflict. See $CI_RUN_URL"
-          else
-            echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
-          fi
+          echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
 
       # The Actions tab alone is not a notification channel — nobody was
       # watching it, so an unrecorded conflict repeated identically for 12
@@ -361,7 +356,47 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODE: ${{ steps.postci.outcome }}
+        run: |
+          gh label create sync-upstream-blocked --color B60205 \
+            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --force >/dev/null 2>&1 || true
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          title="Sync Upstream blocked: manual rebase conflict resolution needed"
+          body="The nightly Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
+
+          Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
+
+          Failing run: $run_url"
+
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Still blocked as of $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+          $body"
+            echo "Updated existing tracking issue #$existing"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$title" --label sync-upstream-blocked --body "$body"
+            echo "Opened new tracking issue"
+          fi
+
+      # The post-push watch is advisory, so a red main no longer fails the
+      # sync — but it still needs to be ANNOUNCED, or a red main would sit
+      # unnoticed again (the 12-day streak this workflow was built to end).
+      # The sync pushed successfully; this step opens/updates a tracking
+      # issue naming the failure shape so a human can decide whether to roll
+      # back per ci/UPSTREAM_SYNC_RUNBOOK.md. Auto-closes on the next sync
+      # whose watch confirms a green gate.
+      - name: Notify on red CI after sync (open/update tracking issue)
+        if: success() && steps.check.outputs.upstream_ahead != '0' && steps.postci.outputs.reason != ''
+        # A notification hiccup must never flip an otherwise-successful sync
+        # to a failed run.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REASON: ${{ steps.postci.outputs.reason }}
           CI_RUN_URL: ${{ steps.postci.outputs.run_url }}
           PUSHED_SHA: ${{ steps.push.outputs.sha }}
@@ -371,38 +406,29 @@ jobs:
             --force >/dev/null 2>&1 || true
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          if [ "$MODE" = "failure" ]; then
-            title="main is RED after upstream sync: post-push CI gate failed"
-            case "$REASON" in
-              ci-red)     detail="\`All required checks pass\` concluded RED on \`main@$PUSHED_SHA\`. Failing jobs: $CI_RUN_URL" ;;
-              ci-timeout) detail="\`All required checks pass\` did not conclude within 45 minutes on \`main@$PUSHED_SHA\` — the run is HUNG, not failed. Inspect and cancel/re-run: $CI_RUN_URL" ;;
-              no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yaml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI gate is silently non-functional — fix this first.**" ;;
-              *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
-            esac
-            body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED.**
+          title="main is RED after upstream sync: post-push CI did not go green"
+          case "$REASON" in
+            ci-red)     detail="\`All required checks pass\` concluded RED on \`main@$PUSHED_SHA\`. Failing jobs: $CI_RUN_URL" ;;
+            ci-timeout) detail="\`All required checks pass\` did not conclude within 45 minutes on \`main@$PUSHED_SHA\` — the run is HUNG, not failed. Inspect and cancel/re-run: $CI_RUN_URL" ;;
+            no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yaml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI watch is silently non-functional — fix this first.**" ;;
+            *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
+          esac
+          body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED, and the sync itself is green.**
 
           The rebased tree was force-pushed to \`origin/main\` (\`$PUSHED_SHA\`), then the full CI pipeline on \`main\` did not come back green.
 
           $detail
 
-          \`origin/main\` **has** been updated and every \`hermes update\` consumer hard-resets to it. To roll back, reset \`main\` to the pre-sync SHA recorded in the sync run log per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`. This issue auto-closes on the next sync that is green through the post-push gate.
+          \`origin/main\` **has** been updated and every \`hermes update\` consumer hard-resets to it. To roll back, reset \`main\` to the pre-sync SHA recorded in the sync run log per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`. This issue auto-closes on the next sync whose watch confirms a green CI gate.
 
           Sync run: $run_url"
-          else
-            title="Sync Upstream blocked: manual rebase conflict resolution needed"
-            body="The nightly Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
-
-          Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
-
-          Failing run: $run_url"
-          fi
 
           existing=$(gh issue list --repo "${{ github.repository }}" \
             --label sync-upstream-blocked --state open \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${{ github.repository }}" \
-              --body "Still blocked as of $(date -u +%Y-%m-%dT%H:%M:%SZ).
+              --body "Still red as of $(date -u +%Y-%m-%dT%H:%M:%SZ).
 
           $body"
             echo "Updated existing tracking issue #$existing"
