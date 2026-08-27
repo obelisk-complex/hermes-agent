@@ -48,6 +48,23 @@ def _env_float(name: str, default: float) -> float:
 
 _WATCHDOG_POLL_S = max(0.05, _env_float("HERMES_SLASH_WATCHDOG_POLL_S", 2.0))
 _ORPHAN_GRACE_S = max(0.0, _env_float("HERMES_SLASH_WATCHDOG_GRACE_S", 5.0))
+# Join bound for background MCP discovery before the first command is served.
+# Discovery spawns a second interpreter per configured stdio server and
+# completes a full handshake; on a loaded runner that can exceed the
+# interactive ``mcp_discovery_timeout`` default (1.5s, see
+# hermes_cli/config_defaults.py). The worker has NO late-binding refresh to
+# recover tools that miss the join (the parent ``hermes serve`` scheduler is
+# a different process), so a 1.5s join silently drops profile MCP tools from
+# the very first /tools rendering (issue #61891 follow-up; surfaced by
+# test_profile_local_mcp_tool_is_visible_in_slash_worker under CI load —
+# fast reply, tool missing). ``thread.join`` returns the instant discovery
+# completes, so healthy/fast discovery pays ~0s; the bound only caps how long
+# a genuinely dead server can delay the first slash command. 60s matches the
+# discovery thread's internal per-server connect bound
+# (tools/mcp_tool._DEFAULT_CONNECT_TIMEOUT) and the test's response budget.
+_SLASH_WORKER_MCP_DISCOVERY_TIMEOUT_S = max(
+    1.5, _env_float("HERMES_SLASH_WORKER_MCP_DISCOVERY_TIMEOUT_S", 60.0)
+)
 _in_flight = threading.Event()  # set while a command is executing
 logger = logging.getLogger(__name__)
 
@@ -75,7 +92,10 @@ def _prepare_slash_worker_runtime() -> None:
         logger=logger,
         thread_name="slash-worker-mcp-discovery",
     )
-    wait_for_mcp_discovery()
+    # Explicit bound: the config default (1.5s) is tuned for interactive
+    # surfaces that refresh tools later; this worker never re-snapshots, so
+    # the first /tools must not race discovery (see the constant above).
+    wait_for_mcp_discovery(timeout=_SLASH_WORKER_MCP_DISCOVERY_TIMEOUT_S)
 
 
 def _start_parent_death_watchdog(original_ppid) -> None:
