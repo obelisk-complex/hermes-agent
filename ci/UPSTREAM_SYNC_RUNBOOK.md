@@ -16,9 +16,11 @@ dispatch. Each run:
 3. Rebases the fork's custom commits onto `upstream/main`. Recorded resolutions
    auto-replay; the loop drives `git rebase --continue` through each
    auto-resolved step.
-4. **Pre-push gate:** `py_compile`s the import-critical files and runs the guard
-   tests. The force-push happens only if this passes, so a broken rebase never
-   lands on `origin/main`.
+4. **Pre-push gate:** `py_compile`s the import-critical files, runs every
+   fork-local test file (found by diffing the rebased tree's `tests/` against
+   `upstream/main`'s — not a hand-maintained list), and checks `uv lock
+   --check` + `ruff check .`. The force-push happens only if all of this
+   passes, so a broken rebase never lands on `origin/main`.
 5. Force-pushes the validated, rebased tree to `origin/main`.
 6. **Post-push CI watch (advisory):** the push above is `SYNC_PAT`-authored,
    which triggers a full `ci.yaml` run on `main` within ~1s. The sync job
@@ -77,6 +79,14 @@ What's actually there to read:
   (generic — the path is in the git output just above it, not in this line).
 - **"Validate rebased tree (pre-push gate)"** step log: a `py_compile` failure
   names the exact file with conflict markers left in it.
+- **"Find fork-local test files"** / **"Run fork-local tests against the
+  rebased tree"** step logs: a fork-owned test broke under an upstream
+  refactor the rebase replayed cleanly (git sees no conflict — the breakage
+  is semantic, not textual). The pytest output names the failing test.
+- **"Verify uv.lock against the rebased tree"** / **"ruff check the rebased
+  tree"** step logs: the rebase replayed a lock pin or introduced a lint
+  violation that upstream's own `pyproject.toml`/style changes now disagree
+  with.
 - Either failure opens/updates the `sync-upstream-blocked` issue (see above),
   but today that issue links to the run rather than embedding the path — you
   still have to open the log.
@@ -123,10 +133,16 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    export PYTHONPATH="$PWD"
    python3 -m py_compile hermes_cli/main.py hermes_cli/plugins.py \
      hermes_cli/kanban_db.py agent/conversation_loop.py tools/delegate_tool.py
-   python3 tests/agent/test_on_output_retry_loop.py
-   python3 tests/hermes_cli/test_update_safety.py
-   python3 tests/agent/test_hook_contract.py
-   python3 tests/tools/test_delegate_instructions.py
+
+   # Fork-local test files: anything under tests/ that exists in the
+   # rebased tree but not in upstream/main — upstream will never fix these
+   # for you, so they need to actually run against the rebased tree.
+   FORK_TESTS=$(comm -23 <(git ls-tree -r --name-only HEAD -- tests | sort) \
+                         <(git ls-tree -r --name-only upstream/main -- tests | sort) | paste -sd:)
+   scripts/run_tests.sh --files "$FORK_TESTS"
+
+   uv lock --check
+   ruff check .
    ```
 6. **Commit the seed and sync.** Commit `ci/rerere-cache/<hash>/` to `origin/main`
    (an additive, fork-only change), then dispatch the workflow and watch it go
