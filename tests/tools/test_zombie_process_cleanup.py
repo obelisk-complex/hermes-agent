@@ -512,7 +512,7 @@ class TestDelegationCleanup:
                 parent_agent=parent,
             )
 
-            assert child_started.is_set()
+            assert child_started.wait(timeout=5)
             assert result["status"] == "timeout"
             assert relay_runtime.SESSION_COORDINATOR.has_active_turn(
                 profile_key=str(profile_home),
