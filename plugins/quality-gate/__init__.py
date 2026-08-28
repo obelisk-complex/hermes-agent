@@ -88,6 +88,54 @@ def _matrix_sender(config: dict) -> Optional[Callable[..., Any]]:
     return _send
 
 
+def _bind_has_gate_block_evidence() -> Optional[Callable[[str], bool]]:
+    """Return a callable that checks whether the mechanical gate actually
+    vetoed a completion for this task since its last successful completion.
+
+    ``trigger="auto_block"`` fires for EVERY circuit-breaker trip --
+    ``spawn_failed`` (workspace/spawn infra errors), ``timed_out``, and
+    ``crashed`` (both a systemic same-error crash streak and an exhausted
+    protocol-violation streak; see kanban_db.detect_crashed_workers). None of
+    those carry the mechanical gate's verdict: a worker that fails the gate
+    gets a ``tool_error`` back from ``kanban_complete`` and retries in place
+    (kanban_db.complete_task never mutates task state on a gate block), so a
+    genuine "the code failed lint/test/typecheck/build" result does not, by
+    itself, trip the circuit breaker -- it only shows up here indirectly, as
+    a task that keeps failing the gate and ALSO crashes/times out fighting
+    it. We tell that apart from an unrelated crash/protocol-violation by
+    checking kanban's own ``completion_blocked_plugin`` event trail (written
+    by ``complete_task`` every time THIS plugin's ``pre_kanban_complete``
+    hook blocked a completion) for an entry newer than the task's last
+    successful ``completed`` event.
+    """
+    try:
+        from hermes_cli import kanban_db
+        def _has_evidence(task_id: str) -> bool:
+            conn = kanban_db.connect()
+            try:
+                events = kanban_db.list_events(conn, task_id)
+            finally:
+                conn.close()
+            # Newest-first: a gate block found before we hit a prior
+            # ``completed`` event belongs to the CURRENT failure streak.
+            # A gate block from an earlier, already-succeeded cycle must
+            # not justify escalating an unrelated later crash.
+            for event in reversed(events):
+                if event.kind == "completion_blocked_plugin":
+                    return True
+                if event.kind == "completed":
+                    return False
+            return False
+        return _has_evidence
+    except Exception as exc:
+        logger.warning(
+            "quality-gate: list_events unavailable (%s); cannot confirm a "
+            "real gate failure caused this auto_block -- treating as "
+            "non-retriable (fail-safe: no escalation without evidence)", exc,
+        )
+        return None
+
+
 def _bind_get_model_override() -> Optional[Callable[[str], Optional[str]]]:
     """Return a callable that looks up the current model_override for a task.
 
@@ -125,18 +173,27 @@ def _bind_get_model_override() -> Optional[Callable[[str], Optional[str]]]:
 # manual blocks; neither is guaranteed to match RETRIABLE_FAILURES.
 #
 # Instead the adapter maps the CLEAN structural ``trigger`` signal:
-#   trigger="auto_block"  -> "gate_failed"   (in RETRIABLE_FAILURES -> escalates)
-#   trigger="manual"      -> "permission_denied" (NOT in set -> no escalation)
-#   trigger=<unknown>     -> "permission_denied" (fail-safe: no escalation)
+#   trigger="manual"  -> "permission_denied" (NOT in set -> no escalation).
+#     block_task is the human/kernel-backstop entry point -- it fires
+#     trigger="manual" even for the _MAX_COMPLETION_BLOCKS
+#     auto-block-for-human-review path (see kanban_db.complete_task /
+#     block_task), so a manual block is either a person's decision or has
+#     already been routed to one; quality-gate must not second-guess it
+#     with a model swap.
+#   trigger=<unknown> -> "permission_denied" (fail-safe: no escalation)
 #
-# This is safe because auto_block is fired only when the dispatcher's own
-# circuit breaker trips (a runaway failure loop), which is exactly the case
-# where a stronger model is warranted. Manual blocks are human decisions and
-# must not be auto-escalated.
-_TRIGGER_TO_RETRIABLE: dict = {
-    "auto_block": "gate_failed",
-}
+# trigger="auto_block" is deliberately NOT in this table: it fires for
+# EVERY circuit-breaker trip (spawn_failed / timed_out / crashed -- see
+# kanban_db._record_task_failure), which includes crash-driven and
+# protocol-violation-driven blocks that have nothing to do with the
+# mechanical gate. Treating every auto_block as "gate_failed" (the
+# pre-fix behaviour) silently requeued crash- and protocol-violation-blocked
+# cards onto a stronger model even though a stronger model cannot fix a
+# crash or a missing terminal tool call. See ``_blocked()`` below, which
+# resolves "auto_block" dynamically via ``_bind_has_gate_block_evidence``.
+_TRIGGER_TO_RETRIABLE: dict = {}
 _NON_RETRIABLE_SENTINEL = "permission_denied"
+_GATE_FAILED_REASON = "gate_failed"  # returned only once evidence is confirmed
 
 
 def register(ctx) -> None:
@@ -189,7 +246,35 @@ def register(ctx) -> None:
         }
         # Map the fork's structural trigger signal to a retriability token.
         trigger = kwargs.get("trigger", "")
-        mapped_reason = _TRIGGER_TO_RETRIABLE.get(trigger, _NON_RETRIABLE_SENTINEL)
+        if trigger == "auto_block":
+            # Circuit-breaker trip: spawn_failed / timed_out / crashed (which
+            # covers both a systemic crash streak and an exhausted
+            # protocol-violation streak). None of those are, by themselves, a
+            # quality-gate failure -- confirm one actually happened for this
+            # task before treating the block as escalation-worthy. See
+            # _bind_has_gate_block_evidence's docstring for why.
+            has_evidence = _bind_has_gate_block_evidence()
+            gate_confirmed = False
+            if has_evidence is not None and task_id:
+                try:
+                    gate_confirmed = has_evidence(task_id)
+                except Exception as exc:
+                    logger.warning(
+                        "quality-gate: could not check gate-block evidence "
+                        "for %s (%s); treating as non-retriable", task_id, exc,
+                    )
+            if gate_confirmed:
+                mapped_reason = _GATE_FAILED_REASON
+            else:
+                mapped_reason = _NON_RETRIABLE_SENTINEL
+                logger.info(
+                    "quality-gate: auto_block for %s (trigger_outcome=%s) has "
+                    "no completion_blocked_plugin evidence since its last "
+                    "success; not a confirmed gate failure -- no escalation",
+                    task_id, kwargs.get("trigger_outcome"),
+                )
+        else:
+            mapped_reason = _TRIGGER_TO_RETRIABLE.get(trigger, _NON_RETRIABLE_SENTINEL)
         config = _load_config()
         return blocked_hook.on_fork_kanban_task_blocked(
             task=task,

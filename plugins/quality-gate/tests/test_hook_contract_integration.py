@@ -170,8 +170,15 @@ class TestCompletionHookContract:
 class TestBlockedHookContract:
     """fork_kanban_task_blocked closure must map trigger -> retriability correctly."""
 
-    def _patch_kdb(self, monkeypatch, model_override, requeue_calls, update_calls):
-        """Stub the three kanban_db seams used by the blocked adapter."""
+    def _patch_kdb(self, monkeypatch, model_override, requeue_calls, update_calls,
+                    events=()):
+        """Stub the four kanban_db seams used by the blocked adapter.
+
+        ``events`` seeds ``list_events`` (used by
+        ``_bind_has_gate_block_evidence`` to decide whether an auto_block is
+        a confirmed quality-gate failure) -- a list of simple namespace-like
+        objects with a ``.kind`` attribute, oldest first.
+        """
         import hermes_cli.kanban_db as kdb
 
         class _FakeTask:
@@ -182,6 +189,12 @@ class TestBlockedHookContract:
 
         class _FakeConn:
             def close(self): pass
+
+        class _FakeEvent:
+            def __init__(self, kind):
+                self.kind = kind
+
+        fake_events = [_FakeEvent(k) for k in events]
 
         def fake_connect():
             return _FakeConn()
@@ -197,31 +210,38 @@ class TestBlockedHookContract:
             update_calls.append((task_id, field, value))
             return True
 
+        def fake_list_events(conn, task_id):
+            return fake_events
+
         monkeypatch.setattr(kdb, "connect", fake_connect, raising=False)
         monkeypatch.setattr(kdb, "get_task", fake_get_task, raising=False)
         monkeypatch.setattr(kdb, "requeue_blocked_task", fake_requeue, raising=False)
         monkeypatch.setattr(kdb, "update_task_field", fake_update_field, raising=False)
+        monkeypatch.setattr(kdb, "list_events", fake_list_events, raising=False)
 
-    def test_auto_block_trigger_escalates(self, monkeypatch):
+    def test_auto_block_trigger_without_gate_evidence_does_not_escalate(self, monkeypatch):
         """
-        RED-BEFORE: task=None -> task_id=None, model_override=None; reason was
-        the raw free-text error string which is NOT in RETRIABLE_FAILURES ->
-        is_retriable returned False -> NO escalation for any auto-block.
-
-        GREEN-AFTER: trigger="auto_block" is structurally mapped to "gate_failed"
-        (in RETRIABLE_FAILURES) -> is_retriable True -> requeue IS called with
-        the next rung, regardless of the free-text reason content.
+        A crash-driven auto_block (no ``completion_blocked_plugin`` event in
+        this task's history) must NOT escalate -- a stronger model cannot fix
+        a crash. This is the #61233-adjacent regression: pre-fix, EVERY
+        auto_block (crash, protocol violation, or a real gate failure alike)
+        was stamped "gate_failed" and silently requeued onto a stronger
+        model. Post-fix, escalation requires confirmed gate-block evidence.
         """
         requeue_calls: list = []
         update_calls: list = []
-        self._patch_kdb(monkeypatch, "claude-3-5-haiku", requeue_calls, update_calls)
+        self._patch_kdb(
+            monkeypatch, "claude-3-5-haiku", requeue_calls, update_calls,
+            events=(),  # no completion_blocked_plugin event anywhere
+        )
 
         entry, ctx = _fresh_entry_and_ctx()
 
-        # Fire with REAL flat kwargs from the fork's auto-block path.
+        # Fire with REAL flat kwargs from the fork's auto-block path -- a
+        # plain crash, not a gate failure.
         ctx.hooks["fork_kanban_task_blocked"](
-            task_id="t-auto",
-            reason="Worker process crashed after 3s: OOMKilled",  # free text; NOT in RETRIABLE_FAILURES
+            task_id="t-auto-crash",
+            reason="Worker process crashed after 3s: OOMKilled",
             consecutive_failures=3,
             effective_limit=3,
             limit_source="dispatcher",
@@ -230,13 +250,108 @@ class TestBlockedHookContract:
             run_id=42,
         )
 
+        assert requeue_calls == [], (
+            f"A crash-driven auto_block must NOT escalate; got {requeue_calls}"
+        )
+
+    def test_auto_block_protocol_violation_does_not_escalate(self, monkeypatch):
+        """A protocol-violation-driven auto_block (worker exited cleanly
+        without calling kanban_complete/kanban_block, streak exhausted) must
+        not escalate either -- same reasoning as a plain crash."""
+        requeue_calls: list = []
+        update_calls: list = []
+        self._patch_kdb(
+            monkeypatch, "claude-3-5-haiku", requeue_calls, update_calls,
+            events=(),
+        )
+
+        entry, ctx = _fresh_entry_and_ctx()
+
+        ctx.hooks["fork_kanban_task_blocked"](
+            task_id="t-auto-violation",
+            reason=(
+                "worker exited cleanly (rc=0) without calling kanban_complete "
+                "or kanban_block -- protocol violation."
+            ),
+            consecutive_failures=3,
+            effective_limit=3,
+            limit_source="dispatcher",
+            trigger_outcome="crashed",  # protocol violations trip as "crashed"
+            trigger="auto_block",
+            run_id=43,
+        )
+
+        assert requeue_calls == [], (
+            f"A protocol-violation auto_block must NOT escalate; got {requeue_calls}"
+        )
+
+    def test_auto_block_with_gate_evidence_escalates(self, monkeypatch):
+        """
+        A genuine gate-failure auto_block -- the task's event history has a
+        ``completion_blocked_plugin`` entry more recent than its last
+        ``completed`` event, i.e. the mechanical gate actually vetoed a
+        completion during this failure streak -- SHOULD still escalate.
+        """
+        requeue_calls: list = []
+        update_calls: list = []
+        self._patch_kdb(
+            monkeypatch, "claude-3-5-haiku", requeue_calls, update_calls,
+            events=("completed", "completion_blocked_plugin"),
+        )
+
+        entry, ctx = _fresh_entry_and_ctx()
+
+        ctx.hooks["fork_kanban_task_blocked"](
+            task_id="t-auto-gate",
+            reason="Worker process timed out after 3600s",
+            consecutive_failures=3,
+            effective_limit=3,
+            limit_source="dispatcher",
+            trigger_outcome="timed_out",
+            trigger="auto_block",
+            run_id=44,
+        )
+
         assert len(requeue_calls) == 1, (
-            f"Expected 1 requeue call for auto_block; got {requeue_calls}"
+            f"Expected 1 requeue call for a confirmed gate-failure auto_block; "
+            f"got {requeue_calls}"
         )
         task_id, next_model = requeue_calls[0]
-        assert task_id == "t-auto"
+        assert task_id == "t-auto-gate"
         assert next_model is not None, "Next rung must not be None (ladder must escalate)"
         assert next_model != "claude-3-5-haiku", "Must escalate beyond current rung"
+
+    def test_auto_block_stale_gate_evidence_does_not_escalate(self, monkeypatch):
+        """A completion_blocked_plugin event from a PRIOR, already-succeeded
+        cycle (i.e. older than the most recent ``completed`` event) must not
+        justify escalating an unrelated later crash."""
+        requeue_calls: list = []
+        update_calls: list = []
+        self._patch_kdb(
+            monkeypatch, "claude-3-5-haiku", requeue_calls, update_calls,
+            # Oldest-first, matching kanban_db.list_events' ordering:
+            # a gate block long ago, then a successful completion, then
+            # (implicitly) the crash that trips this auto_block now.
+            events=("completion_blocked_plugin", "completed"),
+        )
+
+        entry, ctx = _fresh_entry_and_ctx()
+
+        ctx.hooks["fork_kanban_task_blocked"](
+            task_id="t-auto-stale",
+            reason="pid 123 killed by signal 9",
+            consecutive_failures=3,
+            effective_limit=3,
+            limit_source="dispatcher",
+            trigger_outcome="crashed",
+            trigger="auto_block",
+            run_id=45,
+        )
+
+        assert requeue_calls == [], (
+            f"Gate evidence from a prior successful cycle must not escalate "
+            f"an unrelated later crash; got {requeue_calls}"
+        )
 
     def test_manual_trigger_does_not_escalate(self, monkeypatch):
         """
