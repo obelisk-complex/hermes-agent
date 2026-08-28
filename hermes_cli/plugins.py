@@ -499,6 +499,25 @@ _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE = (
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 ENTRY_POINT_CAPABILITIES_GROUP = "hermes_agent.plugin_capabilities"
 
+# ── Fork identity: mandatory safety-gate plugins ────────────────────────────
+# self-check-enforcer (blocks a false "done" claim) and quality-gate (blocks
+# kanban task completion on a red lint/test/typecheck/build run) are this
+# fork's flagship differentiators — the whole premise is "no false done".
+# Upstream's plugins-are-opt-in migration (config v20→21, see
+# config_migrations.py::_migrate_to_21) deliberately does NOT grandfather
+# bundled plugins, so on a fresh install — or any install that has run that
+# migration — both would sit inert under ``plugins.enabled`` unless a user
+# opts in by hand, silently defeating the point of shipping them at all.
+#
+# These two plugin keys are therefore forced to load unconditionally: the
+# discovery sweep below ignores ``plugins.enabled``/``plugins.disabled`` for
+# just these IDs. This is a narrow, fork-only carve-out — it does not change
+# opt-in behavior for any other plugin, bundled or otherwise. The matching
+# CLI-side refusal lives in ``hermes_cli/plugins_cmd.py::cmd_disable``.
+FORK_MANDATORY_PLUGIN_KEYS: Set[str] = frozenset(
+    {"self-check-enforcer", "quality-gate"}
+)
+
 
 def _select_entry_point_group(entry_points: Any, group: str) -> list:
     """Return one metadata entry-point group across supported Python APIs."""
@@ -4406,6 +4425,16 @@ class PluginManager:
         to_load: Dict[str, PluginManifest] = {}
         for manifest in winners.values():
             lookup_key = manifest.key or manifest.name
+
+            # Fork mandatory carve-out: self-check-enforcer and quality-gate
+            # always load, full stop — plugins.enabled/plugins.disabled are
+            # not consulted for these two IDs. See FORK_MANDATORY_PLUGIN_KEYS.
+            if (
+                lookup_key in FORK_MANDATORY_PLUGIN_KEYS
+                or manifest.name in FORK_MANDATORY_PLUGIN_KEYS
+            ):
+                to_load[lookup_key] = manifest
+                continue
 
             # Relay lifecycle ownership now lives in the Hermes core. Loading
             # an old user or entry-point copy would let plugin.initialize()
