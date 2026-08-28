@@ -1,3 +1,33 @@
+## ⚜️ Obelisk Complex Fork: Customisations
+
+[![Quillx](https://raw.githubusercontent.com/qainsights/Quillx/main/badges/quillx-4.svg)](https://github.com/qainsights/Quillx) - Ghostwritten. AI generated all code in this fork; a human operator briefed, reviewed, and signed off on every change (catching security issues, challenging design decisions, directing rework). No code was written directly by human hands.
+
+-----
+
+This fork adds mechanical enforcement Nous's Hermes doesn't ship: a completion gate that catches a subagent claiming success when a validation actually failed, a kanban gate that blocks a task's completion on a red lint/test/typecheck/build run, and an auto-approval gate that requires two independent signals (not one) before it waves an action through. It also hardens image generation towards private-by-default, and keeps itself current with upstream without a human in the loop.
+
+### What you get
+
+- **No false 'done'.** When a subagent reports a failure, the agent is mechanically blocked from sending or printing an 'all clear' until the failure is fixed or explicitly acknowledged. It cannot slip past the block via another channel, plain text, or a no-op subagent dispatch. A bundled `self-checking-harness` skill gives subagents a 5-gate verification protocol (evidence, confidence score, contradiction check, alternatives, threshold) to run before they can report `READY`; after repeated blocked attempts the turn ends with an explicit 'BLOCKED, needs a human', never a quiet 'done'.
+- **Kanban tasks can't complete on a red gate.** A separate plugin runs each kanban card's lint/test/typecheck/build commands and mechanically blocks `pre_kanban_complete` until they pass (with an auto-block backstop against repeated retries). Distinct from the self-check enforcer above: this one gates kanban task completion specifically, not the agent's final text response.
+- **Auto-approval needs two signals, not one.** A ported Cloudflare OS Gatekeeper-style dual-signal gate: an action only auto-approves when both the guardian (aux-LLM) verdict says yes *and* the user has explicitly enabled auto-approval for that action's stable tag, with no open human decision ahead of it in the session. Configured via `approvals.auto_approve_tags`; browsable through `/approvals tags` on both CLI and gateway.
+- **Stays current with upstream, safely.** A GitHub Action (`sync-upstream.yml`) rebases the fork onto `NousResearch/hermes-agent` daily and force-pushes server-side, validating the rebased tree (compiles, fork-local tests, lint, lockfile check) before it ever reaches `origin/main`, so it tracks upstream with no local machine involved. Your local `hermes update` only pulls from `origin`, so no clone can force-push by accident.
+
+### How to get it
+
+- **Use this fork directly:** the enforcer and quality-gate plugins are bundled but ship **opt-in**, matching upstream's plugin model — enable what you want with `hermes plugins enable self-check-enforcer` and/or `hermes plugins enable quality-gate`. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
+- **Add the self-check system to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
+
+### Private-by-default image generation
+
+Separate from the enforcement systems above. Image generation (`tools/image_generation_tool.py`) is hardened to keep output off fal's public CDN where fal's own API allows it: every model whose fal schema accepts `sync_mode` is sent it, so the image is returned inline as a data URI instead of being written to a public URL. Most of the catalog qualifies (FLUX 2 Pro, Nano Banana Pro/2/2-Lite, GPT Image 1.5/2, Seedream 5.0, Ideogram V4, Qwen Image 3, MAI Image 2.5 Pro, Grok Imagine 2.0). **Exceptions that serve from the public CDN** (no `sync_mode` in their fal schema): FLUX 2 Klein 9B — **the current default model** — Z-Image Turbo, Ideogram V3, Recraft V4/V4.1, and both Krea 2 tiers. Upscaling (FAL's Clarity Upscaler, which also has no private mode) is off by default; enable it with `image_gen.upscale: true` in config only if you accept the upscaled result transiting fal's CDN.
+
+**For fully private output, explicitly pick a `sync_mode`-capable model in `image_gen.model`** — the shipped default does not currently qualify.
+
+**Principle:** data retention should be **opt-in**, off by default and enabled only if the user explicitly chooses it, never **opt-out**, where the provider keeps your data unless you remember to turn it off.
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
