@@ -64,10 +64,16 @@ def test_progress_advances_while_the_orchestrator_blocks(tmp_path: Path) -> None
     # caught the cleared terminal state, and failed '' == 'Testing quiet
     # update' (PR #90358 rerun, Aug 2026). 10s left no headroom once
     # transient /progress retries entered the budget (publish wait ≤10s +
-    # stability window + retry sleeps), so: 30s, and every sampling deadline
-    # below is derived from the moment the held stage lands, keeping the
-    # whole window comfortably inside the hold.
-    env["HERMES_SELFTEST_HOLD_SECONDS"] = "30"
+    # stability window + retry sleeps), so it went to 30s. That still wasn't
+    # enough: windows.ps1 serves /progress from a single dedicated runspace
+    # (Start-UiServer) that accepts one TCP connection at a time — correct
+    # for the contract, but on a starved windows-latest runner that thread
+    # can miss the CPU for consecutive 5s polling windows. Two of them back
+    # to back exhausted the old 10s read deadline before a third attempt
+    # could land (run 33219493797, Aug 2026) — not a deadlock, just longer
+    # starvation than the budget allowed for. Doubled every sampling
+    # deadline below and the hold that has to contain them, so: 60s.
+    env["HERMES_SELFTEST_HOLD_SECONDS"] = "60"
 
     with output_path.open("wb") as output:
         process = subprocess.Popen(
@@ -107,7 +113,11 @@ def test_progress_advances_while_the_orchestrator_blocks(tmp_path: Path) -> None
         # 'Testing quiet update', PR #90358 first run). Wait for the held
         # stage to actually land, THEN start the stability window.
         held_stage = "Testing quiet update"
-        publish_deadline = time.monotonic() + 10
+        # 20s, not 10s: see the HOLD_SECONDS comment above — a starved
+        # runspace thread can eat two consecutive 5s polls before it gets
+        # scheduled again, and the old 10s deadline gave a third attempt no
+        # room to land.
+        publish_deadline = time.monotonic() + 20
         first = _read_progress(shim_url, publish_deadline)
         while first.get("message") != held_stage and time.monotonic() < publish_deadline:
             time.sleep(0.1)
@@ -115,7 +125,7 @@ def test_progress_advances_while_the_orchestrator_blocks(tmp_path: Path) -> None
         assert first["message"] == held_stage, first
 
         time.sleep(1.5)
-        second = _read_progress(shim_url, time.monotonic() + 10)
+        second = _read_progress(shim_url, time.monotonic() + 20)
 
         # The stage is whatever the orchestrator last published -- it must
         # reach the page verbatim and must not churn on its own.
