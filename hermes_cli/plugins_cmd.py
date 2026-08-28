@@ -1710,11 +1710,23 @@ def _resolve_tool_override_grant(
 def cmd_disable(name: str) -> None:
     """Remove a plugin from the enabled allow-list (and add to disabled)."""
     from rich.console import Console
+    from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS
 
     console = Console()
     key = _resolve_plugin_key(name)
     if key is None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
+        sys.exit(1)
+
+    if key in FORK_MANDATORY_PLUGIN_KEYS or name in FORK_MANDATORY_PLUGIN_KEYS:
+        console.print(
+            f"[red]Plugin '{key}' cannot be disabled on this fork.[/red] "
+            "self-check-enforcer and quality-gate are mandatory safety gates "
+            "here (see README: \"no false done\") — the loader ignores "
+            "plugins.enabled/plugins.disabled for these two IDs, so disabling "
+            "would silently do nothing at load time. Refusing instead of "
+            "writing a config entry that would have no effect."
+        )
         sys.exit(1)
 
     enabled = _get_enabled_set()
@@ -1930,6 +1942,14 @@ def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
 
 def _plugin_status(name: str, enabled: set, disabled: set, key: str = "") -> str:
     """Return the user-facing activation state for a plugin name or key."""
+    from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS
+
+    if name in FORK_MANDATORY_PLUGIN_KEYS or key in FORK_MANDATORY_PLUGIN_KEYS:
+        # Always active on this fork — plugins.enabled/plugins.disabled are
+        # not consulted for these IDs at load time (hermes_cli/plugins.py).
+        # Report that truthfully instead of "enabled"/"not enabled", which
+        # would imply config controls it.
+        return "mandatory"
     if name in disabled or key in disabled:
         return "disabled"
     if name in enabled or key in enabled:
@@ -1945,7 +1965,8 @@ def _filter_plugin_entries(entries: list, args: Any, enabled: set, disabled: set
     if getattr(args, "enabled", False):
         filtered = [
             entry for entry in filtered
-            if _plugin_status(entry[0], enabled, disabled, key=entry[5]) == "enabled"
+            if _plugin_status(entry[0], enabled, disabled, key=entry[5])
+            in ("enabled", "mandatory")
         ]
     return filtered
 
@@ -1999,7 +2020,9 @@ def cmd_list(args: Any | None = None) -> None:
 
     for name, version, description, source, _dir, key in entries:
         status_name = _plugin_status(name, enabled, disabled, key=key)
-        if status_name == "disabled":
+        if status_name == "mandatory":
+            status = "[bold cyan]mandatory[/bold cyan]"
+        elif status_name == "disabled":
             status = "[red]disabled[/red]"
         elif status_name == "enabled":
             status = "[green]enabled[/green]"
@@ -2798,6 +2821,21 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     """
     if not _plugin_exists(name):
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
+
+    if not enabled:
+        from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS
+
+        key = _resolve_plugin_key(name)
+        if (key and key in FORK_MANDATORY_PLUGIN_KEYS) or name in FORK_MANDATORY_PLUGIN_KEYS:
+            return {
+                "ok": False,
+                "error": (
+                    f"Plugin '{name}' cannot be disabled on this fork — "
+                    "self-check-enforcer and quality-gate are mandatory "
+                    "safety gates; the loader ignores plugins.enabled/"
+                    "plugins.disabled for these two IDs."
+                ),
+            }
 
     en = _get_enabled_set()
     dis = _get_disabled_set()

@@ -4,9 +4,11 @@ description: >-
   Mechanical lint/test/typecheck/build gate that BLOCKS kanban task completion
   on failure (subsystem B1), plus an aux-LLM tier classifier and a static
   config-driven model-ladder escalation (subsystem B2). Matrix notify is
-  optional and a no-op unless quality_gate.matrix is configured. Opt-in via
-  plugins.enabled. Requires the fork hooks pre_kanban_spawn, fork_kanban_task_blocked
-  and pre_kanban_complete.
+  optional and a no-op unless quality_gate.matrix is configured. Mandatory on
+  this fork -- the loader ignores plugins.enabled/plugins.disabled for this
+  plugin ID (see FORK_MANDATORY_PLUGIN_KEYS in hermes_cli/plugins.py). Requires
+  the fork hooks pre_kanban_spawn, fork_kanban_task_blocked and
+  pre_kanban_complete.
 author: hermes
 kind: standalone
 # NOTE: the loader reads ``provides_hooks`` (plugins.py:1479), NOT ``hooks``.

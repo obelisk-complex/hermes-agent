@@ -66,8 +66,17 @@ git checkout selfcheck/main -- \
   docs/self-check
 ```
 
-(Or copy those three paths from a clone of the fork.) The plugin is on by
-default once present.
+(Or copy those three paths from a clone of the fork.)
+
+On the fork itself the plugin is **mandatory** — `hermes_cli/plugins.py` forces
+it to load regardless of `plugins.enabled`/`plugins.disabled`
+(`FORK_MANDATORY_PLUGIN_KEYS`), and `hermes plugins disable
+self-check-enforcer` refuses rather than silently no-opping. That carve-out
+lives in the loader, not in the plugin files this step copies. If you're doing
+this partial-copy install onto a vanilla checkout without also taking that
+loader change, the plugin is bundled but **not** enabled by default — upstream's
+opt-in migration (config v20→21) does not grandfather bundled plugins in, so
+you must opt in yourself: `hermes plugins enable self-check-enforcer`.
 
 ## 3. Add the SOUL.md block
 
