@@ -5,14 +5,12 @@ the agent's *final text response* (when it stops, with no further tool calls). I
 mechanically stops the agent from reporting a task complete while a delegated
 subagent's validation gate is still open.
 
-It ships **on by default**. A fresh clone of this repo loads it as a bundled plugin
-(`plugins/self-check-enforcer/`) with no hand-installation. To disable it, add it to
-`plugins.disabled` in `config.yaml`:
-
-```yaml
-plugins:
-  disabled: [self-check-enforcer]
-```
+It is **mandatory on this fork** and cannot be disabled through the normal plugin
+config/CLI path. A fresh clone of this repo loads it as a bundled plugin
+(`plugins/self-check-enforcer/`) with no hand-installation, and the loader ignores
+`plugins.enabled`/`plugins.disabled` for this plugin ID — see
+`FORK_MANDATORY_PLUGIN_KEYS` in `hermes_cli/plugins.py`. `hermes plugins disable
+self-check-enforcer` refuses with an explanation rather than silently no-opping.
 
 ## Why `on_output` (vs `pre_tool_call` / `pre_llm_call`)
 
