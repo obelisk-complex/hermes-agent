@@ -119,7 +119,9 @@ def _wait_fal_result(handler, *, poll_seconds: float = 0.5):
 def _submit_fal_request(model: str, arguments: Dict[str, Any]):
     """Submit a FAL request using direct credentials or the managed queue gateway."""
     _load_fal_client()
-    request_headers = {"x-idempotency-key": str(uuid.uuid4())}
+    # Opt out of FAL storing/indexing request IO on every FAL submission,
+    # both the direct fal.ai path and the managed Nous gateway path.
+    request_headers = {"x-idempotency-key": str(uuid.uuid4()), "X-Fal-Store-IO": "0"}
     managed_gateway = _resolve_managed_fal_gateway()
     if managed_gateway is None:
         return fal_client.submit(model, arguments=arguments, headers=request_headers)
