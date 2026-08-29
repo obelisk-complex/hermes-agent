@@ -187,7 +187,7 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
         "sess-dedup", owner_key="holder-key", generation=1, timeout=1
     )
     assert holder is not None
-    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "5")
+    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "60")
     monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.02")
 
     runner.session_store.load_transcript.side_effect = AssertionError(
@@ -200,7 +200,21 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        # 1s was too tight (run 33220844313, Aug 2026): under CI/load
+        # contention the *lease* wait_for() inside SessionTurnLeaseRegistry
+        # still fired in ~0.02s exactly as configured, but ordinary
+        # scheduling delay before it — the event loop getting the CPU,
+        # asyncio.to_thread() dispatching _recover_telegram_topic_thread_id
+        # onto the default executor — ate the whole 1s budget on its own.
+        # Reproduced locally under real (non-synthetic) CPU contention: a
+        # 2.5s gap between _handle_message() and _handle_message_with_agent()
+        # entry, purely from scheduler starvation, before the lease code
+        # ran at all. 10s leaves generous headroom for that while staying
+        # far short of HERMES_AGENT_TIMEOUT (60s), so a regression that
+        # actually fell through to the slow agent-timeout path would still
+        # be caught — not by this deadline, but instantly, by the
+        # session_store.load_transcript / _run_agent tripwires below.
+        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=10)
     finally:
         assert runner._turn_leases.release(holder) is True
 
