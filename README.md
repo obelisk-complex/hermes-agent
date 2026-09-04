@@ -15,7 +15,7 @@ This fork adds mechanical enforcement Nous's Hermes doesn't ship: a completion g
 
 ### How to get it
 
-- **Use this fork directly:** the enforcer and quality-gate plugins are bundled but ship **opt-in**, matching upstream's plugin model — enable what you want with `hermes plugins enable self-check-enforcer` and/or `hermes plugins enable quality-gate`. Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
+- **Use this fork directly:** the enforcer plugin is bundled and **mandatory** — it loads on every fresh clone with no hand-installation and cannot be disabled through the normal plugin config/CLI path (`hermes plugins disable self-check-enforcer` refuses with an explanation). The quality-gate plugin is likewise mandatory for the fork hooks it provides, opt-in only for its lint/test/typecheck/build matrix (`quality_gate.matrix` in config). Create `~/.hermes/SOUL.md` from the template in `docs/self-check/`, then restart Hermes.
 - **Add the self-check system to a vanilla Hermes install:** follow the [install guide](self-check-enforcement-system-v15.md), which walks through adding the `on_output` source hook and copying in the plugin, skill, and SOUL block.
 
 ### Private-by-default image generation
