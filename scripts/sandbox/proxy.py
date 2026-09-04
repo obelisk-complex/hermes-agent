@@ -150,12 +150,69 @@ def relay(source, destination):
         destination.sendall(chunk)
 
 
+def _read_headers(source):
+    """Read from source until the response header block ends.
+
+    Returns (headers_bytes_including_terminator, leftover_body_bytes) --
+    TCP is a stream, so the start of the body can already be in the same
+    recv() as the tail of the headers. Mirrors read_request()'s buffering.
+    """
+    data = b""
+    while b"\r\n\r\n" not in data and len(data) < MAX_REQUEST_BYTES:
+        chunk = source.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    head, sep, rest = data.partition(b"\r\n\r\n")
+    if not sep:
+        return data, b""
+    return head + sep, rest
+
+
+def _force_connection_close(headers):
+    """Rewrite a response's Connection header to close, dropping whatever upstream sent.
+
+    handle_connect serves exactly one request per CONNECT tunnel, then tears
+    the TLS session down. close_request already asks upstream for
+    Connection: close, but a real server (often behind a CDN) may not honour
+    that and reply keep-alive anyway -- telling a keep-alive client (Node's
+    https.Agent, which npm uses) the tunnel is reusable. It then pipelines a
+    second request onto a tunnel this proxy is about to close, which races
+    into a client-side SSLEOFError under real concurrent load. Forcing close
+    on what actually reaches the client, regardless of upstream's header, is
+    what makes the one-shot-per-tunnel contract hold end to end.
+    """
+    status_line, _, rest = headers.partition(b"\r\n")
+    lines = [line for line in rest.split(b"\r\n") if line]
+    rewritten = [
+        line for line in lines if not line.lower().startswith(b"connection:")
+    ]
+    rewritten.append(b"Connection: close")
+    return status_line + b"\r\n" + b"\r\n".join(rewritten) + b"\r\n\r\n"
+
+
+def relay_response_forcing_close(source, destination):
+    """Relay an HTTP response, forcing Connection: close toward destination.
+
+    Only the status-line + headers are parsed and rewritten; the body is
+    passed through untouched (chunked or Content-Length alike) via the
+    existing byte-for-byte relay.
+    """
+    headers, leftover = _read_headers(source)
+    if not headers:
+        return
+    destination.sendall(_force_connection_close(headers))
+    if leftover:
+        destination.sendall(leftover)
+    relay(source, destination)
+
+
 def forward_https(conn, host, port, request):
     context = ssl.create_default_context(cafile=str(REAL_CA))
     with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as raw:
         with context.wrap_socket(raw, server_hostname=host) as upstream:
             upstream.sendall(close_request(request))
-            relay(upstream, conn)
+            relay_response_forcing_close(upstream, conn)
 
 
 def forward_http(conn, host, port, request, target):
