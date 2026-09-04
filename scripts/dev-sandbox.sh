@@ -480,10 +480,24 @@ INTERACTIVE=false
 if [ -t 0 ] && [ -t 1 ]; then
   INTERACTIVE=true
 fi
+# npm_config_nodedir (set below, see stage2-run.sh's node_env) points
+# node-gyp at prebuilt headers instead of downloading them. It is only ever
+# set from an explicit override: auto-detecting it from the host's `node` on
+# PATH is wrong two different ways. First, the host node directory is often
+# not one of the paths stage2-run.sh actually mounts into the sandbox (e.g. a
+# version manager's `~/.nvm/versions/node/vX.Y.Z`, invisible inside), so
+# node-gyp fails outright looking for headers that were never mounted.
+# Second, even when it IS visible (Nix, or a plain FHS `/usr/bin/node`), the
+# sandboxed install runs its OWN Node -- either a fresh Hermes-managed
+# download (install.sh's install_node) or, in a persistent sandbox, whatever
+# managed Node a prior run already installed -- almost never the host's
+# version. Headers for the wrong version silently build a native addon with
+# the wrong NODE_MODULE_VERSION, which then fails to load at runtime. Neither
+# failure mode is worth it: proxy.py forwards non-fixture requests to the
+# real Internet (see its docstring), so node-gyp's normal header download
+# from nodejs.org already works inside the sandbox through HTTP(S)_PROXY,
+# fetching headers that actually match whatever Node ends up running.
 NODE_DIR="${DEV_SANDBOX_NODE_DIR:-}"
-if [ -z "$NODE_DIR" ] && command -v node >/dev/null; then
-  NODE_DIR="$(dirname "$(dirname "$(command -v node)")")"
-fi
 WAYLAND_SOCKET=""
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] \
   && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
