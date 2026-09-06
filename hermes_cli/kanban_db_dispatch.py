@@ -1010,6 +1010,7 @@ def _record_task_failure(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     error = error[:500]
+    blocked_hook_kwargs = None  # captured inside the txn; fired after commit
     with _kb.write_txn(conn):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
@@ -1094,7 +1095,25 @@ def _record_task_failure(
         if event_payload_extra:
             payload.update(event_payload_extra)
         _kb._append_event(conn, task_id, "gave_up", payload, run_id=run_id)
-        return True
+        # Capture now; the hook fires AFTER write_txn commits (below) so a
+        # callback can safely call kanban_db write functions and a slow
+        # callback cannot stall other writers while BEGIN IMMEDIATE is held.
+        blocked_hook_kwargs = dict(
+            task_id=task_id,
+            reason=error,
+            consecutive_failures=failures,
+            effective_limit=effective_limit,
+            limit_source=limit_source,
+            trigger_outcome=outcome,
+            trigger="auto_block",
+            run_id=run_id,
+        )
+    # fork_kanban_task_blocked fires OUTSIDE the write transaction so plugin
+    # callbacks can safely call kanban_db write functions (no nested-txn error)
+    # and a slow callback cannot hold the BEGIN IMMEDIATE lock.
+    if blocked_hook_kwargs is not None:
+        _kb._invoke_kanban_hook("fork_kanban_task_blocked", **blocked_hook_kwargs)
+    return True
 
 
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
@@ -1487,6 +1506,100 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+# Fields a pre_kanban_spawn plugin override may set on the claimed task
+# before it is spliced into the worker argv. A returned directive dict is
+# validated field-by-field (see _sanitize_pre_spawn_override) so a plugin
+# cannot inject CLI flags (e.g. {"skills": ["--accept-hooks"]} or
+# {"model_override": "-x"}) into the worker command line.
+_PRE_SPAWN_OVERRIDE_FIELDS = ("model_override", "skills", "priority")
+
+
+def _sanitize_pre_spawn_override(field_name, value):
+    """Validate a single pre_kanban_spawn override value before it is applied
+    to ``claimed`` and later spliced into the worker argv (``--skills <sk>`` /
+    ``-m <model_override>`` in _default_spawn). A value starting with ``-``
+    would inject a CLI flag; a skill containing ``,`` would splatter multiple
+    names into one argv slot - both are create_task validations the override
+    path would otherwise bypass.
+
+    Returns the cleaned value, or ``None`` to skip the override (the caller
+    logs a WARNING and leaves the existing value untouched). Fail loud: an
+    invalid value is dropped + warned, never silently applied.
+    """
+    if field_name == "model_override":
+        mo = str(value).strip()
+        if not mo or mo.startswith("-"):
+            return None
+        return mo
+    if field_name == "skills":
+        if not isinstance(value, (list, tuple)):
+            return None
+        cleaned = [
+            str(s).strip() for s in value
+            if s and not str(s).strip().startswith("-") and "," not in str(s)
+        ]
+        return cleaned or None
+    # priority (and any future scalar field): pass through unchanged.
+    return value
+
+
+def _apply_pre_kanban_spawn_override(claimed, *, board, workspace_path) -> None:
+    """Fire pre_kanban_spawn and apply the first override directive (if any).
+
+    Observers see the task; a plugin may return a dict of mutable spawn fields
+    (see ``_PRE_SPAWN_OVERRIDE_FIELDS``) to change how the task spawns (e.g.
+    escalate ``model_override`` or force ``skills``). The first dict carrying
+    at least one recognised key wins; later dicts are ignored, mirroring the
+    first-directive-wins rule in ``get_pre_tool_call_block_message``.
+    """
+    results = _kb._invoke_kanban_hook(
+        "pre_kanban_spawn",
+        task_id=claimed.id,
+        title=getattr(claimed, "title", None),
+        body=getattr(claimed, "body", None),
+        assignee=getattr(claimed, "assignee", None),
+        model_override=getattr(claimed, "model_override", None),
+        workspace_path=workspace_path,
+        workspace_kind=getattr(claimed, "workspace_kind", None),
+        branch_name=getattr(claimed, "branch_name", None),
+        priority=getattr(claimed, "priority", None),
+        skills=getattr(claimed, "skills", None),
+        consecutive_failures=getattr(claimed, "consecutive_failures", None),
+        board=board,
+    )
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        applied = [f for f in _PRE_SPAWN_OVERRIDE_FIELDS if f in result]
+        if not applied:
+            continue
+        # Validate each value before applying it - the override path otherwise
+        # bypasses create_task's skills/model checks and would let a returned
+        # dict inject CLI flags into the worker argv. Invalid values are
+        # dropped + WARNED, never applied.
+        effective = {}
+        for field_name in applied:
+            cleaned = _sanitize_pre_spawn_override(field_name, result[field_name])
+            if cleaned is None:
+                _kb._log.warning(
+                    "pre_kanban_spawn override for %s on %s rejected "
+                    "(invalid value %r); skipping that field",
+                    field_name, claimed.id, result[field_name],
+                )
+                continue
+            effective[field_name] = cleaned
+        if not effective:
+            # This directive had recognised keys but none survived validation -
+            # try the next dict (first VALID directive wins).
+            continue
+        for field_name, cleaned in effective.items():
+            setattr(claimed, field_name, cleaned)
+        _kb._log.warning(
+            "pre_kanban_spawn override applied to %s: %s", claimed.id, effective,
+        )
+        break
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -1568,6 +1681,7 @@ def _dispatch_lane_task(
     if claimed.workspace_kind == "worktree":
         _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
     _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+    _apply_pre_kanban_spawn_override(claimed, board=board, workspace_path=str(workspace))
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.

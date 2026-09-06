@@ -137,7 +137,18 @@ def _no_prompt_git_kwargs() -> dict:
 _UPDATE_CRITICAL_FILES = (
     "hermes_cli/main.py", "hermes_cli/config.py", "hermes_cli/__init__.py",
     "hermes_cli/web_server.py", "cli.py", "run_agent.py", "model_tools.py", "toolsets.py",
-    "hermes_constants.py")
+    "hermes_constants.py",
+    # Every upstream-owned file this fork edits. The daily upstream rebase can
+    # leave a conflict marker in any of them; without the post-pull syntax guard
+    # seeing the file, a "successful" update bricks the agent at the first turn.
+    # Keep this list in step with the fork's actual edits — one that names files
+    # the fork no longer touches is a guard that guards nothing.
+    "agent/turn_stop_gates.py", "agent/turn_final_response.py", "agent/turn_finalizer.py",
+    "hermes_cli/config_defaults.py", "hermes_cli/kanban.py", "hermes_cli/kanban_db.py",
+    "hermes_cli/kanban_db_dispatch.py", "hermes_cli/oneshot.py", "hermes_cli/plugins.py",
+    "hermes_cli/update_cmd.py",  # this file: a marker here breaks the updater itself
+    "tools/delegate_tool_config.py", "tools/delegate_tool_progress.py",
+    "tools/kanban_tools.py", "tui_gateway/server.py")
 
 
 def _record_update_step(step: str, ok: bool, detail: str = "") -> None:

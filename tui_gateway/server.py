@@ -2241,6 +2241,22 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     from hermes_cli.config import resolve_ephemeral_system_prompt_from_config
     system_prompt = resolve_ephemeral_system_prompt_from_config(cfg)
     startup_skills = _parse_tui_skills_env()
+
+    # Merge skills.always from config -- preloaded on every session.
+    # Config skills come first so env skills add on top (deduped).
+    # MUST precede the empty-startup_skills early return below: the common
+    # case is no HERMES_TUI_SKILLS set, which is exactly when config-only
+    # always-skills need to load.
+    from hermes_cli.skills_always import resolve_always_skills
+    always_skills = resolve_always_skills(cfg)
+    if always_skills:
+        seen = set(always_skills)
+        for s in startup_skills:
+            if s not in seen:
+                seen.add(s)
+                always_skills.append(s)
+        startup_skills = always_skills
+
     if not startup_skills:
         return system_prompt
     from agent.skill_commands import build_preloaded_skills_prompt

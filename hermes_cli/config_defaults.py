@@ -171,7 +171,11 @@ DEFAULT_CONFIG = {
         # expectations. false = keep the evidence nudge terse.
         "verify_guidance": True,
         # Max consecutive `pre_verify` "continue" nudges per turn (hooks can't trap the loop).
-        "max_verify_nudges": 3,
+        # FORK: raised from upstream's 3. The self-check-enforcer gate rides this bound —
+        # it is the fork's only pre_verify consumer and is mandatory — and its escalation
+        # ladder needs room to issue a forcing directive before handing off to a human.
+        # Value only; the key is upstream's.
+        "max_verify_nudges": 5,
         # Verification closure: after code edits in a workspace, refuse a final answer until fresh
         # verification evidence exists or the agent explains why it can't check (bounded loop,
         # passive ledger). False (default) because the nudges proved more noise than signal; true =
@@ -1304,6 +1308,16 @@ DEFAULT_CONFIG = {
     # Skills — external skill directories shared across tools/agents. Paths are expanded (~, ${VAR})
     # and resolved; read-only — creation goes to ~/.hermes/skills/ unless create_dir redirects it.
     "skills": {
+        # Skills to preload on every session — skill content is injected into
+        # the system prompt at startup so the agent has the full procedure
+        # without needing a skill_view() call.  Names must match installed
+        # skill identifiers (e.g. "self-checking-harness").
+        # "always_load" is the name upstream's docs and bundled skills use;
+        # "always" is the fork's original key. Both are read and unioned by
+        # hermes_cli.skills_always.resolve_always_skills, and both are listed
+        # here so `hermes config set` recognises either.
+        "always_load": [],
+        "always": [],
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
         # Where skill_manage-created skills go (empty = profile-local dir). When set, new skills
         # land here AND agent-facing instructions name this path; expanded (~, ${VAR}), relative to

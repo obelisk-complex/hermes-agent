@@ -49,16 +49,29 @@ def _verify_on_stop_nudge(agent) -> Optional[str]:
     return None
 
 
-def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
-    """After code edits a registered ``pre_verify`` hook may keep the agent going one
-    more turn; no default continuation cost."""
+def _pre_verify_nudge(agent, final_response, attempt: int, api_call_count: int) -> Optional[str]:
+    """A registered ``pre_verify`` hook may keep the agent going one more turn; no
+    default continuation cost.
+
+    Fires after code edits OR on any turn that did more than a single API call.
+    Edits alone are too narrow for the gate this fork relies on: an orchestrator
+    that dispatched a child, got a FAIL back and then claims completion has an
+    empty ``_turn_file_mutation_paths``, so an edits-only guard never asks the
+    hook on precisely the turn that matters. ``api_call_count == 1`` means one
+    API call and no tools (a bare "hi"), which stays exempt so trivial turns pay
+    no hook dispatch; ``begin_iteration`` bumps the counter once per iteration,
+    so anything that ran a tool or spawned a child is >= 2.
+
+    Clause order matters: the integer compare short-circuits before ``has_hook``,
+    which does two lazy imports.
+    """
     _edited = sorted(getattr(agent, "_turn_file_mutation_paths", set()) or [])
     try:
         from agent.verify_hooks import max_verify_nudges
         from hermes_cli.lifecycle import has_hook
         from hermes_cli.plugins import get_pre_verify_continue_message
 
-        if _edited and has_hook("pre_verify") and attempt < max_verify_nudges():
+        if (_edited or api_call_count > 1) and has_hook("pre_verify") and attempt < max_verify_nudges():
             # Posture is fixed for the session — resolve once + cache.
             coding = getattr(agent, "_resolved_is_coding", None)
             if coding is None:
@@ -73,6 +86,47 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
             )
     except Exception:
         logger.debug("pre_verify hook check failed", exc_info=True)
+    return None
+
+
+def pre_verify_terminal_substitute(
+    agent, final_response, attempt: int, api_call_count: int
+) -> Optional[str]:
+    """Replacement final text when the nudge budget is spent and the hook still refuses.
+
+    Upstream stops asking once ``attempt >= max_verify_nudges()``, so "the hook is
+    satisfied" and "the budget ran out" both surface as a silent ``None`` and the
+    unverified answer flows through unchanged. A gate whose whole premise is that a
+    task must never be silently marked done cannot accept that, so at exhaustion the
+    hook is asked once more, out of band: whatever it returns now replaces the final
+    text rather than nudging, because there is no iteration left to nudge into.
+
+    Returns ``None`` whenever the hook is quiet or the budget is not yet spent, which
+    is the ordinary path and leaves the answer untouched.
+    """
+    try:
+        from agent.verify_hooks import max_verify_nudges
+        from hermes_cli.lifecycle import has_hook
+        from hermes_cli.plugins import get_pre_verify_continue_message
+
+        if attempt < max_verify_nudges():
+            return None
+        _edited = sorted(getattr(agent, "_turn_file_mutation_paths", set()) or [])
+        if not (_edited or api_call_count > 1) or not has_hook("pre_verify"):
+            return None
+        coding = getattr(agent, "_resolved_is_coding", None)
+        if coding is None:
+            from agent.coding_context import is_coding_context
+            coding = bool(is_coding_context(platform=getattr(agent, "platform", "") or ""))
+            agent._resolved_is_coding = coding
+        return get_pre_verify_continue_message(
+            session_id=getattr(agent, "session_id", None) or "",
+            platform=getattr(agent, "platform", "") or "",
+            model=getattr(agent, "model", "") or "", coding=coding, attempt=attempt,
+            final_response=final_response, changed_paths=_edited,
+        )
+    except Exception:
+        logger.debug("pre_verify terminal substitution check failed", exc_info=True)
     return None
 
 
@@ -104,7 +158,7 @@ def _append_interim_answer(agent, final_msg, messages, conversation_history, flu
 def apply_stop_gates(
     agent: Any, final_msg: Dict[str, Any], *, final_response: Any, messages: List[Dict[str, Any]],
     conversation_history: Any, pending_verification_response: Any,
-    pending_verification_response_previewed: Any,
+    pending_verification_response_previewed: Any, api_call_count: int = 1,
 ) -> StopGateVerdict:
     """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
     are user-role rows appended only after the assistant answer row, so role alternation
@@ -139,7 +193,7 @@ def apply_stop_gates(
         return verdict
 
     _attempt = getattr(agent, "_pre_verify_nudges", 0)
-    _verify_nudge2 = _pre_verify_nudge(agent, final_response, _attempt)
+    _verify_nudge2 = _pre_verify_nudge(agent, final_response, _attempt, api_call_count)
     if _verify_nudge2:
         agent._pre_verify_nudges = _attempt + 1
         final_msg["finish_reason"] = "verify_hook_continue"
@@ -167,8 +221,10 @@ def apply_stop_gates(
             "kanban_complete/kanban_block — nudging to finish"
         )
         return verdict
+    _substitute = pre_verify_terminal_substitute(agent, final_response, _attempt, api_call_count)
     return StopGateVerdict(
-        continue_turn=False, final_response=final_response,
+        continue_turn=False,
+        final_response=_substitute if _substitute else final_response,
         pending_verification_response=pending_verification_response,
         pending_verification_response_previewed=pending_verification_response_previewed,
     )

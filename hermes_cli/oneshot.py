@@ -379,7 +379,13 @@ def _run_agent(
 
     ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True)
 
-    skills_prompt = _build_preloaded_skills_prompt(skills)
+    # Merge skills.always from config — same as cli.py main(). Config skills
+    # come first so an explicit --skills adds on top; one shared call keeps the
+    # partial-success contract (warn on some missing, raise only if all are)
+    # identical to CLI chat and the gateway.
+    from hermes_cli.skills_always import resolve_always_skills
+    always_skills = resolve_always_skills(cfg)
+    skills_prompt = _build_preloaded_skills_prompt([*always_skills, *_normalize_skills(skills)])
 
     session_db = _create_session_db_for_oneshot()
     # The try spans agent construction (not just ``chat``) so the store is always closed, even when

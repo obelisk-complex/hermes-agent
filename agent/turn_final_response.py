@@ -216,12 +216,17 @@ def finish_text_response(
         conversation_history=conversation_history,
         pending_verification_response=_pending_verification_response,
         pending_verification_response_previewed=_pending_verification_response_previewed,
+        api_call_count=api_call_count,
     )
     _pending_verification_response = _sg.pending_verification_response
     _pending_verification_response_previewed = _sg.pending_verification_response_previewed
     if _sg.continue_turn:
         final_response = None
         return _verdict("continue")
+    # A gate whose nudge budget is spent but which is still refusing substitutes the
+    # answer here (pre_verify_terminal_substitute); otherwise this is the draft
+    # unchanged. Dropping this line silently reverts to shipping the unverified text.
+    final_response = _sg.final_response
 
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps

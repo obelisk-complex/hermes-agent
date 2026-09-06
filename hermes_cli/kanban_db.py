@@ -155,6 +155,24 @@ def _fire_task_hook(event: str, task: Optional["Task"], task_id: str, run_id: Op
     )
 
 
+def _invoke_kanban_hook(name: str, **kwargs: Any) -> list:
+    """Results-returning sibling of :func:`_fire_kanban_lifecycle_hook`, for the
+    block-capable / override-capable fork hooks whose return values ARE the
+    contract. ``lifecycle.invoke_hook`` is typed ``-> List[Any]`` and does not
+    swallow plugin exceptions, so import AND dispatch are both guarded here: the
+    single-writer kernel degrades to ``[]`` rather than let a plugin break a
+    transition. The import stays inside the function so the guard still fires
+    after a partial install. Injects nothing (unlike :func:`_fire_task_hook`) —
+    the payload is exactly what the caller passes."""
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+
+        return invoke_hook(name, **kwargs) or []
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("kanban hook %s failed: %s", name, exc)
+        return []
+
+
 def _hook_profile_name() -> str:
     """Active profile for hook payloads; ``"default"`` when it cannot be resolved."""
     from hermes_cli.profiles import get_active_profile_name
@@ -2533,6 +2551,46 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+class CompletionBlockedError(ValueError):
+    """Raised by ``complete_task`` when a ``pre_kanban_complete`` plugin
+    returns ``{"action": "block", "message": ...}``.
+
+    The block message is the exception text; the completing task is left in
+    its prior state (no status->done write). Kept as a ``ValueError`` subclass
+    so existing tool-error handlers treat it as a recoverable user error,
+    matching ``HallucinatedCardsError``.
+
+    Bounded-retry guidance (the task stays ``running`` after a block, so an
+    unfixed gate will block every retry): a worker should treat **3+
+    consecutive ``CompletionBlockedError`` responses as a signal to call
+    ``kanban_block``** with a reason summarising the gate output, rather than
+    looping ``complete -> blocked -> complete`` indefinitely. The
+    ``pre_kanban_complete`` hook also receives ``blocked_attempt_count`` (the
+    number of prior ``completion_blocked_plugin`` events for this task) so a
+    gate plugin can escalate or back off after a threshold of its own.
+
+    Kernel backstop: this exception is NOT raised indefinitely. Once a task
+    has been blocked ``_MAX_COMPLETION_BLOCKS`` times, ``complete_task`` stops
+    raising and instead auto-transitions the task to ``blocked`` (via
+    ``block_task``) for human review, returning ``False`` - so a permanently
+    broken gate cannot drive an unbounded retry loop even when no worker or
+    plugin intervenes.
+    """
+
+    def __init__(self, message: str, completing_task_id: str):
+        self.block_message = message
+        self.completing_task_id = completing_task_id
+        super().__init__(f"completion blocked by quality gate: {message}")
+
+
+# Kernel backstop for a permanently broken pre_kanban_complete gate. Once a
+# task has been blocked this many times, complete_task stops raising
+# CompletionBlockedError and auto-transitions the task to `blocked` for human
+# review, so a broken gate cannot drive an unbounded complete->blocked->
+# complete retry loop.
+_MAX_COMPLETION_BLOCKS = 5
+
+
 def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
@@ -2554,6 +2612,12 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
+    # The pre_kanban_complete veto runs BETWEEN the two gates deliberately: a
+    # gate plugin may create or remove files in the scratch workspace, so the
+    # artifact scan below must see the workspace as the gate left it (and a
+    # vetoed completion must not scan at all).
+    if not _gate_completion_plugins(conn, task_id, result):
+        return False
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
@@ -2641,6 +2705,78 @@ def _gate_created_cards(
             )
         raise HallucinatedCardsError(phantom_cards, task_id)
     return verified_cards
+
+
+def _gate_completion_plugins(
+    conn: sqlite3.Connection, task_id: str, result: Optional[str],
+) -> bool:
+    """Fire ``pre_kanban_complete`` BEFORE the main write txn; True to proceed.
+
+    Sibling of :func:`_gate_created_cards` and the same contract: runs outside
+    the status->done transaction, records its audit event in its own tiny txn,
+    and leaves task state untouched when it vetoes. The first
+    ``{"action": "block", "message": str}`` directive wins and raises
+    :class:`CompletionBlockedError`; non-block return values are ignored.
+    ``blocked_attempt_count`` (prior ``completion_blocked_plugin`` events) is
+    handed to the plugin as a bounded-retry / escalation signal.
+
+    Kernel backstop: once the gate has blocked this task
+    :data:`_MAX_COMPLETION_BLOCKS` times, stop raising (a broken gate would
+    otherwise loop forever) and auto-transition the task to ``blocked`` via
+    :func:`block_task` for human review, returning False so ``complete_task``
+    reports the task did not complete.
+    """
+    gate_row = conn.execute(
+        "SELECT workspace_path, branch_name, assignee, model_override "
+        "FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    prior_blocks = conn.execute(
+        "SELECT COUNT(*) AS c FROM task_events "
+        "WHERE task_id = ? AND kind = 'completion_blocked_plugin'", (task_id,),
+    ).fetchone()
+    blocked_attempt_count = int(prior_blocks["c"]) if prior_blocks else 0
+    gate_results = _invoke_kanban_hook(
+        "pre_kanban_complete",
+        task_id=task_id,
+        result=result,
+        workspace_path=(gate_row["workspace_path"] if gate_row else None),
+        branch_name=(gate_row["branch_name"] if gate_row else None),
+        assignee=(gate_row["assignee"] if gate_row else None),
+        model_override=(gate_row["model_override"] if gate_row else None),
+        blocked_attempt_count=blocked_attempt_count,
+    )
+    for gate in gate_results:
+        if not isinstance(gate, dict) or gate.get("action") != "block":
+            continue
+        block_msg = gate.get("message")
+        if not (isinstance(block_msg, str) and block_msg):
+            continue
+        _log.warning(
+            "pre_kanban_complete blocked completion of %s (attempt %d): %s",
+            task_id, blocked_attempt_count + 1, block_msg,
+        )
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_plugin",
+                {"message": block_msg[:500], "attempt": blocked_attempt_count + 1},
+            )
+        if blocked_attempt_count >= _MAX_COMPLETION_BLOCKS:
+            _log.warning(
+                "pre_kanban_complete has blocked %s %d times "
+                "(>= _MAX_COMPLETION_BLOCKS=%d); auto-blocking for human "
+                "review instead of raising again",
+                task_id, blocked_attempt_count, _MAX_COMPLETION_BLOCKS,
+            )
+            block_task(
+                conn, task_id,
+                reason=(
+                    f"completion gate blocked {blocked_attempt_count} times; "
+                    f"auto-blocked for human review (last: {block_msg[:200]})"
+                ),
+            )
+            return False
+        raise CompletionBlockedError(block_msg, task_id)
+    return True
 
 
 def _stage_completion_artifacts(conn: sqlite3.Connection, task_id: str, metadata: dict, now: int) -> None:
@@ -2949,7 +3085,20 @@ def block_task(
             # Historical ordering: the dependency lane fires inside the txn.
             _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
             return True
+        # Capture the fork-local observer kwargs INSIDE the txn (the dependency
+        # lane returned above; ``new_status`` is whatever _route_block chose).
+        # block_task is the manual-block entry point, so trigger is always
+        # "manual"; _record_task_failure carries trigger="auto_block".
+        blocked_hook_kwargs = dict(
+            task_id=task_id, reason=reason, run_id=run_id, trigger="manual",
+        )
     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
+    # Fire fork_kanban_task_blocked OUTSIDE the write transaction (status already
+    # committed) so a callback may safely call kanban_db write functions and a
+    # slow callback cannot hold the BEGIN IMMEDIATE lock. Only reached when the
+    # UPDATE matched; the early ``return False`` short-circuits the no-op case,
+    # so the hook never fires on a non-block.
+    _invoke_kanban_hook("fork_kanban_task_blocked", **blocked_hook_kwargs)
     return True
 
 
@@ -3254,9 +3403,17 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *, requeue_event: Optional[dict] = None,
+) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first.
+
+    ``requeue_event``: when supplied and the status flip succeeded, a
+    ``requeued`` audit event carrying this dict as payload is appended INSIDE
+    the same ``write_txn`` as the status write, so the requeue and its audit
+    record are atomic. When None (the plain-unblock path) nothing extra is
+    emitted."""
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
@@ -3295,6 +3452,11 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
                 else None
             ),
         )
+        if requeue_event is not None:
+            # Folded into the SAME write_txn as the status write so a crash
+            # between them cannot lose the audit record. _append_event is
+            # designed to run inside an open txn.
+            _append_event(conn, task_id, "requeued", requeue_event)
         return True
 
 
@@ -3331,6 +3493,101 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         _append_event(
             conn, task_id, "review_reopened", payload if payload != {"status": "ready"} else None,
         )
+        return True
+
+
+# Operator-mutable task columns. Derived from the ``tasks`` schema
+# (see SCHEMA_SQL). DELIBERATELY excludes:
+#   * the primary key (id) and immutable timestamps (created_at);
+#   * claim/run machinery (claim_lock, claim_expires, worker_pid,
+#     current_run_id, consecutive_failures, last_heartbeat_at) - kernel-owned;
+#   * ``status`` - status transitions go ONLY through complete_task /
+#     block_task / unblock_task / requeue_blocked_task, which maintain
+#     completed_at, run closure, claim clearing, events, and child re-gating.
+#     A raw status write would corrupt the state machine (no CHECK constraint
+#     on the column);
+#   * ``model_override``, ``workspace_path`` and ``branch_name`` - each has a
+#     dedicated setter (:func:`set_model_override`, ``set_workspace_path`` /
+#     ``set_branch_name`` in ``kanban_db_workspace``) that validates the value,
+#     refuses archived tasks, writes the companion column (``provider_override``),
+#     appends a typed audit event and fires ``notify_task_updated``. A bare
+#     ``UPDATE tasks SET <field>`` here would bypass all of that.
+# update_task_field validates against this frozen set so a caller can never
+# name an arbitrary column (SQL-injection / footgun guard). EXPANDING this set
+# requires an explicit review - fields here can be rewritten by any plugin.
+_MUTABLE_TASK_FIELDS = frozenset({
+    "title",
+    "body",
+    "assignee",
+    "priority",
+    "workspace_kind",
+    "tenant",
+    "result",  # guarded below: rejected when status in done/archived
+    "idempotency_key",
+    "last_failure_error",
+    "max_runtime_seconds",
+    "workflow_template_id",
+    "current_step_key",
+    "skills",
+    "max_retries",
+    "goal_mode",
+    "goal_max_turns",
+    "session_id",
+})
+
+# Statuses in which ``result`` is frozen: a finished task's recorded
+# completion output must not be rewritten out from under the audit log.
+_RESULT_FROZEN_STATUSES = ("done", "archived")
+
+# Columns stored as JSON text in the schema - a list/dict value must be
+# serialised before binding (a raw list bind raises sqlite3.ProgrammingError).
+_JSON_TASK_FIELDS = frozenset({"skills"})
+
+
+def update_task_field(
+    conn: sqlite3.Connection, task_id: str, field: str, value: Any,
+) -> bool:
+    """Set a single mutable column on a task.
+
+    ``field`` must be a member of :data:`_MUTABLE_TASK_FIELDS`; any other
+    name (the primary key, claim/run machinery, ``status`` - which has
+    dedicated transition functions - or a column with a dedicated setter)
+    raises ``ValueError`` BEFORE any SQL is built: the column identifier is
+    only ever taken verbatim from the frozen allowlist, never from caller
+    input, and the value is bound as a parameter. ``result`` additionally
+    cannot be set on a task whose status is in
+    :data:`_RESULT_FROZEN_STATUSES` (no rewriting finished output). Fields
+    stored as JSON text (:data:`_JSON_TASK_FIELDS`, e.g. ``skills``) are
+    serialised with ``json.dumps`` before binding when given a non-string
+    value. Returns True iff exactly one row was updated.
+    """
+    if field not in _MUTABLE_TASK_FIELDS:
+        raise ValueError(
+            f"update_task_field: column {field!r} is not in the mutable "
+            f"allowlist (allowed: {', '.join(sorted(_MUTABLE_TASK_FIELDS))}). "
+            f"Status transitions must use complete_task / block_task / "
+            f"unblock_task / requeue_blocked_task; model, workspace and branch "
+            f"go through set_model_override / set_workspace_path / "
+            f"set_branch_name."
+        )
+    with write_txn(conn):
+        if field == "result":
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["status"] in _RESULT_FROZEN_STATUSES:
+                raise ValueError(
+                    f"update_task_field: cannot set 'result' on a task in "
+                    f"status {row['status']!r} (finished output is frozen)"
+                )
+        if field in _JSON_TASK_FIELDS and value is not None and not isinstance(value, str):
+            value = json.dumps(list(value), ensure_ascii=False)
+        cur = conn.execute(f"UPDATE tasks SET {field} = ? WHERE id = ?", (value, task_id))
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "field_updated", {"field": field})
         return True
 
 
@@ -3427,6 +3684,47 @@ def invalidate_descendants_for_parent_reopen(
         for pid, claim_lock in terminations:
             _terminate_reclaimed_worker(pid, claim_lock)
     return {"invalidated": invalidated, "terminations": terminations}
+
+
+def requeue_blocked_task(
+    conn: sqlite3.Connection, task_id: str, *, model_override: Optional[str] = None,
+    provider_override: Optional[str] = None, reason: Optional[str] = None,
+) -> bool:
+    """Requeue a blocked task for another attempt, optionally escalating it
+    onto a stronger model.
+
+    The escalation goes through :func:`set_model_override` FIRST, in its own
+    transaction, so it gets the validation, the archived-task refusal, the
+    companion ``provider_override`` write, the ``model_override_set`` audit
+    event and the ``notify_task_updated`` observer that a bare column write
+    would skip. The blocked/scheduled -> ready|todo transition (with failure
+    counter reset, stale-run close, parent re-gating and the ``requeued`` audit
+    event) then goes through :func:`unblock_task` in a second transaction.
+
+    Two transactions, deliberately: ``set_model_override`` fires an observer
+    after its commit and so must not run under an open outer txn. A crash
+    between them leaves the model escalated but the task still blocked —
+    visible on the board and human-fixable, which is the safe direction.
+
+    Returns ``unblock_task``'s result: False when the task was not in a
+    requeueable state (no ``requeued`` event was written; the model escalation,
+    if any, already applied). Logs the escalation at WARNING.
+    """
+    if model_override is not None:
+        set_model_override(conn, task_id, model_override, provider_override)
+    requeue_event = {
+        "reason": reason,
+        "model_override": model_override,
+        "escalation_applied": model_override is not None,
+    }
+    if not unblock_task(conn, task_id, requeue_event=requeue_event):
+        return False
+    if model_override is not None:
+        _log.warning(
+            "Requeued blocked task %s with escalated model_override=%s (reason=%s)",
+            task_id, model_override, reason,
+        )
+    return True
 
 
 def specify_triage_task(

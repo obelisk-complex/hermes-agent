@@ -869,8 +869,23 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
-            return kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
-                                    expected_run_id=_worker_run_id_for(tid))
+            try:
+                completed = kb.complete_task(conn, tid, result=args.result, summary=summary,
+                                             metadata=metadata, expected_run_id=_worker_run_id_for(tid))
+            except kb.CompletionBlockedError as gate_err:
+                fail_msg[tid] = f"completion blocked by quality gate: {gate_err.block_message}"
+                return False
+            if not completed:
+                # complete_task returns False for an unknown/terminal id OR when
+                # the kernel auto-blocked the task after the gate blocked it
+                # _MAX_COMPLETION_BLOCKS times. Report the latter distinctly so
+                # the operator is not misled.
+                t = kb.get_task(conn, tid)
+                if t is not None and t.status == "blocked":
+                    fail_msg[tid] = (f"{tid} was auto-blocked for human review after the quality "
+                                     f"gate blocked it repeatedly (now 'blocked')")
+                return False
+            return True
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
 
