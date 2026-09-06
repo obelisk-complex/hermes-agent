@@ -2786,7 +2786,7 @@ def _show_managed_banner() -> None:
         return
     print()
     print(color(
-        f"  ⚷ Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
+        f"  [admin] Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
         f"and cannot be changed", Colors.YELLOW, Colors.BOLD))
     for label, keys in (("config", managed_keys), ("env", managed_env)):
         if keys:

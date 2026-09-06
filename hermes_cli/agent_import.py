@@ -630,7 +630,7 @@ def print_import_report(report: Dict[str, Any], dry_run: bool) -> None:
             print(f"      {item.get('kind', 'unknown'):<22s} {tail}")
         print()
     if stripped := report.get("stripped_secrets"):
-        print(color("  ⚷ Secrets stripped (never imported):", Colors.YELLOW))
+        print(color("  ◆ Secrets stripped (never imported):", Colors.YELLOW))
         for name in stripped:
             print(f"      {name}")
         print_info("Re-add credentials deliberately via 'hermes setup' or ~/.hermes/.env.")
