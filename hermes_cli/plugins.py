@@ -226,6 +226,24 @@ VALID_HOOKS: Set[str] = {
 
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
 # the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
+# ── Fork identity: mandatory safety-gate plugins ────────────────────────────
+# self-check-enforcer (blocks a false "done" claim) and quality-gate (blocks
+# kanban task completion on a red lint/test/typecheck/build run) are this
+# fork's flagship differentiators — the whole premise is "no false done".
+# Upstream's plugins-are-opt-in migration (config v20→21) deliberately does
+# NOT grandfather bundled plugins, so on a fresh install both would sit inert
+# under ``plugins.enabled`` unless a user opts in by hand, silently defeating
+# the point of shipping them at all.
+#
+# These two keys are therefore forced to load unconditionally: the gate in
+# PluginManager._gate_manifest ignores plugins.enabled/plugins.disabled for
+# just these IDs. Narrow, fork-only carve-out — opt-in behaviour is unchanged
+# for every other plugin. The matching CLI-side refusal lives in
+# hermes_cli/plugins_cmd.py::cmd_disable.
+FORK_MANDATORY_PLUGIN_KEYS: Set[str] = frozenset(
+    {"self-check-enforcer", "quality-gate"}
+)
+
 SHELL_UNSUPPORTED_HOOKS: Set[str] = {"transform_api_error_classification"}
 
 _env_enabled = env_var_enabled  # imported by plugins/memory
@@ -1365,6 +1383,14 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Route one winning manifest per :func:`gate_manifest`: load now, defer, or record as
         skipped (introspection-only placeholder). Returns True only for plugins that go through the
         dependency-ordered load pass."""
+        # Fork mandatory carve-out: these two always load, full stop —
+        # plugins.enabled/plugins.disabled are not consulted for them. Placed
+        # before gate_manifest() so no verdict can exclude them.
+        if (
+            manifest_key(manifest) in FORK_MANDATORY_PLUGIN_KEYS
+            or manifest.name in FORK_MANDATORY_PLUGIN_KEYS
+        ):
+            return True
         verdict = gate_manifest(manifest, disabled, enabled)
         if verdict.action == "load":
             return True

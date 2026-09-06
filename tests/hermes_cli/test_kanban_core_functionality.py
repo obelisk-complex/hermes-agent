@@ -1327,7 +1327,9 @@ def _drive_nonzero_crash(conn, tid, fake_pid):
     return _drive_worker_exit(conn, tid, fake_pid, 256)
 
 
-def test_protocol_violation_budget_not_consumed_by_other_failures(kanban_home):
+def test_protocol_violation_budget_not_consumed_by_other_failures(
+    kanban_home, monkeypatch
+):
     """Mixed failure kinds must not consume the violation retry budget.
 
     Regression for the #61233 review finding: expressed as a plain
@@ -1339,6 +1341,20 @@ def test_protocol_violation_budget_not_consumed_by_other_failures(kanban_home):
     """
     import hermes_cli.kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
+
+    # quality-gate is mandatory on this fork (FORK_MANDATORY_PLUGIN_KEYS,
+    # hermes_cli/plugins.py) and its fork_kanban_task_blocked hook auto-escalates
+    # and REQUEUES any auto_block back to "ready" with a stronger model_override
+    # (blocked_hook.py maps trigger="auto_block" -> the retriable reason
+    # "gate_failed", by design, for any circuit-breaker trip -- not just an actual
+    # gate failure). That would silently flip the "blocked" status this test
+    # asserts on straight back to "ready". This test pins kanban_db's own
+    # consecutive_failures / protocol-violation accounting, not quality-gate's
+    # retry ladder, so neutralize the hook dispatch to observe it in isolation.
+    # Patched on kanban_db, which is where _invoke_kanban_hook lives and where
+    # kanban_db_dispatch resolves it from at call time.
+    monkeypatch.setattr(kb, "_invoke_kanban_hook", lambda *a, **k: [])
+
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="mixed", assignee="worker")
