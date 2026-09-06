@@ -305,6 +305,16 @@ DANGEROUS_PATTERNS = [
     # between `hermes` and `gateway` (`hermes -p ade gateway restart`) are allowed so a profile flag can't slip past.
     (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    # `hermes config set/unset/edit` rewrites the security policy file
+    # (~/.hermes/config.yaml holds approvals.mode, yolo, the allowlist, and
+    # the dual-signal keys). Without this entry the CLI walks around the
+    # config-write gate entirely: the command matches no pattern, so
+    # check_all_command_guards returns approved before the guardian step in
+    # every mode (D19 of the dual-signal plan). Read verbs (show/get/path/
+    # env-path/check) and migrate (bounded to filling absent defaults) are
+    # deliberately excluded. Flag-tolerant like the gateway entry above, so a
+    # profile flag can't slip the agent past the guard.
+    (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*config\s+(set|unset|edit)\b', "write hermes config via CLI (approval policy lives here)"),
     # Docker/Podman daemon redirect — global flags or env that point the CLI at a DIFFERENT (often remote) daemon:
     # `docker -H ssh://prod stop app` looks local but operates on remote infra, so any redirect requires approval
     # regardless of subcommand. The flag must be in global position (before the subcommand) and -H/--host/--context
@@ -1163,3 +1173,101 @@ def detect_dangerous_command(command: str) -> tuple:
     if _is_shell_token_spliced_gateway_lifecycle(command):
         return (True, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION)
     return (False, None, None)
+
+
+# --- Action-tag resolution (T3 of the dual-signal plan) -------------------------------------------------------------
+# Lives here because it reads the detection variants and the Hermes-path regexes above; the gate
+# that consumes it is tools.approval._smart_gate. tools.action_tags imports nothing from Hermes
+# (D2), so the module-scope import below cannot create a cycle.
+
+# D14: any command naming the Hermes home directory itself (not just config.yaml / .env) becomes
+# config.write. The trailing slash is OPTIONAL on every limb: a directory target has no filename
+# after it, so a mandatory slash would let `rm -rf $HERMES_HOME` keep its configurable tag and
+# delete the policy file. `$HOME` alone is deliberately NOT a limb — `rm -rf $HOME` is too broad to
+# gate here — but `$HERMES_HOME` alone is, because that variable IS the Hermes home. Accepted
+# fail-closed over-match: `~/.hermesbak` and `$HERMES_HOME_OLD` also lose auto-approval.
+_HERMES_HOME_TARGET = (
+    r'(?:~\/\.hermes/?|'
+    r'(?:\$home|\$\{home\})/\.hermes/?|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/?)'
+)
+
+
+def _tag_for_key(pattern_key: str):
+    """Thin call-through to the taxonomy (D2: action_tags imports nothing)."""
+    from tools.action_tags import tag_for_pattern_key
+    return tag_for_pattern_key(pattern_key)
+
+
+def _command_targets_hermes_home(command: str) -> bool:
+    """True when any detection variant names the Hermes home (D14).
+
+    Tests every variant :func:`_command_detection_variants` yields, so the override sees exactly
+    what detection saw — a path form detection misses is not a warning at all and never reaches
+    the tag layer.
+    """
+    try:
+        targets = (_HERMES_ENV_PATH, _HERMES_CONFIG_PATH, _HERMES_HOME_TARGET)
+        for variant in _command_detection_variants(command):
+            for target in targets:
+                if re.search(target, variant, _RE_FLAGS):
+                    return True
+    except Exception:
+        # Fail closed: an unparseable command is treated as targeting the Hermes home rather than
+        # racing a regex error on the hot path.
+        return True
+    return False
+
+
+def _resolve_tags(warnings, command) -> frozenset:
+    """Resolve the :class:`~tools.action_tags.ActionTag` set for a warnings list (T3).
+
+    ``warnings`` is a list of 3-tuples ``(pattern_key, description, is_tirith)``. Per entry, in
+    order: ``tirith:`` -> ``security.scan``; ``plugin_rule:`` -> ``plugin.rule``; exact
+    ``"execute_code"`` -> ``code.exec``; exact ``"mcp_elicitation"`` -> ``mcp.tool``; else the
+    taxonomy lookup.
+
+    Then the D14 override, **unconditional on the resolved tag** and applied to every non-tirith
+    entry: if any variant from :func:`_command_detection_variants` matches ``_HERMES_ENV_PATH``,
+    ``_HERMES_CONFIG_PATH``, or ``_HERMES_HOME_TARGET``, that entry's tag becomes ``config.write``.
+    The override runs on detection variants, not the raw string (D8):
+    ``_normalize_command_for_detection`` folds resolved absolute homes to the tilde form first, so
+    detection sees the same text the patterns see.
+
+    Total (G13): any exception logs at WARNING and yields ``frozenset({UNTAGGED})`` — this
+    function is evaluated as an argument before ``evaluate_dual_signal`` can short-circuit, so a
+    raise here would turn today's working auto-approval into a hot-path exception.
+    """
+    from tools.action_tags import ActionTag
+    try:
+        tags: set = set()
+        for pattern_key, _desc, is_tirith in warnings:
+            if is_tirith:
+                tags.add(ActionTag.SECURITY_SCAN)
+                continue
+            if pattern_key.startswith("tirith:"):
+                tags.add(ActionTag.SECURITY_SCAN)
+                continue
+            if pattern_key.startswith("plugin_rule:"):
+                tags.add(ActionTag.PLUGIN_RULE)
+                continue
+            if pattern_key == "execute_code":
+                tags.add(ActionTag.CODE_EXEC)
+                continue
+            if pattern_key == "mcp_elicitation":
+                tags.add(ActionTag.MCP_TOOL)
+                continue
+            tag = _tag_for_key(pattern_key)
+            if tag is ActionTag.UNTAGGED:
+                tags.add(ActionTag.UNTAGGED)
+                continue
+            # D14 override: config/env/Hermes-home targets are never auto-approvable regardless of
+            # the tag they would otherwise get.
+            if _command_targets_hermes_home(command):
+                tags.add(ActionTag.CONFIG_WRITE)
+            else:
+                tags.add(tag)
+        return frozenset(tags)
+    except Exception as exc:
+        logger.warning("Tag resolution failed — treating as UNTAGGED: %s", exc)
+        return frozenset({ActionTag.UNTAGGED})

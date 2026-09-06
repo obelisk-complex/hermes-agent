@@ -287,9 +287,11 @@ def request_elicitation_consent(message: str, description: str, *,
         return _consent(decision.get("choice"), "decline")
 
     # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
+    # _manual_gate_scope (T8): this blocking prompt is an open human decision for the barrier.
     try:
-        choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
-                                           allow_permanent=False)
+        with _a._manual_gate_scope(session_key):
+            choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
+                                               allow_permanent=False)
     except Exception as exc:
         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
         return "decline"

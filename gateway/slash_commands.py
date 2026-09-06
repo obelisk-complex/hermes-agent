@@ -882,6 +882,14 @@ class GatewaySlashCommandsMixin(
         policy = policy_for_source(self.config, event.source)
         if requested and not policy.is_admin(event.source.user_id):
             return "Only gateway admins can change the persistent approval mode."
+        # /approvals tags (T10, dual-signal plan): dispatch before the mode runner. The admin
+        # check above fires on any argument, so the listing is admin-only on the gateway too —
+        # kept deliberately.
+        if requested is not None:
+            _sub = requested.split(None, 1)
+            if _sub and _sub[0] == "tags":
+                from hermes_cli.approval_mode import run_approval_tags_command
+                return run_approval_tags_command(_sub[1] if len(_sub) > 1 else None).message
         # Approval checks load config dynamically; do not evict the cached agent or alter its
         # system prompt/tool schema (prompt-cache prefix is sacred).
         return run_approval_mode_command(requested).message

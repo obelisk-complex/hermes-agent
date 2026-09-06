@@ -2557,7 +2557,16 @@ class CLICommandsMixin:
         """Show or persist the profile-wide dangerous-command approval mode."""
         from hermes_cli.approval_mode import run_approval_mode_command
         parts = (cmd_original or "").strip().split(None, 1)
-        result = run_approval_mode_command(parts[1] if len(parts) > 1 else None)
+        requested = parts[1] if len(parts) > 1 else None
+        # /approvals tags (T10, dual-signal plan): dispatch before the mode runner. No admin gate
+        # here — the local user IS the operator.
+        if requested is not None:
+            sub = requested.split(None, 1)
+            if sub and sub[0] == "tags":
+                from hermes_cli.approval_mode import run_approval_tags_command
+                _cp(f"  {run_approval_tags_command(sub[1] if len(sub) > 1 else None).message}")
+                return
+        result = run_approval_mode_command(requested)
         _cp(f"  {result.message}")
 
     def _toggle_setting(self, arg: str, current: bool, *, usage: str, status_line: str,
