@@ -34,6 +34,8 @@ __all__ = [
     "NEVER_AUTO_APPROVABLE",
     "NOT_WIRED",
     "tag_for_pattern_key",
+    "WRITE_SUBSYSTEM_TAGS",
+    "tag_for_write_subsystem",
 ]
 
 
@@ -293,3 +295,27 @@ def tag_for_pattern_key(pattern_key: str) -> ActionTag:
     if pattern_key.startswith(TOOL_EXEC_PREFIX):
         return ActionTag.COMMAND_TOOL_EXEC
     return ActionTag.UNTAGGED
+
+
+# ---------------------------------------------------------------------------
+# Phase B (T11) — the write-approval gate (tools/write_approval.py).
+#
+# Keys are the subsystem constants that module ships (MEMORY = "memory",
+# SKILLS = "skills"). Both tags are in NOT_WIRED: that surface has no author
+# verdict, so it has no auto-approval path (D4) and these values can never
+# appear in approvals.auto_approve_tags.
+# ---------------------------------------------------------------------------
+
+WRITE_SUBSYSTEM_TAGS: dict[str, ActionTag] = {
+    "memory": ActionTag.MEMORY_WRITE,
+    "skills": ActionTag.SKILL_WRITE,
+}
+
+
+def tag_for_write_subsystem(subsystem: str) -> ActionTag:
+    """Resolve a write-approval subsystem to its tag.
+
+    Fail-closed: an unknown subsystem resolves to :attr:`ActionTag.UNTAGGED`,
+    which is in ``NEVER_AUTO_APPROVABLE``.
+    """
+    return WRITE_SUBSYSTEM_TAGS.get(subsystem, ActionTag.UNTAGGED)

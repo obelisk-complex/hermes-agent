@@ -273,7 +273,12 @@ class ElicitationHandler:
         ``Context.run`` runs a context once, so it is copied per elicitation."""
         from tools.approval_prompt import request_elicitation_consent
 
-        kwargs = {"timeout_seconds": int(self.timeout), "surface": f"mcp-elicitation/{self.server_name}"}
+        # T12: the readOnlyHint the server declared for the tool whose call provoked this
+        # elicitation. Advisory: it rides the audit line and nothing reads it into the decision.
+        in_flight_tool = getattr(self.owner, "_pending_call_tool_name", None) if self.owner else None
+        kwargs = {"timeout_seconds": int(self.timeout), "surface": f"mcp-elicitation/{self.server_name}",
+                  "read_only_hint": (_core.mcp_tool_read_only_hint(self.server_name, in_flight_tool)
+                                     if in_flight_tool else None)}
         captured = getattr(self.owner, "_pending_call_context", None) if self.owner else None
         if captured is None:
             return lambda: request_elicitation_consent(message, description, **kwargs)

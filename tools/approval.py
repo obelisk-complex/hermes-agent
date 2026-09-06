@@ -23,6 +23,7 @@ from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
 from tools import approval_context
+from tools.action_tags import ActionTag
 from tools.approval_context import (
     _get_auto_approve_enabled_by, _get_auto_approve_mode, _get_auto_approve_tags,
     _get_session_platform, _is_cron_approval_context,
@@ -921,6 +922,50 @@ def _presence(approval_callback=None) -> tuple:
     return approval_callback, is_cli, is_gateway, is_ask
 
 
+# --- Phase B (T11): observability tags on the surfaces with no author verdict ---------------------------------------
+
+def _observe_surface_tags(surface: str, pattern_key: str,
+                          tags: frozenset[ActionTag], *, note: str = "") -> list[str]:
+    """Record the tags a no-author-verdict surface saw (Phase B, T11).
+
+    These surfaces (:func:`_run_approval_gate`, the elicitation gate in ``approval_prompt``, the
+    non-smart :func:`check_execute_code_guard` branches, and the write gate) have no guardian
+    verdict, so ``evaluate_dual_signal`` is never called on them and no tag they emit can
+    auto-approve anything (D4, spec line 390). The tag exists so an operator can see what class of
+    action each human decision covered.
+
+    ``note`` carries a surface-specific observation (T12 passes the MCP ``readOnlyHint``). Returns
+    the sorted tag values so the caller can attach them to its result dict.
+
+    Total by the same rule as :func:`~tools.approval_detection._resolve_tags` (G13): observability
+    must never raise onto an approval path, so a failure degrades to ``[]``.
+    """
+    try:
+        tag_values = sorted(tag.value for tag in tags)
+        logger.info(
+            "action-tags surface=%s pattern_key=%s tags=%s auto_approvable=no%s",
+            surface, pattern_key, ",".join(tag_values) or "none",
+            f" {note}" if note else "",
+        )
+        return tag_values
+    except Exception as exc:
+        logger.warning("Action-tag observation failed on surface %s: %s", surface, exc)
+        return []
+
+
+def _with_action_tags(result: dict, tags: list[str]) -> dict:
+    """Attach the observed tags to a gate result, for the audit trail only.
+
+    Upstream's September 2026 decomposition funnels every gated return through the shared result
+    builders (:func:`_approved`, :func:`_denied`, :func:`_blocked`, :func:`_human_decision`), so
+    the tag is stamped at the two gate entry points rather than on ~18 individual dict literals.
+    ``setdefault`` because the smart branch already carries the dual-signal decision's own tags
+    (Phase A) and Phase B must not overwrite them.
+    """
+    result.setdefault("action_tags", list(tags))
+    return result
+
+
 def _run_approval_gate(
     *, pattern_key: str, description: str, display_target: str, approval_callback=None,
     subject: str = "", noun: str = "flagged actions",
@@ -945,6 +990,15 @@ def _run_approval_gate(
     if is_approved(session_key, pattern_key):
         return _approved()
 
+    # Phase B (T11): tags for observability only. This surface has no author verdict (D4) so
+    # nothing below can auto-approve; the tag rides the result dict and one log line. Resolved
+    # AFTER the yolo and allowlist short-circuits so those two returns keep their exact
+    # historical shape.
+    action_tags = _observe_surface_tags(
+        "approval_gate", pattern_key,
+        _resolve_tags([(pattern_key, description, False)], display_target),
+    )
+
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     if not is_cli and not is_gateway:
         log_args = (autoapprove_log_prefix, pattern_key, description)
@@ -962,32 +1016,33 @@ def _run_approval_gate(
                                                 advice="Find an alternative approach that avoids this action.")
                 elif not message:
                     message = ctx.block_message(subject, noun=noun, advice=advice)
-                return _blocked(message, pattern_key=pattern_key, description=description)
+                return _with_action_tags(
+                    _blocked(message, pattern_key=pattern_key, description=description), action_tags)
             if ctx.name == "single_query":
                 # Return here rather than fall through: the fail-closed branch would
                 # otherwise block what single_query_mode: approve just authorized.
                 logger.warning("%s (pattern: %s): %s — single-query auto-approve "
                                "(approvals.single_query_mode: approve).", *log_args)
-                return _approved()
+                return _with_action_tags(_approved(), action_tags)
             break  # cron/unattended approve-mode: auto-approve below
         else:
             if fail_closed_when_no_human:
                 logger.warning("%s (pattern: %s): %s — no interactive user/gateway present; "
                                "BLOCKED (fail-closed). Set HERMES_INTERACTIVE or "
                                "HERMES_GATEWAY_SESSION to answer the prompt.", *log_args)
-                return _blocked(no_human_block_message or (
+                return _with_action_tags(_blocked(no_human_block_message or (
                     f"BLOCKED: approval required ({description}) but no "
                     "interactive user or gateway is present to approve it."),
-                    pattern_key=pattern_key, description=description)
+                    pattern_key=pattern_key, description=description), action_tags)
         logger.warning("%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
                        "HERMES_GATEWAY_SESSION to require approval.", *log_args)
-        return _approved()
+        return _with_action_tags(_approved(), action_tags)
 
-    return _human_decision(
+    return _with_action_tags(_human_decision(
         _ACTION_GATE, command=display_target, description=description, pattern_key=pattern_key,
         pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
-    )
+    ), action_tags)
 
 
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
@@ -1031,7 +1086,12 @@ def check_dangerous_command(command: str, env_type: str,
                             has_host_access: bool = False) -> dict:
     """Detect a dangerous command and handle approval (pattern layer only). ``has_host_access``:
     a Docker sandbox that bind-mounts host paths must not skip approval.
-    Returns ``{"approved": True/False, "message": str or None, ...}``."""
+
+    Returns ``{"approved": True/False, "message": str or None, ...}``. Branches that go through
+    :func:`_run_approval_gate` also carry an ``action_tags`` key (a single resolved tag set for
+    the matched pattern, per Phase B T11) — absent on the earlier bypass/hardline/allowlist
+    returns above. It records what class of action the decision covered, for audit/observability
+    only: it is never an input to any approval decision here and must never be read as one."""
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _user_deny_block(command) or _approved()
     blocked = _floor_block(command)
@@ -1061,7 +1121,11 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     the LLM cannot skip it. Cron honors ``approvals.cron_mode``; any OTHER non-interactive
     non-gateway context fails CLOSED. ``rule_key`` controls the ``[a]lways`` allowlist grain;
     when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons on the same tool
-    persist independently. Returns the ``check_dangerous_command`` result shape.
+    persist independently. Returns the ``check_dangerous_command`` result shape. Gated branches
+    also carry an ``action_tags`` key inherited from :func:`_run_approval_gate` (single-pattern
+    tag resolution, Phase B T11). It records what class of action the decision covered, for
+    audit/observability only: it is never an input to any approval decision here and must never
+    be read as one.
     """
     description = reason or f"Plugin requires approval for {tool_name}"
     if not rule_key:
@@ -1199,6 +1263,16 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     The hardline floor still blocks catastrophic ``terminal()`` commands the script issues; running
     arbitrary code headlessly without any approval surface is trusted-by-config (set a gateway/ask surface
     or ``approvals.cron_mode`` to require approval). See #30882.
+
+    Returns:
+        Same dict contract as ``check_all_command_guards``, with one difference: the
+        ``action_tags`` key here (when present — absent on the isolated-backend/yolo/mode-off
+        bypasses above the gate) is a single resolved tag set for this call — either the smart
+        branch's ``list(decision.tags)`` or the hardcoded ``[ActionTag.CODE_EXEC.value]`` on every
+        other gated branch — not the full per-warning list ``check_all_command_guards`` returns on
+        its own (Phase A) surface. It records what class of action the decision covered, for
+        audit/observability only (Phase B T11): it is never an input to any approval decision here
+        and must never be read as one.
     """
     pattern_key = "execute_code"
     description = _EXECUTE_CODE_DESCRIPTION
@@ -1212,18 +1286,27 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     if _yolo_active() or approval_mode == "off":
         return _approved()
 
+    # Phase B (T11): every branch below is a gate entry, so all of them carry code.exec. No author
+    # verdict exists outside the smart branch, so no auto-approval path is added here (D4).
+    # code.exec is in NEVER_AUTO_APPROVABLE (D9), so the tag cannot enable anything anywhere. The
+    # three returns ABOVE this line (isolated container backends, yolo, approvals.mode: off) are
+    # bypasses that never enter the gate and stay untagged, matching _run_approval_gate's
+    # short-circuits.
+    _observe_surface_tags("execute_code_guard", pattern_key, frozenset({ActionTag.CODE_EXEC}))
+    code_exec_tags = [ActionTag.CODE_EXEC.value]
+
     # (-q clears the presence flags, but its unattended context resolves first anyway.)
     approval_callback, is_cli, is_gateway, is_ask = _presence()
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
     for ctx in _unattended_contexts():
         if ctx.mode() == "deny":
-            return _denied(
+            return _with_action_tags(_denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "
                 "subprocess calls that bypass shell-string approval checks). " + ctx.exec_tail,
                 pattern_key=pattern_key, description=description, outcome="blocked",
-            )
-        return _approved()
+            ), code_exec_tags)
+        return _with_action_tags(_approved(), code_exec_tags)
 
     # Only gateway/ask contexts get the one-shot whole-script approval. In an interactive CLI the script's terminal()
     # calls are guarded per-call (context propagates into the RPC thread, #33057), so a whole-script prompt would fire
@@ -1231,7 +1314,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # and messaging ask-mode drive whole-script approval); when that leaks into a CLI with no notify callback, the
     # engine falls through to the CLI Dangerous Command panel instead of a silent pending_approval.
     if not is_gateway and not is_ask:
-        return _approved()
+        return _with_action_tags(_approved(), code_exec_tags)
 
     session_key = get_current_session_key()
     # Built only past the early-return gates so common paths don't copy a potentially-large script into this string.
@@ -1240,19 +1323,21 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts (#39275).
     if is_approved(session_key, pattern_key):
-        return _approved()
+        return _with_action_tags(_approved(), code_exec_tags)
 
     # Smart mode: an APPROVE only suppresses the redundant whole-script prompt; the per-call terminal() guards still
     # run independently. The gateway renders the pending payload to Discord/Slack, so the script body is redacted for
     # display; the raw code is what gets assessed and run.
     from agent.redact import redact_sensitive_text
-    return _human_decision(
+    # _with_action_tags is setdefault-based, so the smart branch keeps the dual-signal decision's
+    # own tags (Phase A) and every other branch below gains the hardcoded code.exec.
+    return _with_action_tags(_human_decision(
         _EXECUTE_CODE_GATE, command=command, description=description, pattern_key=pattern_key,
         pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
         smart=approval_mode == "smart",
         pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
-    )
+    ), code_exec_tags)
 
 
 # Load permanent allowlist from config on module import

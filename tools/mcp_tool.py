@@ -297,6 +297,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "name", "session", "tool_timeout", "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config", "_sampling", "_elicitation", "_registered_tool_names",
         "_auth_type", "_refresh_lock", "_rpc_lock", "_pending_refresh_tasks", "_pending_call_context",
+        "_pending_call_tool_name",
         "_lifecycle_started_at", "_last_tool_call_at", "_idle_timeout_seconds", "_max_lifetime_seconds",
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
@@ -362,6 +363,10 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # contextvars snapshot inside session.call_tool(): the SDK runs elicitation/create on a
         # task that does not inherit HERMES_SESSION_PLATFORM, so the callback replays this.
         self._pending_call_context: Optional[contextvars.Context] = None
+        # Raw MCP name of the tool currently inside session.call_tool, set and cleared on the same
+        # lines as _pending_call_context. Lets the elicitation callback attribute the request to
+        # the tool that provoked it, so its captured readOnlyHint can ride the audit line (T12).
+        self._pending_call_tool_name: Optional[str] = None
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
         # Handshake InitializeResult: the server's REAL advertised capabilities.
@@ -442,6 +447,24 @@ _server_trust_levels: Dict[str, str] = {}
 _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
 
 _TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
+
+
+def mcp_tool_read_only_hint(server_name: str, tool_name: str) -> Optional[bool]:
+    """Advisory ``annotations.readOnlyHint`` captured for one raw tool name at discovery (T12).
+
+    Reads the same ``_tool_read_only_hints`` capture the trust gate uses, so there is exactly one
+    record of what a server declared. ``None`` when nothing was ever captured for that
+    server/tool: the server is unknown, the tool is not in its listing, or it was registered from
+    a schema cache that carries no annotations. ``False`` therefore means "captured, and not
+    declared read-only" — the capture folds "declared false" and "declared nothing" together
+    because the trust gate needs write-capable to be the fail-closed default.
+
+    Observation only. The value is self-declaration by an untrusted server: it is never an input
+    to ``evaluate_dual_signal``, and ``mcp.tool`` is in ``NOT_WIRED``, so no listing can make
+    anything auto-approve.
+    """
+    with _lock:
+        return _tool_read_only_hints.get(server_name, {}).get(tool_name)
 
 
 def _bump_server_error(server_name: str) -> None:

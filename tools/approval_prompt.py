@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 from tools import approval_context as _ctx, approval_gateway_wait as _gw
+from tools.approval_detection import _resolve_tags
 from tools.approval_human_wait import activity_heartbeat, human_wait_window
 from tools.interrupt import is_interrupted
 
@@ -252,12 +253,18 @@ def _consent(choice, unresolved: str) -> str:
 
 def request_elicitation_consent(message: str, description: str, *,
                                 timeout_seconds: int | None = None,
-                                surface: str = "mcp-elicitation") -> str:
+                                surface: str = "mcp-elicitation",
+                                read_only_hint: bool | None = None) -> str:
     """Route an MCP elicitation request to the surface owning the active session:
     gateway sessions through ``_await_gateway_decision``, CLI/TUI through
     ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in a
     gateway session, timeouts, and exceptions map to ``"decline"`` so a server
     treats them as "user did not approve" rather than retrying or hanging.
+
+    ``read_only_hint`` is the MCP server's own ``annotations.readOnlyHint`` declaration for the
+    tool whose call provoked this elicitation (T12). It is recorded in the audit line and read by
+    nothing else: a server cannot reduce its own friction by declaring itself read-only.
+
     Returns ``"accept" | "decline" | "cancel"``."""
     from tools import approval as _a
     try:
@@ -265,6 +272,16 @@ def request_elicitation_consent(message: str, description: str, *,
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
+
+    # Phase B (T11): tags for observability only. Row 6 of the surface inventory — a real human
+    # decision with no author verdict, so no auto-approval path is added (D4). _resolve_tags maps
+    # the hardcoded "mcp_elicitation" key to mcp.tool by exact match, above the D14 Hermes-home
+    # override, so ``message`` is never pattern-matched here.
+    _a._observe_surface_tags(
+        "mcp_elicitation", "mcp_elicitation",
+        _resolve_tags([("mcp_elicitation", description, False)], message),
+        note=f"caller_surface={surface} read_only_hint={read_only_hint}",
+    )
 
     if _ctx._is_gateway_approval_context():
         notify_cb = _a._gateway_notify_cb(session_key)
