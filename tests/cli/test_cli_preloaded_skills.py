@@ -153,3 +153,78 @@ def test_show_banner_does_not_print_skills():
     startup_lines = [line for line in print_calls if "Activated skills:" in line]
     assert len(startup_lines) == 0
     assert mock_banner.call_count == 1
+
+
+# ── fork: skills.always ──────────────────────────────────────────────────────
+# Config-declared skills preload on every session with no --skills flag. The
+# merge happens in _build_cli_from_args (upstream moved it out of main()), so
+# these drive main() and observe what reaches build_preloaded_skills_prompt.
+# The preload runs on a background thread now, so finalize is driven explicitly
+# — the same call _init_agent makes — before asserting.
+
+def _capture_preloaded_skills(monkeypatch, cli_mod, config_skills, **main_kwargs):
+    """Run main() with ``skills`` config patched in; return the requested lists."""
+    created = {}
+    monkeypatch.setattr(
+        cli_mod, "HermesCLI", lambda **kw: created.setdefault("cli", _DummyCLI(**kw))
+    )
+    captured: list[list[str]] = []
+
+    def fake_build(skills, task_id=None):
+        captured.append(list(skills))
+        return ("skill prompt", list(skills), [])
+
+    monkeypatch.setattr(cli_mod, "build_preloaded_skills_prompt", fake_build)
+    patched_config = {
+        "model": {"default": "test", "provider": "auto"},
+        "display": {"compact": False, "tool_progress": "all"},
+        "agent": {},
+        "terminal": {"env_type": "local"},
+        "skills": config_skills,
+    }
+    with patch.dict(cli_mod.__dict__, {"CLI_CONFIG": patched_config}):
+        with pytest.raises(SystemExit):
+            cli_mod.main(list_tools=True, **main_kwargs)
+    if "cli" in created:
+        _real_finalize(created["cli"])
+    return captured
+
+
+def test_main_merges_skills_always_from_config(monkeypatch):
+    """skills.always preloads with no --skills flag given."""
+    import cli as cli_mod
+
+    captured = _capture_preloaded_skills(
+        monkeypatch, cli_mod, {"always": ["self-checking-harness"]}
+    )
+    assert captured == [["self-checking-harness"]]
+
+
+def test_main_merges_skills_always_with_cli_flag(monkeypatch):
+    """Config skills come first, --skills adds on top, duplicates collapse."""
+    import cli as cli_mod
+
+    captured = _capture_preloaded_skills(
+        monkeypatch, cli_mod, {"always": ["self-checking-harness"]},
+        skills="github-auth,self-checking-harness",
+    )
+    assert len(captured) == 1
+    assert captured[0] == ["self-checking-harness", "github-auth"]
+
+
+def test_main_skills_always_empty_does_nothing(monkeypatch):
+    """An empty (or absent) skills.always must not trigger a preload at all."""
+    import cli as cli_mod
+
+    assert _capture_preloaded_skills(monkeypatch, cli_mod, {"always": []}) == []
+    assert _capture_preloaded_skills(monkeypatch, cli_mod, {}) == []
+
+
+def test_skills_always_load_alias_also_preloads(monkeypatch):
+    """upstream's documented key name is accepted alongside the fork's."""
+    import cli as cli_mod
+
+    captured = _capture_preloaded_skills(
+        monkeypatch, cli_mod, {"always_load": ["self-checking-harness"]}
+    )
+    assert captured == [["self-checking-harness"]]
