@@ -96,6 +96,34 @@ def test_terminal_substitution_helper_present():
     from agent.turn_stop_gates import pre_verify_terminal_substitute  # noqa: F401
 
 
+# Both fork edits in agent/turn_final_response.py are single lines in a file
+# upstream owns and rewrites wholesale, and neither is reachable from a
+# behavioural test: test_pre_verify_gate.py calls apply_stop_gates directly and
+# passes api_call_count itself, so a dropped call site is invisible to it.
+# Deleting either line leaves the whole fork suite green. These two assertions
+# are the only thing that fails when a sync reverts them.
+def test_stop_gates_call_site_still_passes_api_call_count():
+    with open(os.path.join(_ROOT, "agent/turn_final_response.py"), encoding="utf-8") as f:
+        src = f.read()
+    window = re.search(r"apply_stop_gates\(", src)
+    assert window is not None, "agent/turn_final_response.py no longer calls apply_stop_gates"
+    assert re.search(r"api_call_count\s*=\s*api_call_count",
+                     src[window.start():window.start() + 600]), (
+        "agent/turn_final_response.py stopped passing api_call_count= into "
+        "apply_stop_gates — the widened precondition goes inert and the gate is "
+        "back to firing only after file edits"
+    )
+
+
+def test_stop_gates_verdict_response_is_read_back():
+    with open(os.path.join(_ROOT, "agent/turn_final_response.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert re.search(r"final_response\s*=\s*_sg\.final_response", src), (
+        "agent/turn_final_response.py no longer reads _sg.final_response — an "
+        "exhausted nudge budget ships the very draft the gate refused"
+    )
+
+
 if __name__ == "__main__":
     import sys
     _tests = [v for k, v in sorted(globals().items())

@@ -220,3 +220,10 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# Session handoff scratch. Committed to the fork once (via the pre-decomposition
+# fork patch) and deliberately dropped in the 2026-09-06 re-derivation: it is
+# working notes, not product, and it carried whatever a given session happened
+# to be doing. Ignored rather than merely deleted so a future rebase or a
+# careless `git add -A` cannot silently re-commit it.
+/HANDOFF.md

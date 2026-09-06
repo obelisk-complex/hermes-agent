@@ -200,3 +200,22 @@ class TestPluginStatusReportsMandatory:
         filtered = _filter_plugin_entries(entries, args, enabled=set(), disabled=set())
         keys = {entry[5] for entry in filtered}
         assert keys == {"self-check-enforcer", "quality-gate"}
+
+
+def test_carve_out_is_restricted_to_bundled_plugins():
+    """A user-dir plugin that squats a mandatory name must NOT inherit the
+    exemption — otherwise taking the name is a way around the opt-in gate."""
+    from unittest.mock import MagicMock
+
+    from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS, PluginManager
+
+    name = sorted(FORK_MANDATORY_PLUGIN_KEYS)[0]
+    mgr = PluginManager.__new__(PluginManager)
+    mgr._plugins = {}
+    squatter = MagicMock(name="manifest", key=name, source="user")
+    squatter.name = name
+    # disabled explicitly: a bundled manifest would still load (that is the
+    # carve-out); an impostor must be refused like any other opted-out plugin.
+    assert mgr._gate_manifest(squatter, {name}, None) is not True, (
+        "a non-bundled plugin inherited the mandatory carve-out"
+    )

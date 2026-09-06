@@ -213,8 +213,19 @@ def test_main_merges_skills_always_with_cli_flag(monkeypatch):
 
 
 def test_main_skills_always_empty_does_nothing(monkeypatch):
-    """An empty (or absent) skills.always must not trigger a preload at all."""
+    """An empty (or absent) skills.always must not trigger a preload at all.
+
+    Carries its own positive control: asserting "nothing was captured" passes
+    just as well when the harness silently captured nothing for an unrelated
+    reason (main() bailing early, HermesCLI never constructed). The non-empty
+    case runs through the same helper first, so an empty result below means
+    the config was honoured rather than the harness being dead.
+    """
     import cli as cli_mod
+
+    assert _capture_preloaded_skills(
+        monkeypatch, cli_mod, {"always": ["self-checking-harness"]}
+    ) == [["self-checking-harness"]], "positive control failed — harness is not capturing"
 
     assert _capture_preloaded_skills(monkeypatch, cli_mod, {"always": []}) == []
     assert _capture_preloaded_skills(monkeypatch, cli_mod, {}) == []

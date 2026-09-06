@@ -122,3 +122,24 @@ class TestRule7AllTagsEnabled:
         d = _decide(mode="dual_signal", enabled_by="ops team")
         assert d.tags == ("command.delete",)
         assert d.enabled_by == "ops team"
+
+
+# ── producer side of the synthetic-approval marker ───────────────────────────
+# tools/approval.py:_manual_gate_scope reads
+# getattr(cb, "_hermes_synthetic_approval", False) to keep a subagent's
+# auto-decision from counting as a human one. The READER had coverage; the
+# WRITER did not, so deleting either assignment in delegate_tool_config.py left
+# the suite green while silently making every subagent auto-approval look human.
+def test_subagent_approval_callbacks_are_marked_synthetic():
+    from tools.delegate_tool_config import (
+        _get_subagent_approval_callback, _subagent_auto_approve, _subagent_auto_deny,
+    )
+
+    for cb in (_subagent_auto_deny, _subagent_auto_approve):
+        assert getattr(cb, "_hermes_synthetic_approval", False) is True, (
+            f"{cb.__name__} lost its _hermes_synthetic_approval marker — "
+            "_manual_gate_scope would count its decisions as a human's"
+        )
+    # The marker has to survive whichever one the config actually selects.
+    assert getattr(_get_subagent_approval_callback(),
+                   "_hermes_synthetic_approval", False) is True

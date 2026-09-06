@@ -189,7 +189,7 @@ jobs:
           # the fork's three skills.always tests, and this step would have
           # reported all-green because that file is modified rather than added.
           # `git diff --name-only` is a strict superset of the old set.
-          mapfile -t files < <(git diff --name-only upstream/main HEAD -- tests \
+          mapfile -t files < <(git diff --name-only --diff-filter=d upstream/main HEAD -- tests \
             | grep -E '\.py$' | sort)
           echo "Found ${#files[@]} fork-owned test file(s):"
           printf '  %s\n' "${files[@]}"

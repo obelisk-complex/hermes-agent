@@ -1386,7 +1386,13 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # Fork mandatory carve-out: these two always load, full stop —
         # plugins.enabled/plugins.disabled are not consulted for them. Placed
         # before gate_manifest() so no verdict can exclude them.
-        if (
+        #
+        # Restricted to source == "bundled": the carve-out exists because the
+        # opt-in migration does not grandfather the plugins THIS REPO SHIPS. A
+        # user-dir or entrypoint plugin that merely takes one of these names
+        # must not inherit the exemption, or squatting the name would be a way
+        # to bypass the opt-in gate entirely.
+        if manifest.source == "bundled" and (
             manifest_key(manifest) in FORK_MANDATORY_PLUGIN_KEYS
             or manifest.name in FORK_MANDATORY_PLUGIN_KEYS
         ):
