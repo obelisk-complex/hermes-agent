@@ -19,11 +19,30 @@ def _mk_conn():
 
 def test_update_allowed_field():
     conn = _mk_conn()
-    assert kdb.update_task_field(conn, "t_u", "model_override", "claude-opus-4-8") is True
+    assert kdb.update_task_field(conn, "t_u", "assignee", "worker-1") is True
     row = conn.execute(
-        "SELECT model_override FROM tasks WHERE id = ?", ("t_u",)
+        "SELECT assignee FROM tasks WHERE id = ?", ("t_u",)
     ).fetchone()
-    assert row["model_override"] == "claude-opus-4-8"
+    assert row["assignee"] == "worker-1"
+
+
+@pytest.mark.parametrize("field", ["model_override", "workspace_path", "branch_name"])
+def test_fields_owned_by_upstream_setters_are_rejected(field):
+    """These three left the allowlist deliberately.
+
+    Upstream now ships dedicated setters (set_model_override,
+    set_workspace_path, set_branch_name) that validate, refuse archived tasks,
+    write the companion provider_override, emit a typed audit event and fire
+    notify_task_updated. A bare ``UPDATE tasks SET <field>`` through here
+    skipped all of it, and any plugin can call this function — so the generic
+    path must refuse rather than quietly bypass those guarantees."""
+    conn = _mk_conn()
+    with pytest.raises(ValueError) as excinfo:
+        kdb.update_task_field(conn, "t_u", field, "x")
+    assert "mutable allowlist" in str(excinfo.value)
+    assert "set_model_override" in str(excinfo.value), (
+        "the refusal must point the caller at the setter that owns the field"
+    )
 
 
 def test_update_priority_int():

@@ -135,20 +135,25 @@ def _no_prompt_git_kwargs() -> dict:
 # CLI-startup files (+ web_server.py, launched by a fresh Windows Desktop install) that must
 # parse post-update; the syntax guard rolls back when one doesn't.
 _UPDATE_CRITICAL_FILES = (
+    # CLI-startup files first, then every file this fork edits or adds.
+    # Derived from `git diff upstream/main -- '*.py'`; test_update_safety.py
+    # recomputes the same set and fails if this drifts. A hand-kept list went
+    # stale the moment upstream's decomposition moved the patched code.
     "hermes_cli/main.py", "hermes_cli/config.py", "hermes_cli/__init__.py",
-    "hermes_cli/web_server.py", "cli.py", "run_agent.py", "model_tools.py", "toolsets.py",
-    "hermes_constants.py",
-    # Every upstream-owned file this fork edits. The daily upstream rebase can
-    # leave a conflict marker in any of them; without the post-pull syntax guard
-    # seeing the file, a "successful" update bricks the agent at the first turn.
-    # Keep this list in step with the fork's actual edits — one that names files
-    # the fork no longer touches is a guard that guards nothing.
-    "agent/turn_stop_gates.py", "agent/turn_final_response.py", "agent/turn_finalizer.py",
-    "hermes_cli/config_defaults.py", "hermes_cli/kanban.py", "hermes_cli/kanban_db.py",
-    "hermes_cli/kanban_db_dispatch.py", "hermes_cli/oneshot.py", "hermes_cli/plugins.py",
-    "hermes_cli/update_cmd.py",  # this file: a marker here breaks the updater itself
-    "tools/delegate_tool_config.py", "tools/delegate_tool_progress.py",
-    "tools/kanban_tools.py", "tui_gateway/server.py")
+    "hermes_cli/web_server.py", "cli.py", "run_agent.py",
+    "model_tools.py", "toolsets.py", "hermes_constants.py",
+    "agent/turn_final_response.py", "agent/turn_finalizer.py", "agent/turn_stop_gates.py",
+    "gateway/slash_commands.py", "hermes_cli/agent_import.py", "hermes_cli/approval_mode.py",
+    "hermes_cli/cli_commands_mixin.py", "hermes_cli/config_defaults.py", "hermes_cli/kanban.py",
+    "hermes_cli/kanban_db.py", "hermes_cli/kanban_db_dispatch.py", "hermes_cli/oneshot.py",
+    "hermes_cli/plugins.py", "hermes_cli/plugins_cmd.py", "hermes_cli/pt_input_extras.py",
+    "hermes_cli/skills_always.py", "hermes_cli/update_cmd.py", "scripts/sandbox/proxy.py",
+    "tools/action_tags.py", "tools/approval.py", "tools/approval_context.py",
+    "tools/approval_detection.py", "tools/approval_prompt.py", "tools/approval_smart.py",
+    "tools/auto_approval.py", "tools/delegate_tool_config.py", "tools/delegate_tool_progress.py",
+    "tools/image_generation_tool.py", "tools/kanban_tools.py", "tools/mcp_tool.py",
+    "tools/mcp_tool_handlers.py", "tools/mcp_tool_sampling.py", "tools/write_approval.py",
+    "tui_gateway/server.py", "tui_gateway/slash_worker.py")
 
 
 def _record_update_step(step: str, ok: bool, detail: str = "") -> None:

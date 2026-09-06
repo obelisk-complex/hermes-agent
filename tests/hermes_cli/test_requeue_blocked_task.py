@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import hermes_cli.kanban_db as kdb
 
 
@@ -144,10 +146,15 @@ def test_unblock_task_backward_compat_two_arg():
     assert n == 0
 
 
-def test_unblock_task_with_model_override_kwarg():
+def test_requeue_applies_model_override_through_upstreams_setter():
+    """The escalation no longer rides an ``unblock_task(model_override=...)``
+    kwarg: that half was dropped in favour of upstream's ``set_model_override``,
+    which the fork's inline UPDATE was silently skipping the guarantees of.
+    Same end state, plus the companion ``provider_override`` write and the
+    ``model_override_set`` audit event the old path never produced."""
     conn = _mk_conn()
     _insert_blocked(conn)
-    assert kdb.unblock_task(
+    assert kdb.requeue_blocked_task(
         conn, "t_rq", model_override="claude-opus-4-8"
     ) is True
     row = conn.execute(
@@ -155,3 +162,22 @@ def test_unblock_task_with_model_override_kwarg():
     ).fetchone()
     assert row["status"] == "ready"
     assert row["model_override"] == "claude-opus-4-8"
+    kinds = [
+        r["kind"] for r in conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ?", ("t_rq",)
+        ).fetchall()
+    ]
+    assert "model_override_set" in kinds, (
+        "upstream's typed audit event is the reason for routing through "
+        "set_model_override; without it this is just the old bare UPDATE"
+    )
+    assert "requeued" in kinds
+
+
+def test_unblock_task_no_longer_takes_model_override():
+    """Pin the narrowed signature: a caller still passing the old kwarg must
+    fail loudly rather than silently not escalating."""
+    conn = _mk_conn()
+    _insert_blocked(conn)
+    with pytest.raises(TypeError):
+        kdb.unblock_task(conn, "t_rq", model_override="claude-opus-4-8")

@@ -3706,10 +3706,16 @@ def requeue_blocked_task(
     between them leaves the model escalated but the task still blocked —
     visible on the board and human-fixable, which is the safe direction.
 
-    Returns ``unblock_task``'s result: False when the task was not in a
-    requeueable state (no ``requeued`` event was written; the model escalation,
-    if any, already applied). Logs the escalation at WARNING.
+    Returns False when the task was not in a requeueable state, WITHOUT having
+    touched the model override: the status is pre-checked so a no-op requeue
+    cannot leave a stale escalation behind (e.g. a card the recurrence breaker
+    has already routed to ``triage`` must not silently acquire a stronger
+    model). The escalation still goes first for the requeueable case, because
+    the dispatcher polls for ``ready`` work — flipping the status before the
+    override lands would race a worker onto the un-escalated model.
     """
+    if _task_status(conn, task_id) not in ("blocked", "scheduled"):
+        return False
     if model_override is not None:
         set_model_override(conn, task_id, model_override, provider_override)
     requeue_event = {

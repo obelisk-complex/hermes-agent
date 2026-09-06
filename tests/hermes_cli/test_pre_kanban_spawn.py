@@ -1,4 +1,10 @@
 import hermes_cli.kanban_db as kdb
+import hermes_cli.kanban_db_dispatch as kdd
+
+# ``_invoke_kanban_hook`` stays in kanban_db (it is the dispatcher every fork
+# hook fires through); upstream's September 2026 decomposition moved the spawn
+# override applier out to kanban_db_dispatch, which calls it as
+# ``_kb._invoke_kanban_hook``. Patching kdb therefore still intercepts the hook.
 
 
 class _Claimed:
@@ -61,7 +67,7 @@ def test_pre_kanban_spawn_override_applies_first_dict(monkeypatch):
             {"model_override": "ignored-second"},
         ],
     )
-    kdb._apply_pre_kanban_spawn_override(claimed, board=None,
+    kdd._apply_pre_kanban_spawn_override(claimed, board=None,
                                          workspace_path="/tmp/ws")
     assert claimed.model_override == "claude-opus-4-8"
     assert claimed.skills == ["qa"]
@@ -80,7 +86,7 @@ def test_pre_kanban_spawn_override_rejects_flag_injection(monkeypatch):
              "skills": ["--accept-hooks", "ok", "a,b"]},
         ],
     )
-    kdb._apply_pre_kanban_spawn_override(claimed, board=None,
+    kdd._apply_pre_kanban_spawn_override(claimed, board=None,
                                          workspace_path="/tmp/ws")
     # model_override starts with '-' → rejected → existing value kept.
     assert claimed.model_override == "keep-me"
@@ -98,6 +104,6 @@ def test_pre_kanban_spawn_override_all_invalid_skips_directive(monkeypatch):
             {"model_override": "claude-opus-4-8"},      # next valid wins
         ],
     )
-    kdb._apply_pre_kanban_spawn_override(claimed, board=None,
+    kdd._apply_pre_kanban_spawn_override(claimed, board=None,
                                          workspace_path="/tmp/ws")
     assert claimed.model_override == "claude-opus-4-8"

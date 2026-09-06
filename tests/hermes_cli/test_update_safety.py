@@ -22,6 +22,8 @@ Runnable two ways:
     python -m pytest tests/hermes_cli/test_update_safety.py     # CI
 """
 import os
+
+import pytest
 import symtable
 
 _MAIN = os.path.join(os.path.dirname(__file__), "..", "..", "hermes_cli", "update_cmd.py")
@@ -33,21 +35,48 @@ def _main_source():
 
 
 def test_critical_files_covers_customised_files():
-    """#6: the three upstream-owned files the fork edits must be syntax-guarded."""
-    src = _main_source()
-    start = src.find("_UPDATE_CRITICAL_FILES = (")
-    assert start != -1, "_UPDATE_CRITICAL_FILES tuple not found"
-    end = src.find("\n)", start)  # closing paren on its own line
-    assert end != -1, "_UPDATE_CRITICAL_FILES tuple not terminated"
-    body = src[start:end]
-    for f in ("agent/conversation_loop.py",
-              "tools/delegate_tool.py",
-              "hermes_cli/plugins.py"):
-        assert f in body, (
-            f"{f} is not in _UPDATE_CRITICAL_FILES — a conflict marker left by "
-            f"a rebase would pass the post-pull syntax guard and brick the agent "
-            f"at first turn instead of rolling back"
+    """#6: every upstream-owned file the fork edits must be syntax-guarded.
+
+    Derived, not hardcoded. The previous version named three specific files,
+    and two of them stopped being true when upstream's decomposition moved the
+    code the fork patches (the on_output gate now rides
+    agent/turn_stop_gates.py, the child-prompt blocks
+    tools/delegate_tool_progress.py) — leaving a guard that named files the
+    fork no longer touches and missed the ones it does. Computing the set from
+    the actual diff against upstream keeps this honest through the next move.
+    """
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "upstream/main", "--", "*.py"],
+            cwd=root, capture_output=True, text=True, timeout=30,
         )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pytest.skip("git unavailable; cannot derive the fork-edited file set")
+    if out.returncode != 0:
+        pytest.skip("no upstream/main ref in this checkout")
+    edited = [
+        f for f in out.stdout.split()
+        if not f.startswith(("tests/", "plugins/", "skills/"))
+    ]
+    assert edited, "no fork-edited python files found — is upstream/main correct?"
+
+    from hermes_cli.update_cmd import _UPDATE_CRITICAL_FILES
+
+    unguarded = sorted(set(edited) - set(_UPDATE_CRITICAL_FILES))
+    assert not unguarded, (
+        f"fork-edited but not in _UPDATE_CRITICAL_FILES: {unguarded} — a "
+        "conflict marker left by a rebase would pass the post-pull syntax "
+        "guard and brick the agent at first turn instead of rolling back"
+    )
+    missing = [f for f in _UPDATE_CRITICAL_FILES
+               if not os.path.exists(os.path.join(root, f))]
+    assert not missing, (
+        f"_UPDATE_CRITICAL_FILES names paths that do not exist: {missing} — "
+        "a typo'd entry silently guards nothing"
+    )
 
 
 def test_cmd_update_impl_has_no_shadowed_stdlib_imports():

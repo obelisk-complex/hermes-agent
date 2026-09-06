@@ -17,6 +17,14 @@ _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
 _HOOK_NAMES = ("pre_kanban_spawn", "fork_kanban_task_blocked", "pre_kanban_complete")
 
+# Upstream's September 2026 decomposition split the kanban kernel: the manual
+# block path (``block_task``) stayed in kanban_db.py, while the dispatcher paths
+# (``_record_task_failure``, ``_apply_pre_kanban_spawn_override``) moved to
+# kanban_db_dispatch.py, where they call back as ``_kb._invoke_kanban_hook``.
+# Every source scan below therefore reads BOTH files; a guard pinned to one
+# would silently stop seeing half the fork's fire sites.
+_KERNEL_SOURCES = ("hermes_cli/kanban_db.py", "hermes_cli/kanban_db_dispatch.py")
+
 # Upstream (PR #50349) ships its OWN kanban_task_blocked observer alongside the
 # fork's renamed fork_kanban_task_blocked. The sync gate must keep BOTH: the
 # fork hook (so the quality-gate fires) AND upstream's (so a rebase that drops
@@ -76,12 +84,40 @@ def _invoke_kanban_hook_call_sites(src, hook):
     """Return a list of (start, end) positions for every
     _invoke_kanban_hook("<hook>", ...) call in src.
 
-    Used to assert the NUMBER of fire sites for a hook.
+    Used to assert the NUMBER of fire sites for a hook. Matches the
+    ``_kb._invoke_kanban_hook(...)`` spelling used from kanban_db_dispatch too,
+    since the attribute prefix is not anchored.
     """
     pattern = re.compile(
         r'_invoke_kanban_hook\(\s*"' + re.escape(hook) + r'"'
     )
     return [m.start() for m in pattern.finditer(src)]
+
+
+def _find_function_body(sources, func_name):
+    """``(relpath, body)`` for the first source in *sources* that defines the
+    named top-level function, or ``(None, None)``.
+
+    The kernel decomposition means a fork-owned function may live in either
+    kanban_db.py or kanban_db_dispatch.py; the guard asserts the function
+    exists SOMEWHERE in the kernel rather than in one nominated file.
+    """
+    for relpath in sources:
+        body = _function_body(_read(relpath), func_name)
+        if body is not None:
+            return relpath, body
+    return None, None
+
+
+def _call_sites_across(sources, hook):
+    """``{relpath: [positions]}`` for every file in *sources* that fires *hook*,
+    omitting files with no fire site."""
+    found = {}
+    for relpath in sources:
+        sites = _invoke_kanban_hook_call_sites(_read(relpath), hook)
+        if sites:
+            found[relpath] = sites
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -179,26 +215,22 @@ _PRE_SPAWN_KWARGS = [
 
 
 def test_pre_kanban_spawn_kwargs_in_function_body():
-    src = _read("hermes_cli/kanban_db.py")
-    body = _function_body(src, "_apply_pre_kanban_spawn_override")
+    where, body = _find_function_body(
+        _KERNEL_SOURCES, "_apply_pre_kanban_spawn_override")
     assert body is not None, (
-        "_apply_pre_kanban_spawn_override not found in kanban_db.py"
+        "_apply_pre_kanban_spawn_override not found in "
+        + " or ".join(_KERNEL_SOURCES)
     )
-    assert '_invoke_kanban_hook("pre_kanban_spawn"' in body or \
-           "_invoke_kanban_hook(\n        \"pre_kanban_spawn\"" in body or \
-           "_invoke_kanban_hook(\n    \"pre_kanban_spawn\"" in body, (
-        '_invoke_kanban_hook("pre_kanban_spawn", ...) '
-        "not found in _apply_pre_kanban_spawn_override body"
-    )
-    # Verify the hook is actually called (handles multi-line call form too)
+    # One regex covering every call spelling (single-line, wrapped, and the
+    # ``_kb.``-prefixed form used from kanban_db_dispatch).
     assert re.search(r'_invoke_kanban_hook\s*\(\s*["\']pre_kanban_spawn["\']', body), (
         '_invoke_kanban_hook("pre_kanban_spawn") '
         "call not found in _apply_pre_kanban_spawn_override body"
     )
     for kw in _PRE_SPAWN_KWARGS:
         assert re.search(rf"\b{kw}\s*=", body), (
-            f"_apply_pre_kanban_spawn_override no longer passes `{kw}=` "
-            f"to _invoke_kanban_hook (or it was renamed/removed)"
+            f"{where}: _apply_pre_kanban_spawn_override no longer passes "
+            f"`{kw}=` to _invoke_kanban_hook (or it was renamed/removed)"
         )
 
 
@@ -211,59 +243,78 @@ _BLOCKED_REQUIRED_KEYS = ("task_id", "reason", "trigger")
 
 def test_fork_kanban_task_blocked_has_both_fire_sites():
     """Two fire sites: auto-block (_record_task_failure) + manual (block_task).
-    The hook is fired via **_blocked_hook_kwargs (a captured dict), so we
-    assert the NUMBER of call sites and the presence of the dict definitions
-    rather than scanning a narrow window around each call.
+
+    After upstream's decomposition the two sites live in DIFFERENT files -
+    block_task in kanban_db.py, _record_task_failure in kanban_db_dispatch.py -
+    so the count is taken across the whole kernel. The count of TWO is the
+    point: one site means a rebase silently dropped either the manual or the
+    automatic quality-gate fire.
+
+    The hook is fired via **blocked_hook_kwargs (a captured dict), so we assert
+    the NUMBER of call sites and the presence of the dict definitions rather
+    than scanning a narrow window around each call.
     """
-    src = _read("hermes_cli/kanban_db.py")
-    sites = _invoke_kanban_hook_call_sites(src, "fork_kanban_task_blocked")
-    assert len(sites) >= 2, (
-        "expected fork_kanban_task_blocked fired from BOTH _record_task_failure "
-        f"and block_task; found {len(sites)} fire site(s)"
+    per_file = _call_sites_across(_KERNEL_SOURCES, "fork_kanban_task_blocked")
+    total = sum(len(v) for v in per_file.values())
+    assert total == 2, (
+        "expected fork_kanban_task_blocked fired from EXACTLY the two sites "
+        "(_record_task_failure and block_task, now in different modules); "
+        f"found {total} fire site(s): "
+        + (", ".join(f"{f} x{len(s)}" for f, s in sorted(per_file.items()))
+           or "none")
     )
     # COLLISION GUARD: the fork's dispatcher (_invoke_kanban_hook) must NEVER
     # fire the bare upstream name. Upstream fires kanban_task_blocked via its own
     # _fire_kanban_lifecycle_hook; if the fork ALSO fired it via invoke_hook the
-    # quality-gate would receive upstream's lean kwargs. Pin that to zero.
-    collision = _invoke_kanban_hook_call_sites(src, "kanban_task_blocked")
-    assert collision == [], (
+    # quality-gate would receive upstream's lean kwargs. Pin that to zero across
+    # every kernel module, not just kanban_db.py.
+    collision = _call_sites_across(_KERNEL_SOURCES, "kanban_task_blocked")
+    assert collision == {}, (
         "_invoke_kanban_hook must not fire the bare 'kanban_task_blocked' name "
-        f"(found {len(collision)} colliding site(s)); the fork hook was renamed "
+        f"(colliding site(s) in {sorted(collision)}); the fork hook was renamed "
         "to fork_kanban_task_blocked to avoid upstream's observer"
     )
-    # Both fire sites use **_blocked_hook_kwargs - assert the splat pattern
-    # exists in both enclosing functions.
-    block_task_body = _function_body(src, "block_task")
-    record_failure_body = _function_body(src, "_record_task_failure")
+    # Both fire sites use **blocked_hook_kwargs - assert the splat pattern
+    # exists in both enclosing functions, wherever those functions now live.
+    block_file, block_task_body = _find_function_body(
+        _KERNEL_SOURCES, "block_task")
+    failure_file, record_failure_body = _find_function_body(
+        _KERNEL_SOURCES, "_record_task_failure")
     assert block_task_body is not None, "block_task function not found"
     assert record_failure_body is not None, "_record_task_failure function not found"
-    assert "_invoke_kanban_hook(\"fork_kanban_task_blocked\", **_blocked_hook_kwargs)" \
-        in block_task_body, (
-        "fork_kanban_task_blocked call with **_blocked_hook_kwargs missing from block_task"
+    # The splat call, allowing the `_kb.`-prefixed spelling used across modules.
+    _splat = re.compile(
+        r'_invoke_kanban_hook\(\s*"fork_kanban_task_blocked"\s*,\s*'
+        r'\*\*blocked_hook_kwargs\s*\)'
     )
-    assert "_invoke_kanban_hook(\"fork_kanban_task_blocked\", **_blocked_hook_kwargs)" \
-        in record_failure_body, (
-        "fork_kanban_task_blocked call with **_blocked_hook_kwargs missing "
-        "from _record_task_failure"
+    assert _splat.search(block_task_body), (
+        f"{block_file}: fork_kanban_task_blocked call with "
+        "**blocked_hook_kwargs missing from block_task"
+    )
+    assert _splat.search(record_failure_body), (
+        f"{failure_file}: fork_kanban_task_blocked call with "
+        "**blocked_hook_kwargs missing from _record_task_failure"
     )
     # COEXISTENCE GUARD: once a rebase has merged upstream's lifecycle hooks,
-    # upstream's own kanban_task_blocked fire (via _fire_kanban_lifecycle_hook)
-    # must survive in block_task, proving the union resolution kept BOTH
-    # observers rather than dropping upstream's. Gated on the helper's presence
-    # so it is a no-op on the fork's pre-sync main (push CI), full-strength in
-    # the post-rebase sync gate.
-    if "_fire_kanban_lifecycle_hook" in src:
-        assert "_fire_kanban_lifecycle_hook(" in block_task_body and \
+    # upstream's own kanban_task_blocked fire must survive in block_task,
+    # proving the union resolution kept BOTH observers rather than dropping
+    # upstream's. Upstream now routes it through the _fire_task_hook wrapper
+    # (which calls _fire_kanban_lifecycle_hook), so accept either spelling.
+    # Gated on the helper's presence so it is a no-op on the fork's pre-sync
+    # main (push CI), full-strength in the post-rebase sync gate.
+    if "_fire_kanban_lifecycle_hook" in _read(block_file):
+        assert re.search(r'_fire_(?:task_hook|kanban_lifecycle_hook)\(',
+                         block_task_body) and \
             '"kanban_task_blocked"' in block_task_body, (
-            "upstream's _fire_kanban_lifecycle_hook(\"kanban_task_blocked\", ...) "
-            "fire was lost from block_task during the rebase"
+            "upstream's kanban_task_blocked lifecycle fire was lost from "
+            "block_task during the rebase"
         )
     # Confirm the dict definitions contain the documented keys.
     for func_name, body in [("block_task", block_task_body),
                              ("_record_task_failure", record_failure_body)]:
-        # Locate the _blocked_hook_kwargs = dict( ... ) definition in this body.
-        assert re.search(r'_blocked_hook_kwargs\s*=\s*dict\s*\(', body), (
-            f"_blocked_hook_kwargs = dict(...) not found in {func_name}"
+        # Locate the blocked_hook_kwargs = dict( ... ) definition in this body.
+        assert re.search(r'\bblocked_hook_kwargs\s*=\s*dict\s*\(', body), (
+            f"blocked_hook_kwargs = dict(...) not found in {func_name}"
         )
         for key in _BLOCKED_REQUIRED_KEYS:
             assert re.search(rf"\b{key}\s*=", body), (
@@ -311,13 +362,18 @@ def test_triage_breaker_and_ladder_coexist():
     db = _read("hermes_cli/kanban_db.py")
     if "BLOCK_RECURRENCE_LIMIT" not in db:
         return
-    block_task_body = _function_body(db, "block_task")
-    assert block_task_body is not None, "block_task function not found"
-    assert re.search(r'recurrences\s*>=\s*BLOCK_RECURRENCE_LIMIT', block_task_body), (
-        "block_task no longer routes to triage at BLOCK_RECURRENCE_LIMIT"
+    # Upstream factored the routing decision out of block_task into the
+    # _route_block helper, so look there; block_task now delegates. The
+    # BEHAVIOUR is pinned directly (a task at the limit blocks to 'triage') by
+    # test_kanban_task_blocked.py -- these source asserts are the stdlib-only
+    # backstop for the sync gate, which cannot import the repo.
+    route_body = _function_body(db, "_route_block") or _function_body(db, "block_task")
+    assert route_body is not None, "neither _route_block nor block_task found"
+    assert re.search(r'recurrences\s*>=\s*BLOCK_RECURRENCE_LIMIT', route_body), (
+        "the block routing no longer routes to triage at BLOCK_RECURRENCE_LIMIT"
     )
-    assert '"triage"' in block_task_body, (
-        "block_task no longer has the 'triage' routing branch"
+    assert '"triage"' in route_body, (
+        "the block routing no longer has the 'triage' branch"
     )
     # unblock_task guards on blocked/scheduled (a triage'd card is NOT
     # requeueable; the dependency-driven requeue path can't resurrect it).
