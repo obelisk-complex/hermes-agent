@@ -1,9 +1,7 @@
 name: Sync Upstream
 
 on:
-  schedule:
-    - cron: '0 11 * * *'   # daily at 11:00 UTC (04:00 PDT / 03:00 PST)
-  workflow_dispatch:       # also triggerable manually
+  workflow_dispatch:       # manual only — no schedule trigger, syncs are run by hand
 
 permissions:
   contents: write
@@ -13,8 +11,7 @@ permissions:
   # line GITHUB_TOKEN gets 403 on /actions/runs even though the repo is public.
   actions: read
 
-# Never let two daily syncs (or a manual dispatch + the schedule) race the
-# force-push to main.
+# Never let two manual dispatches race the force-push to main.
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
@@ -23,9 +20,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     # Rebase + pre-push gate is a few minutes; up to 45 more waiting on the
-    # post-push CI gate, plus slack. Bounded well under the 24h cron period so
-    # a hung run can never queue tomorrow's sync behind it (concurrency group
-    # sync-upstream, cancel-in-progress: false).
+    # post-push CI gate, plus slack.
     timeout-minutes: 60
     steps:
       - name: Checkout fork main
@@ -415,7 +410,7 @@ jobs:
       - name: Report sync failure
         if: failure()
         run: |
-          echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
+          echo "::error::Upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
 
       # The Actions tab alone is not a notification channel — nobody was
       # watching it, so an unrecorded conflict repeated identically for 12
@@ -438,11 +433,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh label create sync-upstream-blocked --color B60205 \
-            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --description "Sync Upstream rebase needs manual conflict resolution" \
             --force >/dev/null 2>&1 || true
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           title="Sync Upstream blocked: manual rebase conflict resolution needed"
-          body="The nightly Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
+          body="The Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
 
           Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
 
