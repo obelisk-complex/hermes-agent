@@ -196,10 +196,65 @@ VALID_HOOKS: Set[str] = {
     # IGNORED in v1 — a plugin returning a directive-shaped dict gets a debug log so future block/rewrite
     # adopters are discoverable once the middleware variant ships against the #64231 taxonomy.
     "pre_command",
+    # ---- Kanban lifecycle hooks (fork-local) ----------------------------
+    # pre_kanban_spawn - fired in dispatch after the workspace is resolved and
+    # BEFORE spawn selection. Observers may inspect the task; a plugin may also
+    # OVERRIDE the spawn by returning a dict of task fields to apply (first
+    # directive wins), e.g.:
+    #     {"model_override": "claude-opus-4-8"}  /  {"skills": ["sdlc-review"]}
+    # Kwargs: task_id, title, body, assignee, model_override, workspace_path,
+    #   workspace_kind, branch_name, priority, skills, consecutive_failures,
+    #   board. Return None to leave the spawn unchanged.
+    "pre_kanban_spawn",
+    # fork_kanban_task_blocked - OBSERVER ONLY (return values ignored). Renamed
+    # from kanban_task_blocked to avoid colliding with upstream's own
+    # kanban_task_blocked observer: both dispatch through
+    # hermes_cli.plugins.invoke_hook, so a shared name would deliver upstream's
+    # lean kwargs to the fork's quality-gate consumer. Fired the instant a task
+    # is blocked, covering BOTH the auto-block circuit-breaker path
+    # (spawn/review/timeout/crash, via _record_task_failure) and the manual
+    # block_task path.
+    # PERFORMANCE CONTRACT: callbacks MUST return fast. The hook fires just
+    # after the kanban write transaction commits, but the dispatcher thread
+    # is still serial - a slow callback (HTTP, Matrix notify, file I/O)
+    # stalls the kanban writer. Do any I/O off-thread (background thread /
+    # asyncio task); never block the callback on network latency.
+    # Kwargs (auto): task_id, reason, consecutive_failures, effective_limit,
+    #   limit_source, trigger_outcome, trigger="auto_block", run_id.
+    # Kwargs (manual): task_id, reason, run_id, trigger="manual".
+    "fork_kanban_task_blocked",
+    # pre_kanban_complete - BLOCK-CAPABLE. Fired in complete_task BEFORE the
+    # status→done write. A plugin returning {"action": "block", "message": str}
+    # ABORTS the completion (the task is NOT marked done) and the message is
+    # surfaced to the worker. First valid block directive wins; non-block
+    # return values are ignored. This is the quality-gate plugin's seam.
+    # Kwargs: task_id, result, workspace_path, branch_name, assignee,
+    #   model_override, blocked_attempt_count (count of prior
+    #   completion_blocked_plugin events - a bounded-retry / escalation
+    #   signal; the plugin should escalate or back off after a threshold).
+    "pre_kanban_complete",
 }
 
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
 # the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
+# ── Fork identity: mandatory safety-gate plugins ────────────────────────────
+# self-check-enforcer (blocks a false "done" claim) and quality-gate (blocks
+# kanban task completion on a red lint/test/typecheck/build run) are this
+# fork's flagship differentiators — the whole premise is "no false done".
+# Upstream's plugins-are-opt-in migration (config v20→21) deliberately does
+# NOT grandfather bundled plugins, so on a fresh install both would sit inert
+# under ``plugins.enabled`` unless a user opts in by hand, silently defeating
+# the point of shipping them at all.
+#
+# These two keys are therefore forced to load unconditionally: the gate in
+# PluginManager._gate_manifest ignores plugins.enabled/plugins.disabled for
+# just these IDs. Narrow, fork-only carve-out — opt-in behaviour is unchanged
+# for every other plugin. The matching CLI-side refusal lives in
+# hermes_cli/plugins_cmd.py::cmd_disable.
+FORK_MANDATORY_PLUGIN_KEYS: Set[str] = frozenset(
+    {"self-check-enforcer", "quality-gate"}
+)
+
 SHELL_UNSUPPORTED_HOOKS: Set[str] = {"transform_api_error_classification"}
 
 _env_enabled = env_var_enabled  # imported by plugins/memory
@@ -1346,6 +1401,20 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Route one winning manifest per :func:`gate_manifest`: load now, defer, or record as
         skipped (introspection-only placeholder). Returns True only for plugins that go through the
         dependency-ordered load pass."""
+        # Fork mandatory carve-out: these two always load, full stop —
+        # plugins.enabled/plugins.disabled are not consulted for them. Placed
+        # before gate_manifest() so no verdict can exclude them.
+        #
+        # Restricted to source == "bundled": the carve-out exists because the
+        # opt-in migration does not grandfather the plugins THIS REPO SHIPS. A
+        # user-dir or entrypoint plugin that merely takes one of these names
+        # must not inherit the exemption, or squatting the name would be a way
+        # to bypass the opt-in gate entirely.
+        if manifest.source == "bundled" and (
+            manifest_key(manifest) in FORK_MANDATORY_PLUGIN_KEYS
+            or manifest.name in FORK_MANDATORY_PLUGIN_KEYS
+        ):
+            return True
         verdict = gate_manifest(manifest, disabled, enabled)
         if verdict.action == "load":
             return True

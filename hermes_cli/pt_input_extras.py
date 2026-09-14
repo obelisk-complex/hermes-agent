@@ -191,7 +191,15 @@ def install_modify_other_keys_aliases() -> int:
     ``Keys.Ignore`` so they are consumed instead of leaking as literal text. kitty emits these CSI-u forms
     even in legacy mode for keys that have no legacy encoding.
     """
-    return _install(_modify_other_keys_aliases, overwrite=False)
+    changed = _install(_modify_other_keys_aliases, overwrite=False)
+    # Character-valued entries decode the KEY but self-insert types the RAW data
+    # bytes — install the parser-level data patch so Shift+letter (and every other
+    # character mapping) actually types its character (#87390). Runs
+    # unconditionally (idempotent inside), so a re-install after a prompt_toolkit
+    # reload re-wraps the parser, and so callers that install the aliases without
+    # the classic CLI startup path (hermes_cli/curses_ui.py) are covered too.
+    install_keypress_data_normalization()
+    return changed
 
 
 def _modify_other_keys_aliases(ANSI_SEQUENCES: dict, Keys) -> dict[str, object]:
@@ -240,6 +248,24 @@ def _modify_other_keys_aliases(ANSI_SEQUENCES: dict, Keys) -> dict[str, object]:
                 _install_paired(6, {cp: ctrl_key})
                 for modifier in (7, 8):  # Ctrl+Alt and Ctrl+Alt+Shift — same normalization
                     _install_paired(modifier, {cp: (Keys.Escape, ctrl_key)})
+
+    # Shifted symbols under modifyOtherKeys: Ghostty escapes ANY codepoint in
+    # 0x40-0x7F when a modifier is held (src/input/key_encode.zig, v1.3.1), and
+    # the tilde form's codepoint is the ALREADY-SHIFTED, layout-resolved text
+    # (event.utf8) — so cp -> chr(cp) is layout-correct for these. Map the
+    # remaining unmapped shifted symbols: @ [ \ ] ^ _ ` { | } ~
+    # (64, 91-96, 123-126). Shift+digit symbols (US: '!', AZERTY: '¹', ...) stay
+    # unmapped — the terminal sends the shifted glyph but the codepoint-to-char
+    # mapping is layout-specific there, so wrong input would be worse than a
+    # leak. TILDE FORM ONLY — deliberately NOT routed through _install_paired:
+    # the kitty CSI-u twin (ESC[<cp>;2u) would report the UNSHIFTED base-layout
+    # codepoint, which is dead weight at best and actively wrong for layouts
+    # where the shifted symbol lives on a different key (e.g. cp 45 for '_' on
+    # US is Shift+minus, but AZERTY has '_' on a different key). Modifier-2
+    # tilde entries carry no lock bits, matching the comment above
+    # _LOCK_BIT_OFFSETS.
+    for cp in (64, 91, 92, 93, 94, 95, 96, 123, 124, 125, 126):
+        _put(f"\x1b[27;2;{cp}~", chr(cp))
 
     # The Esc KEY under Kitty disambiguate mode: ESC[27u (+ modifiers 1-16 incl. super 9+, and
     # lock twins of the modifier-less form, which is how a lone Esc arrives with a lock on).

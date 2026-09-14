@@ -30,7 +30,7 @@ from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
-from utils import atomic_replace, atomic_yaml_write, fast_safe_load
+from utils import atomic_replace, atomic_yaml_write, fast_safe_load, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -1232,11 +1232,11 @@ def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:
     if not issues:
         return
 
-    lines = ["\033[33m⚠ Config issues detected in config.yaml:\033[0m"]
+    lines = [color("⚠ Config issues detected in config.yaml:", Colors.YELLOW)]
     for ci in issues:
-        marker = "\033[31m✗\033[0m" if ci.severity == "error" else "\033[33m⚠\033[0m"
+        marker = color("✗", Colors.RED) if ci.severity == "error" else color("⚠", Colors.YELLOW)
         lines.append(f"  {marker} {ci.message}")
-    lines.append("  \033[2mRun 'hermes doctor' for fix suggestions.\033[0m")
+    lines.append("  " + color("Run 'hermes doctor' for fix suggestions.", Colors.DIM))
     sys.stderr.write("\n".join(lines) + "\n\n")
 
 
@@ -1253,16 +1253,23 @@ def warn_deprecated_cwd_env_vars() -> None:
     for name in ("MESSAGING_CWD", "TERMINAL_CWD"):
         val = str(env_map.get(name) or "").strip()
         if val:
-            lines.append(f"  \033[33m⚠\033[0m {name}={val} found in .env — this is deprecated.")
+            lines.append(
+                f"  {color('⚠', Colors.YELLOW)} {name}={val} found in .env — this is deprecated."
+            )
     if lines:
         from hermes_constants import display_hermes_home
 
         hint_path = display_hermes_home()
-        lines.insert(0, "\033[33m⚠ Deprecated .env settings detected:\033[0m")
+        lines.insert(0, color("⚠ Deprecated .env settings detected:", Colors.YELLOW))
         lines.append(
-            "  \033[2mMove to config.yaml instead:  "
-            "terminal:\\n    cwd: /your/project/path\033[0m")
-        lines.append(f"  \033[2mThen remove the old entries from {hint_path}/.env\033[0m")
+            "  " + color(
+                "Move to config.yaml instead:  terminal:\\n    cwd: /your/project/path",
+                Colors.DIM,
+            )
+        )
+        lines.append(
+            "  " + color(f"Then remove the old entries from {hint_path}/.env", Colors.DIM)
+        )
         sys.stderr.write("\n".join(lines) + "\n\n")
 
 
@@ -2749,7 +2756,7 @@ def _show_managed_banner() -> None:
         return
     print()
     print(color(
-        f"  ⚷ Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
+        f"  [admin] Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
         f"and cannot be changed", Colors.YELLOW, Colors.BOLD))
     for label, keys in (("config", managed_keys), ("env", managed_env)):
         if keys:
@@ -3126,6 +3133,53 @@ def warn_unpinned_cron_jobs_after_model_config_change(
         "with `hermes config set cron.model <model>`.")
 
 
+def warn_auto_approve_dependencies(key: str, config: Optional[Dict[str, Any]] = None) -> None:
+    """Post-write warnings for ``approvals.auto_approve*`` (T4 of the dual-signal plan).
+
+    D7/R13/R14/R16 of the plan rest on config-set-time warnings, and ``set_config_value`` has no
+    per-key validator hook. Called from the post-write path (beside
+    ``warn_unpinned_cron_jobs_after_model_config_change``) for keys under ``approvals.auto_approve*``:
+
+    - ``dual_signal`` with zero tags is strictly worse than today until tags are enabled (every
+      previously auto-approved action races the timeout).
+    - ``auto_approve`` has no effect unless ``approvals.mode == "smart"``.
+    - ``dual_signal`` with ``delegation.subagent_auto_approve: true``: CLI-parented subagents
+      resolve approvals via TLS callbacks, never a human, so the barrier cannot cover them.
+
+    The same three warnings appear in the ``/approvals tags`` listing for users who never touch
+    ``hermes config set``.
+    """
+    cfg = config or {}
+    approvals = cfg.get("approvals", {}) or {}
+    leaf = (key or "").rsplit(".", 1)[-1].lower()
+    if not key.startswith("approvals.") or leaf not in ("auto_approve", "auto_approve_tags"):
+        return
+
+    mode = str(approvals.get("auto_approve", "legacy") or "legacy").strip().lower()
+    if mode == "false":
+        mode = "off"
+    elif mode == "true":
+        mode = "dual_signal"
+    if mode != "dual_signal":
+        return
+
+    tags = approvals.get("auto_approve_tags") or []
+    if isinstance(tags, list) and len(tags) == 0:
+        print("⚠️  approvals.auto_approve is 'dual_signal' with no auto_approve_tags enabled — "
+              "every previously auto-approved action will now race the approval timeout until "
+              "you enable tags (/approvals tags enable <tag>).")
+    if str(approvals.get("mode", "smart") or "smart") != "smart":
+        print("⚠️  approvals.auto_approve only takes effect when approvals.mode is 'smart' — the "
+              f"current mode is '{approvals.get('mode')}'. The new value is inert until the mode changes.")
+    subagent = None
+    if isinstance(cfg.get("delegation"), dict):
+        subagent = cfg["delegation"].get("subagent_auto_approve")
+    if is_truthy_value(subagent):
+        print("⚠️  approvals.auto_approve is 'dual_signal' while delegation.subagent_auto_approve "
+              "is true — CLI-parented subagents auto-approve via their own escape hatch and the "
+              "head-of-line barrier does not apply to them.")
+
+
 def _default_value_for_key(dotted_key: str):
     """Return the leaf value declared for *dotted_key* in ``DEFAULT_CONFIG`` (None for dicts/misses)."""
     node = cfg_get(DEFAULT_CONFIG, *_split_key_path(dotted_key))
@@ -3488,6 +3542,7 @@ def set_config_value(key: str, value: str, force: bool = False):
         _display_value = mask_secret(value)
     print(f"✓ Set {key} = {_display_value} in {config_path}")
     warn_unpinned_cron_jobs_after_model_config_change(key, value, user_config)
+    warn_auto_approve_dependencies(key, user_config)
 
     # Post-write unknown-key notice (#34067): value IS saved, but tell the user the runtime may never read
     # it and suggest the likely-intended path.

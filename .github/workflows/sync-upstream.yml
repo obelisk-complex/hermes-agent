@@ -1,0 +1,519 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # daily at 11:00 UTC (04:00 PDT / 03:00 PST)
+  workflow_dispatch:       # also triggerable manually
+
+permissions:
+  contents: write
+  issues: write
+  # Read the Actions API to poll the post-push CI run on main. An explicit
+  # `permissions:` block sets every unlisted scope to `none`, so without this
+  # line GITHUB_TOKEN gets 403 on /actions/runs even though the repo is public.
+  actions: read
+
+# Never let two daily syncs (or a manual dispatch + the schedule) race the
+# force-push to main.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Rebase + pre-push gate is a few minutes; up to 45 more waiting on the
+    # post-push CI gate, plus slack. Bounded well under the 24h cron period so
+    # a hung run can never queue tomorrow's sync behind it (concurrency group
+    # sync-upstream, cancel-in-progress: false).
+    timeout-minutes: 60
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0         # full history needed for rebase
+          ref: main
+          # SYNC_PAT = fine-grained PAT with Contents + Workflows write. Required
+          # because the default GITHUB_TOKEN may NOT push changes under
+          # .github/workflows/, so the sync fails whenever upstream touches a
+          # workflow file. Falls back to GITHUB_TOKEN if the secret is unset
+          # (sync then still fails on upstream workflow changes, as before).
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream main --quiet
+
+      # GITHUB_TOKEN-authored pushes deliberately do NOT trigger workflows
+      # (recursion guard). The checkout above falls back to GITHUB_TOKEN when
+      # SYNC_PAT is unset, in which case the push to main creates no CI run at
+      # all and the post-push watch below has nothing to watch. Say so up
+      # front instead of letting it read as "CI never started".
+      - name: Assert SYNC_PAT is present
+        env:
+          HAS_PAT: ${{ secrets.SYNC_PAT != '' }}
+        run: |
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::warning::SYNC_PAT is unset — the push to main will be GITHUB_TOKEN-authored and will NOT trigger ci.yaml. The post-push CI gate will report 'no CI run appeared'."
+          fi
+
+      # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
+      # conflict resolved once (here or in a manual rebase) auto-replays on the single
+      # rolling fork-patch commit, and the nightly sync stops re-litigating the same
+      # hunks. Best-effort: a missing/empty cache just means "no recorded resolutions
+      # yet".
+      - name: Restore rerere resolution cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
+          restore-keys: |
+            rerere-cache-
+
+      # Seed rerere with resolutions committed to the repo (ci/rerere-cache/),
+      # so a known conflict auto-replays on the FIRST run that hits it, without
+      # depending on the best-effort Actions cache above (which starts empty and
+      # can be evicted). Copied AFTER the cache restore so committed resolutions
+      # always win; the restore/save steps still carry any NEW resolutions
+      # recorded at runtime. Each ci/rerere-cache/<hash>/ holds the preimage +
+      # postimage git rerere recorded for one resolved conflict.
+      - name: Seed rerere from committed resolutions
+        run: |
+          if [ -d ci/rerere-cache ] && [ -n "$(ls -A ci/rerere-cache 2>/dev/null)" ]; then
+            mkdir -p .git/rr-cache
+            cp -R ci/rerere-cache/. .git/rr-cache/
+            echo "Seeded rerere from ci/rerere-cache:"
+            ls -1 .git/rr-cache
+          else
+            echo "No committed rerere resolutions to seed."
+          fi
+
+      - name: Check if upstream has new commits
+        id: check
+        run: |
+          UPSTREAM_AHEAD=$(git rev-list --count origin/main..upstream/main 2>/dev/null || echo "0")
+          CUSTOM_AHEAD=$(git rev-list --count upstream/main..origin/main 2>/dev/null || echo "0")
+          echo "upstream_ahead=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
+          echo "custom_ahead=$CUSTOM_AHEAD" >> $GITHUB_OUTPUT
+          echo "Upstream ahead by $UPSTREAM_AHEAD commits"
+          echo "Fork ahead by $CUSTOM_AHEAD commits (custom)"
+
+      - name: Rebase custom commits onto upstream
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # Committer identity for the rebase replay. MUST be obelisk-complex's
+          # real noreply id, not the old `obelisk@…` (which is an unrelated user
+          # and re-stamps every custom commit's committer with the wrong author).
+          git config user.email "265670482+obelisk-complex@users.noreply.github.com"
+          git config user.name "obelisk-complex"
+          # rerere: record/replay conflict resolutions; autoupdate stages a hunk the
+          # moment a recorded resolution fully resolves it.
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          echo "⚜️ Rebasing ${{ steps.check.outputs.custom_ahead }} custom commit(s) onto ${{ steps.check.outputs.upstream_ahead }} new upstream commit(s)..."
+          if git rebase upstream/main; then
+            echo "✓ Rebased cleanly."
+          else
+            # The rebase paused on a conflict. With rerere + autoupdate, a recorded
+            # resolution is applied and STAGED automatically, leaving no unmerged
+            # paths. Drive --continue through every such auto-resolved step. If any
+            # path is still unmerged it's a NEW conflict with no recorded
+            # resolution: abort and fail for a human.
+            #
+            # IMPORTANT: `git rebase --continue` exits NON-ZERO whenever it commits
+            # one resolved step and then pauses at the NEXT conflict — that is the
+            # normal shape of a multi-conflict rerere replay (e.g. two custom
+            # commits that both touch one file), NOT a failure. So we must NOT treat
+            # a non-zero --continue as fatal; instead re-check unmerged paths at the
+            # top of the loop. (The old `--continue || { abort; exit 1; }` form
+            # aborted on that benign intermediate exit, so any sync needing ≥2
+            # recorded resolutions failed even though every conflict was resolved.)
+            while [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; do
+              if git diff --name-only --diff-filter=U | grep -q .; then
+                git rebase --abort || true
+                echo "::error::Upstream rebase hit an UNKNOWN conflict (no recorded rerere resolution). Resolve it once locally with rerere enabled, push the rolling patch, and the cache auto-replays it next time. origin/main left untouched."
+                exit 1
+              fi
+              head_before=$(git rev-parse HEAD)
+              GIT_EDITOR=true git rebase --continue || true
+              # Stall guard: still rebasing, nothing unmerged, and HEAD did not
+              # advance => --continue made no progress (not a normal pause). Fail
+              # loud rather than spin until the job times out.
+              if { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; } \
+                 && ! git diff --name-only --diff-filter=U | grep -q . \
+                 && [ "$(git rev-parse HEAD)" = "$head_before" ]; then
+                git rebase --abort || true
+                echo "::error::git rebase --continue made no progress with no unmerged paths — aborting to avoid an infinite loop. origin/main left untouched."
+                exit 1
+              fi
+            done
+            echo "✓ Rebase completed using recorded rerere resolution(s)."
+          fi
+
+      - name: Validate rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # The guard tests import the in-repo `agent`/`hermes_cli` packages, so the
+          # repo root must be on sys.path. Running `python3 tests/...py` bare puts only
+          # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
+          export PYTHONPATH="$PWD"
+          # Catch conflict markers / syntax breakage the rebase may have left in
+          # the import-critical and fork-customised files. Cheap smoke check that
+          # runs before the heavier fork-local test pass below.
+          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
+            python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
+          done
+
+      - name: Find fork-local test files
+        id: fork-tests
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          # Upstream can't update a test file it has never seen. A rebase can
+          # replay a fork commit cleanly onto an upstream refactor and still
+          # leave a fork-local test calling an API upstream just changed
+          # underneath it — this broke silently for
+          # tests/hermes_cli/test_kanban_cli_complete_block.py and
+          # tests/tools/test_kanban_tools.py (2026-07-20/21) because the old
+          # gate only ran 4 hand-picked files. Diff the tree instead of
+          # hand-maintaining a list, so the gate self-updates as the fork
+          # grows.
+          #
+          # "Fork-owned" means DIFFERS from upstream, not merely ABSENT from
+          # upstream. The previous `comm -23` form listed only fork-ADDED
+          # files, so a fork-MODIFIED upstream test file was invisible to this
+          # gate — 12 of them, at the time of writing. That blind spot is not
+          # theoretical: the 2026-09-06 re-derivation silently reverted
+          # tests/cli/test_cli_preloaded_skills.py to upstream's copy, dropping
+          # the fork's three skills.always tests, and this step would have
+          # reported all-green because that file is modified rather than added.
+          # `git diff --name-only` is a strict superset of the old set.
+          mapfile -t files < <(git diff --name-only --diff-filter=d upstream/main HEAD -- tests \
+            | grep -E '\.py$' | sort)
+          echo "Found ${#files[@]} fork-owned test file(s):"
+          printf '  %s\n' "${files[@]}"
+          IFS=:; echo "files=${files[*]}" >> "$GITHUB_OUTPUT"; unset IFS
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        # No longer gated on there being fork-local tests: the lockfile/lint
+        # checks below need uv regardless.
+        if: steps.check.outputs.upstream_ahead != '0'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      # Run 30489618459 (2026-07-29) landed 8 simultaneous conflicts including a
+      # uv.lock pin drift that nothing caught: the rebase replayed our lock
+      # against upstream's new pyproject.toml and left them disagreeing. The
+      # fork-local test gate above structurally cannot see this — it isn't
+      # under tests/. Mirrors uv-lockfile-check.yml's retry loop: `uv lock
+      # --check` re-resolves against PyPI, so a registry blip must not read as
+      # "lockfile stale".
+      - name: Verify uv.lock against the rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          ok=false
+          for i in 1 2 3; do
+            if uv lock --check; then ok=true; break; fi
+            [ "$i" = 3 ] && break
+            echo "::warning::uv lock --check failed (attempt $i); retrying in 10s"
+            sleep 10
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::rebased tree: uv.lock is out of sync with pyproject.toml. The rebase replayed a lock pin against an upstream dependency change. Resolve per ci/UPSTREAM_SYNC_RUNBOOK.md, run \`uv lock\`, commit the result. origin/main left untouched."
+            exit 1
+          fi
+
+      # ci.yml's blocking lint (Python lints / ruff enforcement). A rebase that
+      # reintroduces a rule violation upstream just fixed is exactly the
+      # semantic-conflict shape this whole gate exists for.
+      - name: ruff check the rebased tree (pre-push gate)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          uv tool install ruff
+          ruff check . || { echo "::error::rebased tree fails \`ruff check .\` — ci.yml's blocking lint would go red on main. origin/main left untouched."; exit 1; }
+
+      - name: Install dependencies
+        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        # Same extras as tests.yml — several fork-local tests exercise the
+        # lazy-install provider SDKs directly, and the hermetic test env
+        # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1).
+        run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Run fork-local tests against the rebased tree
+        if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
+        # This is the real "CI tests as persistence" gate — it runs BEFORE the
+        # push, so a rebase that silently breaks a fork-owned test never
+        # reaches origin/main (which every `hermes update` consumer hard-resets to).
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh --files '${{ steps.fork-tests.outputs.files }}'
+
+      - name: Push validated rebase
+        id: push
+        # Explicit success() (already implicit) makes the gate unmistakable: the
+        # force-push runs ONLY if the rebase and the pre-push validation passed.
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        run: |
+          git push --force-with-lease origin main
+          # The watch step below must match the CI run by THIS exact SHA, never
+          # by "latest run on main" — a concurrent human push, a re-run, or a
+          # leftover queued run would otherwise be mistaken for ours.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
+
+      # ── Post-push CI watch (ADVISORY) ────────────────────────────────────
+      # The pre-push gate above is fast and cheap but structurally partial: it
+      # runs fork-local tests + a lockfile/lint check, in one job, on one
+      # Python version. It cannot see upstream-owned tests, the JS/TS matrix,
+      # the docs site, or the main-only jobs (e.g. tests.yml's save-durations,
+      # which is what actually broke main on 2026-08-07). The SYNC_PAT push
+      # above already creates a full ci.yaml run on main within ~1s (measured
+      # against runs 31103795631, 31007893479, 30912081013).
+      #
+      # The sync's job is to rebase the fork's customisation onto upstream
+      # latest and push it; it is NOT to gate on the health of upstream's
+      # suite. Upstream runs its own CI, and a red upstream or runner issue
+      # (e.g. larger-runner labels a personal account cannot provision,
+      # 2026-08-22 streak) must never block the daily patch application.
+      # So this step only WATCHES the run that the push created: a red or
+      # hung run is reported through the tracking issue (see below) so a
+      # broken main is ANNOUNCED within minutes instead of sitting unnoticed
+      # (cf. the 12-day silent streak 2026-07-22 -> 2026-08-02), but the sync
+      # itself stays green. Rolling back is the runbook's job:
+      # ci/UPSTREAM_SYNC_RUNBOOK.md documents recording the pre-sync
+      # origin/main SHA for exactly this.
+      - name: Watch post-push CI on main (advisory)
+        id: postci
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        # Backstop only — the internal DEADLINE_SECONDS below must always win,
+        # so this is deliberately larger. A step-timeout kill is SIGKILL: no
+        # $GITHUB_OUTPUT gets written and the notifier falls to its generic
+        # branch. Keeping the internal deadline lower keeps the alert specific.
+        timeout-minutes: 50
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.push.outputs.sha }}
+          # ci.yaml's aggregate gate — its own comment says branch protection
+          # should require only this check, so it's the correct thing to watch.
+          # Not the same as the run's overall conclusion (see below).
+          GATE_JOB: All required checks pass
+          # 45 min: the gate has concluded within 12.8 min on every observed
+          # main push over the last three weeks (median 7.1, n=11, max 12.8).
+          # Well inside the 24h cron period, so a hung run can never bleed
+          # into tomorrow's sync (workflow-level concurrency group serializes
+          # sync runs with cancel-in-progress: false).
+          DEADLINE_SECONDS: '2700'
+          # Observed lag from push to run creation: 0-1s. 5 min is pure slack.
+          APPEAR_SECONDS: '300'
+          POLL_SECONDS: '30'
+        run: |
+          set -uo pipefail
+
+          # ── 1. Find OUR run, by head SHA ─────────────────────────────────
+          # Query ci.yaml's runs directly: tests.yml is workflow_call-only and
+          # has no runs of its own. head_sha + event=push + head_branch=main
+          # is an exact match; newest by run_started_at handles the (benign)
+          # case of a manual re-dispatch racing us.
+          run_id=""
+          appear_deadline=$(( $(date +%s) + APPEAR_SECONDS ))
+          while : ; do
+            run_id=$(gh api \
+              "repos/$REPO/actions/workflows/ci.yaml/runs?head_sha=$HEAD_SHA&event=push&per_page=100" \
+              --jq '[.workflow_runs[] | select(.head_branch=="main")]
+                    | sort_by(.run_started_at) | last | .id // empty' 2>/dev/null || true)
+            [ -n "$run_id" ] && break
+            if [ "$(date +%s)" -ge "$appear_deadline" ]; then
+              echo "reason=no-run" >> "$GITHUB_OUTPUT"
+              echo "::warning::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yaml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED — see the tracking issue."
+              exit 0
+            fi
+            sleep "$POLL_SECONDS"
+          done
+          run_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$run_id"
+          echo "run_id=$run_id"   >> "$GITHUB_OUTPUT"
+          echo "run_url=$run_url" >> "$GITHUB_OUTPUT"
+          echo "Watching CI run $run_id — $run_url"
+
+          # ── 2. Poll the GATE JOB, not the run's conclusion ───────────────
+          # Deliberate: ci.yaml's "CI timing report" job is NOT in
+          # all-checks-pass's needs list, so an API blip there can take the
+          # RUN's conclusion to failure while the gate itself was green.
+          # Watching the job also returns ~0.3-1.5 min sooner and lets
+          # us distinguish failure shapes (see `reason` below) that
+          # `gh run watch` collapses into one.
+          deadline=$(( $(date +%s) + DEADLINE_SECONDS ))
+          while : ; do
+            gate=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null \
+              | jq -r --arg n "$GATE_JOB" \
+                  '[.jobs[] | select(.name==$n)]
+                   | if length==0 then "pending:"
+                     else (last | "\(.status):\(.conclusion // "")") end' 2>/dev/null \
+              || echo "api-error:")
+            case "$gate" in
+              completed:success)
+                echo "reason=" >> "$GITHUB_OUTPUT"
+                echo "✓ CI gate green on main@$HEAD_SHA — $run_url"
+                exit 0 ;;
+              completed:*)
+                echo "reason=ci-red" >> "$GITHUB_OUTPUT"
+                echo "::warning::CI gate concluded '${gate#completed:}' on main@$HEAD_SHA. origin/main is RED — see the tracking issue. $run_url"
+                exit 0 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "reason=ci-timeout" >> "$GITHUB_OUTPUT"
+              echo "::warning::CI gate did not conclude within $((DEADLINE_SECONDS/60))m (last observed state: '$gate'). Run is hung, not failed. origin/main HAS been updated and is UNVALIDATED — see the tracking issue. $run_url"
+              exit 0
+            fi
+            sleep "$POLL_SECONDS"
+          done
+
+      # Closes the self-heal gap this pairs with (see "Notify on red CI"
+      # below): a red main used to only show up as a red run in the Actions
+      # tab, which nobody was watching daily — it repeated silently for a
+      # 12-day streak (2026-07-22 to 2026-08-02) before a human noticed.
+      # A sync that pushed successfully AND observed a green CI gate means
+      # the fork is in a known-good state, so auto-close the tracking issue
+      # rather than leaving it for someone to remember. A sync that pushed
+      # but could not confirm green CI (reason set) leaves it open.
+      - name: Close tracking issue on successful sync
+        if: success() && steps.check.outputs.upstream_ahead != '0' && steps.postci.outputs.reason == ''
+        # A notification hiccup (e.g. the gh API, or Issues toggled off again)
+        # must never flip an actually-successful sync to a failed run — that
+        # would make the cure worse than the disease this step exists to fix.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, pushed, and the CI gate on \`origin/main\` came back green. Closing."
+            gh issue close "$existing" --repo "${{ github.repository }}"
+            echo "Closed tracking issue #$existing"
+          fi
+
+      # Persist any resolutions rerere recorded this run (even on failure, so a
+      # resolution applied mid-run is not lost). Unique key per run; restore-keys
+      # picks up the most recent on the next run.
+      - name: Save rerere resolution cache
+        if: always() && steps.check.outputs.upstream_ahead != '0'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
+
+      - name: Report sync failure
+        if: failure()
+        run: |
+          echo "::error::Daily upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
+
+      # The Actions tab alone is not a notification channel — nobody was
+      # watching it, so an unrecorded conflict repeated identically for 12
+      # days (2026-07-22 to 2026-08-02) before a human noticed. This makes a
+      # blocked sync self-announcing: one persistent, labelled issue that
+      # gets a new comment each day it's still stuck (not a fresh issue per
+      # day) and auto-closes on the next green run (see "Close tracking
+      # issue on successful sync" above). This does NOT attempt to resolve
+      # the conflict itself — auto-resolving a semantic conflict is exactly
+      # how the fork previously lost real hunks silently (see LOST-HUNKS.md);
+      # a human still has to run the runbook once.
+      - name: Notify sync failure (open/update tracking issue)
+        if: failure()
+        # Same reasoning as the close-step's continue-on-error: the job is
+        # already correctly failed at this point (a real sync problem); a
+        # broken notification must stay a separate, visible-but-non-fatal
+        # signal rather than obscuring which step actually blocked the sync.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create sync-upstream-blocked --color B60205 \
+            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --force >/dev/null 2>&1 || true
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          title="Sync Upstream blocked: manual rebase conflict resolution needed"
+          body="The nightly Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
+
+          Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
+
+          Failing run: $run_url"
+
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Still blocked as of $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+          $body"
+            echo "Updated existing tracking issue #$existing"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$title" --label sync-upstream-blocked --body "$body"
+            echo "Opened new tracking issue"
+          fi
+
+      # The post-push watch is advisory, so a red main no longer fails the
+      # sync — but it still needs to be ANNOUNCED, or a red main would sit
+      # unnoticed again (the 12-day streak this workflow was built to end).
+      # The sync pushed successfully; this step opens/updates a tracking
+      # issue naming the failure shape so a human can decide whether to roll
+      # back per ci/UPSTREAM_SYNC_RUNBOOK.md. Auto-closes on the next sync
+      # whose watch confirms a green gate.
+      - name: Notify on red CI after sync (open/update tracking issue)
+        if: success() && steps.check.outputs.upstream_ahead != '0' && steps.postci.outputs.reason != ''
+        # A notification hiccup must never flip an otherwise-successful sync
+        # to a failed run.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.postci.outputs.reason }}
+          CI_RUN_URL: ${{ steps.postci.outputs.run_url }}
+          PUSHED_SHA: ${{ steps.push.outputs.sha }}
+        run: |
+          gh label create sync-upstream-blocked --color B60205 \
+            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --force >/dev/null 2>&1 || true
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          title="main is RED after upstream sync: post-push CI did not go green"
+          case "$REASON" in
+            ci-red)     detail="\`All required checks pass\` concluded RED on \`main@$PUSHED_SHA\`. Failing jobs: $CI_RUN_URL" ;;
+            ci-timeout) detail="\`All required checks pass\` did not conclude within 45 minutes on \`main@$PUSHED_SHA\` — the run is HUNG, not failed. Inspect and cancel/re-run: $CI_RUN_URL" ;;
+            no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yaml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI watch is silently non-functional — fix this first.**" ;;
+            *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
+          esac
+          body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED, and the sync itself is green.**
+
+          The rebased tree was force-pushed to \`origin/main\` (\`$PUSHED_SHA\`), then the full CI pipeline on \`main\` did not come back green.
+
+          $detail
+
+          \`origin/main\` **has** been updated and every \`hermes update\` consumer hard-resets to it. To roll back, reset \`main\` to the pre-sync SHA recorded in the sync run log per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`. This issue auto-closes on the next sync whose watch confirms a green CI gate.
+
+          Sync run: $run_url"
+
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --label sync-upstream-blocked --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "Still red as of $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+          $body"
+            echo "Updated existing tracking issue #$existing"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$title" --label sync-upstream-blocked --body "$body"
+            echo "Opened new tracking issue"
+          fi

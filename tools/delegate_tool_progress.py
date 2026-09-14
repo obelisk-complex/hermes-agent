@@ -124,6 +124,54 @@ _COMPLETION_INSTRUCTIONS = (
     "whole process. Your response is returned to the parent agent as a summary, and overlong summaries crowd out the "
     "parent's context window."
 )
+# Fork blocks. Anti-fabrication itself is NOT restated here: the child's prompt
+# already carries upstream's TASK_COMPLETION_GUIDANCE (this prompt is passed as
+# ephemeral_system_prompt, which is appended to the built system prompt rather
+# than replacing it), so a second copy would only duplicate it. What upstream
+# has no equivalent for is the structured FAIL/verdict protocol below, which
+# plugins/self-check-enforcer parses out of the child's summary.
+_FORK_NO_OP_INSTRUCTION = (
+    "\n\n═══ MANDATORY INSTRUCTION ═══\n"
+    "If this task requires no real work, or the work has already\n"
+    "been completed by a prior subagent, return FAIL with reason\n"
+    "'NO-OP REJECTION: <explanation>'.\n"
+    "A FAIL return is preferred over a fake-clean result.\n"
+    "═══ END MANDATORY INSTRUCTION ═══"
+)
+_FORK_VERIFIES_TASK_INSTRUCTION = (
+    "\n\n═══ VERIFIES_TASK INSTRUCTION ═══\n"
+    "If the task's goal or description contains `verifies_task=<id>`,\n"
+    "include `VERIFIES_TASK: <id>` at the very beginning of your\n"
+    "summary. This allows the parent to correlate your result with\n"
+    "the original failure being re-verified.\n"
+    "═══ END VERIFIES_TASK INSTRUCTION ═══"
+)
+_FORK_ACCEPTANCE_SCENARIOS_INSTRUCTION = (
+    "\n\n═══ ACCEPTANCE SCENARIOS INSTRUCTION ═══\n"
+    "If the task lists acceptance scenarios or a Testing Strategy, you MUST\n"
+    "run each one and report its result — the command run and its exit code,\n"
+    "or what you observed — before claiming completion. A scenario you did\n"
+    "not actually run is an unverified claim: return FAIL for it rather than\n"
+    "asserting success.\n"
+    "═══ END ACCEPTANCE SCENARIOS INSTRUCTION ═══"
+)
+# READY/NEEDS_WORK/BLOCKED is deliberately NOT upstream's goal-judge vocabulary
+# (DONE/BLOCKED/WAIT, hermes_cli/goals.py): different actor, different consumer.
+# NEEDS_WORK ("a check failed, re-dispatch me") has no upstream counterpart —
+# WAIT means "async work is still running" — and self-check-enforcer's
+# _NEEDS_WORK_RE keys on this exact token.
+_FORK_VERDICT_INSTRUCTION = (
+    "\n\n═══ VERDICT INSTRUCTION ═══\n"
+    "End your summary with an explicit verdict line: `verdict: READY`,\n"
+    "`verdict: NEEDS_WORK`, or `verdict: BLOCKED`.\n"
+    "  - READY: every gate passed and every acceptance scenario ran and passed.\n"
+    "  - NEEDS_WORK: any verification or test failed. This is a re-runnable\n"
+    "    FAIL: the parent re-dispatches or acknowledges it; do NOT claim done.\n"
+    "  - BLOCKED: the work needs a human (missing credential, outage, or\n"
+    "    ambiguous requirement); also set an `escalation_reason`.\n"
+    "Emitting the verdict is mandatory and does not depend on loading any skill.\n"
+    "═══ END VERDICT INSTRUCTION ═══"
+)
 _ORCHESTRATOR_BLOCK = (
     "\n## Subagent Spawning (Orchestrator Role)\n"
     "You have access to the `delegate_task` tool and CAN spawn your own subagents to parallelize independent work.\n\n"
@@ -174,6 +222,10 @@ def _build_child_system_prompt(
             _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         if _ctx_files.strip():
             parts.append(_CONTEXT_FILES_INTRO + _ctx_files.strip())
+    parts.append(_FORK_NO_OP_INSTRUCTION)
+    parts.append(_FORK_VERIFIES_TASK_INSTRUCTION)
+    parts.append(_FORK_ACCEPTANCE_SCENARIOS_INSTRUCTION)
+    parts.append(_FORK_VERDICT_INSTRUCTION)
     parts.append(_COMPLETION_INSTRUCTIONS)
     if role == "orchestrator":
         child_note = _LEAF_CHILDREN_NOTE if child_depth + 1 >= max_spawn_depth else _NESTED_CHILDREN_NOTE

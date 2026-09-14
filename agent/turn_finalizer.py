@@ -140,6 +140,19 @@ def _resolve_budget_fallback(
             if _pending_verification_response_previewed:
                 agent._response_was_previewed = True
             preserved_verification_fallback = True
+            # The withheld answer is the one a gate refused. Restoring it verbatim
+            # because the loop ran out of iterations is how an unverified claim
+            # reaches the user marked as done. Give the gate a final say: if it is
+            # still refusing, its message replaces the draft.
+            from agent.turn_stop_gates import pre_verify_terminal_substitute
+
+            _sub = pre_verify_terminal_substitute(
+                agent, final_response,
+                getattr(agent, "_pre_verify_nudges", 0), api_call_count,
+            )
+            if _sub:
+                final_response = _sub
+                agent._response_was_previewed = False
         else:
             # _handle_max_iterations makes one extra toolless request for a summary.
             agent._emit_status(

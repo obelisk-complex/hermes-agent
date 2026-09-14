@@ -436,6 +436,7 @@ _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
 
+
 def heartbeat_current_worker_from_env() -> bool:
     """Claim extension + board heartbeat for the current worker; True iff a write was
     attempted. ``HERMES_KANBAN_RUN_ID`` pins the run row so a reclaimed stale run is not
@@ -608,7 +609,31 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
                 f"created_cards=[] to skip the card-claim check entirely.")
+        except kb.CompletionBlockedError as gate_err:
+            # A pre_kanban_complete quality gate vetoed this completion. The
+            # gate runs before the write txn, so the task was NOT mutated and
+            # the worker can retry after fixing the failures. Spell that out —
+            # without it the model treats a tool_error as terminal and
+            # blocks/crashes the run.
+            return tool_error(
+                f"kanban_complete blocked by quality gate: {gate_err.block_message}. "
+                f"Your task is still in-flight (no state change). Fix the gate "
+                f"failures and retry kanban_complete. After 3+ consecutive blocks, "
+                f"call kanban_block with a reason summarising the gate output "
+                f"instead of looping.")
         task = kb.get_task(conn, tid)
+        if not ok:
+            # complete_task returns False without raising for an
+            # unknown/terminal id, a lost parent/acceptance race, OR when the
+            # pre_kanban_complete gate blocked this task _MAX_COMPLETION_BLOCKS
+            # times and the kernel auto-blocked it for human review.
+            # Distinguish the gate case so the worker learns the task is now
+            # blocked, not silently un-completable.
+            _check(
+                task is None or task.status != "blocked",
+                f"kanban_complete: {tid} was auto-blocked for human review after the "
+                f"quality gate blocked it repeatedly. The task is now in 'blocked' "
+                f"state - do NOT retry completion; a human must unblock or requeue it.")
         _check(ok, (task.last_failure_error if task else None) or
                f"could not complete {tid} (unknown id, stale run, or already terminal)")
         run = kb.latest_run(conn, tid)

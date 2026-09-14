@@ -11,24 +11,29 @@ Leaves read facade-owned state (``_lock``, queues, denial breaker) back through 
 call time; sibling-defined names are imported from their defining module.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import importlib
 import logging
 import os
 import threading
+from time import monotonic
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
 from tools import approval_context
+from tools.action_tags import ActionTag
 from tools.approval_context import (
+    _get_auto_approve_enabled_by, _get_auto_approve_mode, _get_auto_approve_tags,
     _get_session_platform, _is_cron_approval_context,
     _is_gateway_approval_context, _is_interactive_cli, _is_single_query_approval_context,
     _is_unattended_platform_approval_context, _resolve_cli_approval_callback, _should_fall_through_to_cli_approval,
     _tirith_fail_open, get_current_session_key,
 )
 from tools.approval_detection import (
-    _approval_key_aliases, _check_sudo_stdin_guard, detect_dangerous_command, detect_hardline_command,
+    _approval_key_aliases, _check_sudo_stdin_guard, _resolve_tags, detect_dangerous_command,
+    detect_hardline_command,
 )
 from tools.approval_floors import (
     _command_matches_permanent_allowlist, _hardline_block_result, _match_user_deny_rule, _sudo_stdin_block_result,
@@ -49,6 +54,13 @@ _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
+# D17 (dual-signal plan): monotonic submission timestamps for _pending records, kept in a parallel
+# dict so the model-visible payload shape at the submit_pending call sites stays byte-identical.
+# Limb (b) of the head-of-line barrier treats a record older than approvals.timeout as abandoned.
+_pending_at: dict[str, float] = {}
+# Limb (c): depth of in-flight human CLI prompts per session, so a concurrent command in the same
+# session cannot auto-approve while a human is deciding an earlier one.
+_manual_prompt_depth: dict[str, int] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
@@ -168,6 +180,11 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if reason:
             entry.reason = reason
         entry.event.set()
+    # D13/T8a (dual-signal plan): clear_pending takes _lock itself, so this call must sit OUTSIDE
+    # the `with _lock:` block above (a call inside it would deadlock permanently on the
+    # non-reentrant lock). A resolved gateway action is a human decision; any matching no-notify
+    # pending record is settled too.
+    clear_pending(session_key)
     return len(targets)
 
 
@@ -220,6 +237,85 @@ def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
         _pending[session_key] = approval
+        _pending_at[session_key] = monotonic()
+
+
+def clear_pending(session_key: str) -> bool:
+    """Remove any no-notify pending approval record for a session (T8a).
+
+    Returns whether anything was removed. No-ops on a falsy key. Deliberately does NOT no-op on
+    the literal ``"default"`` session key — that is the commonest real CLI key and skipping it
+    would make the pending record unresolvable for the majority session.
+
+    D13: takes ``_lock`` itself, so every call site must be outside any ``_lock`` scope — the
+    non-reentrant lock would deadlock permanently on a nested acquisition.
+    """
+    if not session_key:
+        return False
+    with _lock:
+        had = _pending.pop(session_key, None) is not None
+        _pending_at.pop(session_key, None)
+        return had
+
+
+@contextmanager
+def _manual_gate_scope(session_key: str):
+    """Count an in-flight human CLI prompt for the head-of-line barrier (T8).
+
+    Increments ``_manual_prompt_depth`` on entry, decrements on exit (try/finally, so an
+    exception inside the prompt cannot strand the counter). The scope is a NO-OP when a synthetic
+    (non-human) approval callback is installed — CLI-parented subagent threads resolve approvals
+    via the TLS callbacks in tools/delegate_tool_config.py (marked
+    ``_hermes_synthetic_approval = True``), never a human, so counting them would deny a
+    concurrent thread's auto-approval for a reason G4 does not describe (G4a).
+    """
+    if not session_key:
+        yield
+        return
+    from tools.terminal_tool import _get_approval_callback
+    cb = _get_approval_callback()
+    if getattr(cb, "_hermes_synthetic_approval", False):
+        yield
+        return
+    with _lock:
+        _manual_prompt_depth[session_key] = _manual_prompt_depth.get(session_key, 0) + 1
+    try:
+        yield
+    finally:
+        with _lock:
+            depth = _manual_prompt_depth.get(session_key, 0) - 1
+            if depth > 0:
+                _manual_prompt_depth[session_key] = depth
+            else:
+                _manual_prompt_depth.pop(session_key, None)
+
+
+def session_has_open_human_decision(session_key: str) -> bool:
+    """True when an unresolved human decision is visible for the session (T8).
+
+    One lock acquisition, never nested (D13): reads the blocking gateway queue (limb a — also
+    covers MCP elicitation in gateway sessions), any non-stale no-notify ``_pending`` record
+    (limb b, D17), and the in-flight CLI prompt depth (limb c). Does not call
+    :func:`has_blocking_approval` — that takes the same non-reentrant lock.
+
+    Total (G13): any exception logs at WARNING and returns True (fail-closed, suppress
+    auto-approval) — three dict reads raising means session state is unhealthy and the manual
+    gate is the right answer.
+    """
+    try:
+        with _lock:
+            if _gateway_queues.get(session_key):
+                return True
+            if session_key in _pending:
+                timeout = approval_context._get_approval_timeout()
+                if monotonic() - _pending_at.get(session_key, 0.0) < timeout:
+                    return True
+            if _manual_prompt_depth.get(session_key, 0) > 0:
+                return True
+        return False
+    except Exception as exc:
+        logger.warning("session_has_open_human_decision failed — failing closed: %s", exc)
+        return True
 
 
 def approve_session(session_key: str, pattern_key: str):
@@ -266,6 +362,8 @@ def clear_session(session_key: str) -> None:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
+        _pending_at.pop(session_key, None)
+        _manual_prompt_depth.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
         # Cancel blocked waits now so the old run unwinds instead of idling until timeout.
@@ -707,22 +805,62 @@ _ACTION_GATE = _GateSpec(
 
 
 def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: str,
-                pattern_keys: list[str], session_key: str, *,
+                pattern_keys: list[str], warnings: list[tuple], session_key: str, *,
                 human_present: bool) -> tuple[dict | None, bool]:
     """Guardian-LLM step -> ``(result, smart_denied_for_owner)``: a result ends the gate;
     ``smart_denied_for_owner`` means an interactive owner may still override the DENY for this
     one operation (once/deny only, nothing persists).
 
-    APPROVE approves this command only — pattern-level persistence would let one benign
+    APPROVE is only signal A of the dual-signal gate (T6/T7 of the dual-signal plan):
+    auto-approval additionally requires a user-enabled rule for EVERY resolved tag and no open
+    human decision ahead in this session. When the decision is not auto-approved the gate falls
+    through to the manual prompt. Under ``approvals.auto_approve: legacy`` (the default) rule 3
+    of :func:`~tools.auto_approval.evaluate_dual_signal` returns the verdict-alone behaviour
+    bit-identically.
+
+    An auto-approval approves this command only — pattern-level persistence would let one benign
     command suppress review of later commands in the same broad detector category. A DENY
     counts toward the denial breaker even when an owner may override it. ESCALATE follows the
     normal, potentially persistent manual behavior.
+
+    Note for the ``_EXECUTE_CODE_GATE``: ``code.exec`` is in ``NEVER_AUTO_APPROVABLE`` (D9), so
+    rule 5 denies every dual_signal/off case and rule 3 preserves legacy — the call decides
+    nothing the hardcoded path would not, and ``manual_gate_open`` can never change its outcome
+    because rule 5 precedes rule 6 for a tag set that is always ``{code.exec}``. Do NOT "fix" the
+    rule order to make it matter. The call is made anyway so the reason string, audit line, and
+    ``action_tags`` are uniform across both wired sites.
     """
-    verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    def _decide(verdict: str):
+        # Runs between the guardian verdict and the single post_approval_response emission so the
+        # decision fields ride that one hook (the plugin-hook contract asserts exactly one).
+        if verdict != "approve":
+            return None
+        from tools.auto_approval import evaluate_dual_signal
+        return evaluate_dual_signal(
+            tags=_resolve_tags(warnings, command),
+            author_verdict=True,
+            mode=_get_auto_approve_mode(),
+            enabled_tags=_get_auto_approve_tags(),
+            manual_gate_open=session_has_open_human_decision(session_key),
+            enabled_by=_get_auto_approve_enabled_by(),
+        )
+
+    verdict, decision = _smart_verdict(command, description, pattern_key, pattern_keys,
+                                       session_key, decide=_decide)
     if verdict == "approve":
+        if decision is not None and not decision.auto_approved:
+            # Second signal missing (or a human decision is open ahead): fall through to the
+            # manual gate rather than auto-approving on the guardian verdict alone.
+            logger.debug("Smart approval denied by dual-signal gate: reason=%s tags=%s",
+                         decision.reason, decision.tags)
+            return None, False
         _reset_denials(session_key)
         logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))
-        return {"approved": True, "message": None, "smart_approved": True, "description": description}, False
+        if decision is not None:
+            logger.info("Auto-approved under %s: tags=%s enabled_by=%s",
+                        decision.reason, ",".join(decision.tags) or "UNTAGGED", decision.enabled_by)
+        return {"approved": True, "message": None, "smart_approved": True, "description": description,
+                "action_tags": list(decision.tags) if decision is not None else []}, False
     if verdict != "deny":
         return None, False
     _record_denial(session_key)
@@ -756,7 +894,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     smart_denied = False
     if smart:
         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
-                                           session_key, human_present=is_cli or is_gateway or is_ask)
+                                           warnings, session_key,
+                                           human_present=is_cli or is_gateway or is_ask)
         if result is not None:
             return result
     pending_body = pending_body() if pending_body else None
@@ -854,8 +993,11 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
                        pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
     approval_context._fire_approval_hook("pre_approval_request", **hook_kwargs)
-    choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
-                                       smart_denied=smart_denied, approval_callback=approval_callback)
+    # T8: an in-flight human prompt is limb (c) of the head-of-line barrier — while this call
+    # blocks, a concurrent command in the same session must not auto-approve past it.
+    with _manual_gate_scope(session_key):
+        choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
+                                           smart_denied=smart_denied, approval_callback=approval_callback)
     approval_context._fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
     if choice == "timeout":
         return deny(spec.cli_timeout, "timeout")
@@ -876,6 +1018,50 @@ def _presence(approval_callback=None) -> tuple:
     if _is_single_query_approval_context():
         is_cli = is_gateway = is_ask = False
     return approval_callback, is_cli, is_gateway, is_ask
+
+
+# --- Phase B (T11): observability tags on the surfaces with no author verdict ---------------------------------------
+
+def _observe_surface_tags(surface: str, pattern_key: str,
+                          tags: frozenset[ActionTag], *, note: str = "") -> list[str]:
+    """Record the tags a no-author-verdict surface saw (Phase B, T11).
+
+    These surfaces (:func:`_run_approval_gate`, the elicitation gate in ``approval_prompt``, the
+    non-smart :func:`check_execute_code_guard` branches, and the write gate) have no guardian
+    verdict, so ``evaluate_dual_signal`` is never called on them and no tag they emit can
+    auto-approve anything (D4, spec line 390). The tag exists so an operator can see what class of
+    action each human decision covered.
+
+    ``note`` carries a surface-specific observation (T12 passes the MCP ``readOnlyHint``). Returns
+    the sorted tag values so the caller can attach them to its result dict.
+
+    Total by the same rule as :func:`~tools.approval_detection._resolve_tags` (G13): observability
+    must never raise onto an approval path, so a failure degrades to ``[]``.
+    """
+    try:
+        tag_values = sorted(tag.value for tag in tags)
+        logger.info(
+            "action-tags surface=%s pattern_key=%s tags=%s auto_approvable=no%s",
+            surface, pattern_key, ",".join(tag_values) or "none",
+            f" {note}" if note else "",
+        )
+        return tag_values
+    except Exception as exc:
+        logger.warning("Action-tag observation failed on surface %s: %s", surface, exc)
+        return []
+
+
+def _with_action_tags(result: dict, tags: list[str]) -> dict:
+    """Attach the observed tags to a gate result, for the audit trail only.
+
+    Upstream's September 2026 decomposition funnels every gated return through the shared result
+    builders (:func:`_approved`, :func:`_denied`, :func:`_blocked`, :func:`_human_decision`), so
+    the tag is stamped at the two gate entry points rather than on ~18 individual dict literals.
+    ``setdefault`` because the smart branch already carries the dual-signal decision's own tags
+    (Phase A) and Phase B must not overwrite them.
+    """
+    result.setdefault("action_tags", list(tags))
+    return result
 
 
 def _run_approval_gate(
@@ -905,6 +1091,15 @@ def _run_approval_gate(
     if is_approved(session_key, pattern_key):
         return _approved()
 
+    # Phase B (T11): tags for observability only. This surface has no author verdict (D4) so
+    # nothing below can auto-approve; the tag rides the result dict and one log line. Resolved
+    # AFTER the yolo and allowlist short-circuits so those two returns keep their exact
+    # historical shape.
+    action_tags = _observe_surface_tags(
+        "approval_gate", pattern_key,
+        _resolve_tags([(pattern_key, description, False)], display_target),
+    )
+
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     if not is_cli and not is_gateway:
         log_args = (autoapprove_log_prefix, pattern_key, description)
@@ -922,32 +1117,33 @@ def _run_approval_gate(
                                                 advice="Find an alternative approach that avoids this action.")
                 elif not message:
                     message = ctx.block_message(subject, noun=noun, advice=advice)
-                return _blocked(message, pattern_key=pattern_key, description=description)
+                return _with_action_tags(
+                    _blocked(message, pattern_key=pattern_key, description=description), action_tags)
             if ctx.name == "single_query":
                 # Return here rather than fall through: the fail-closed branch would
                 # otherwise block what single_query_mode: approve just authorized.
                 logger.warning("%s (pattern: %s): %s — single-query auto-approve "
                                "(approvals.single_query_mode: approve).", *log_args)
-                return _approved()
+                return _with_action_tags(_approved(), action_tags)
             break  # cron/unattended approve-mode: auto-approve below
         else:
             if fail_closed_when_no_human:
                 logger.warning("%s (pattern: %s): %s — no interactive user/gateway present; "
                                "BLOCKED (fail-closed). Set HERMES_INTERACTIVE or "
                                "HERMES_GATEWAY_SESSION to answer the prompt.", *log_args)
-                return _blocked(no_human_block_message or (
+                return _with_action_tags(_blocked(no_human_block_message or (
                     f"BLOCKED: approval required ({description}) but no "
                     "interactive user or gateway is present to approve it."),
-                    pattern_key=pattern_key, description=description)
+                    pattern_key=pattern_key, description=description), action_tags)
         logger.warning("%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
                        "HERMES_GATEWAY_SESSION to require approval.", *log_args)
-        return _approved()
+        return _with_action_tags(_approved(), action_tags)
 
-    return _human_decision(
+    return _with_action_tags(_human_decision(
         _ACTION_GATE, command=display_target, description=description, pattern_key=pattern_key,
         pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
-    )
+    ), action_tags)
 
 
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
@@ -991,7 +1187,12 @@ def check_dangerous_command(command: str, env_type: str,
                             has_host_access: bool = False) -> dict:
     """Detect a dangerous command and handle approval (pattern layer only). ``has_host_access``:
     a Docker sandbox that bind-mounts host paths must not skip approval.
-    Returns ``{"approved": True/False, "message": str or None, ...}``."""
+
+    Returns ``{"approved": True/False, "message": str or None, ...}``. Branches that go through
+    :func:`_run_approval_gate` also carry an ``action_tags`` key (a single resolved tag set for
+    the matched pattern, per Phase B T11) — absent on the earlier bypass/hardline/allowlist
+    returns above. It records what class of action the decision covered, for audit/observability
+    only: it is never an input to any approval decision here and must never be read as one."""
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _user_deny_block(command) or _approved()
     blocked = _floor_block(command)
@@ -1021,7 +1222,11 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     the LLM cannot skip it. Cron honors ``approvals.cron_mode``; any OTHER non-interactive
     non-gateway context fails CLOSED. ``rule_key`` controls the ``[a]lways`` allowlist grain;
     when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons on the same tool
-    persist independently. Returns the ``check_dangerous_command`` result shape.
+    persist independently. Returns the ``check_dangerous_command`` result shape. Gated branches
+    also carry an ``action_tags`` key inherited from :func:`_run_approval_gate` (single-pattern
+    tag resolution, Phase B T11). It records what class of action the decision covered, for
+    audit/observability only: it is never an input to any approval decision here and must never
+    be read as one.
     """
     description = reason or f"Plugin requires approval for {tool_name}"
     if not rule_key:
@@ -1159,6 +1364,16 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     The hardline floor still blocks catastrophic ``terminal()`` commands the script issues; running
     arbitrary code headlessly without any approval surface is trusted-by-config (set a gateway/ask surface
     or ``approvals.cron_mode`` to require approval). See #30882.
+
+    Returns:
+        Same dict contract as ``check_all_command_guards``, with one difference: the
+        ``action_tags`` key here (when present — absent on the isolated-backend/yolo/mode-off
+        bypasses above the gate) is a single resolved tag set for this call — either the smart
+        branch's ``list(decision.tags)`` or the hardcoded ``[ActionTag.CODE_EXEC.value]`` on every
+        other gated branch — not the full per-warning list ``check_all_command_guards`` returns on
+        its own (Phase A) surface. It records what class of action the decision covered, for
+        audit/observability only (Phase B T11): it is never an input to any approval decision here
+        and must never be read as one.
     """
     pattern_key = "execute_code"
     description = _EXECUTE_CODE_DESCRIPTION
@@ -1172,18 +1387,27 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     if _yolo_active() or approval_mode == "off":
         return _approved()
 
+    # Phase B (T11): every branch below is a gate entry, so all of them carry code.exec. No author
+    # verdict exists outside the smart branch, so no auto-approval path is added here (D4).
+    # code.exec is in NEVER_AUTO_APPROVABLE (D9), so the tag cannot enable anything anywhere. The
+    # three returns ABOVE this line (isolated container backends, yolo, approvals.mode: off) are
+    # bypasses that never enter the gate and stay untagged, matching _run_approval_gate's
+    # short-circuits.
+    _observe_surface_tags("execute_code_guard", pattern_key, frozenset({ActionTag.CODE_EXEC}))
+    code_exec_tags = [ActionTag.CODE_EXEC.value]
+
     # (-q clears the presence flags, but its unattended context resolves first anyway.)
     approval_callback, is_cli, is_gateway, is_ask = _presence()
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
     for ctx in _unattended_contexts():
         if ctx.mode() == "deny":
-            return _denied(
+            return _with_action_tags(_denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "
                 "subprocess calls that bypass shell-string approval checks). " + ctx.exec_tail,
                 pattern_key=pattern_key, description=description, outcome="blocked",
-            )
-        return _approved()
+            ), code_exec_tags)
+        return _with_action_tags(_approved(), code_exec_tags)
 
     # Only gateway/ask contexts get the one-shot whole-script approval. In an interactive CLI the script's terminal()
     # calls are guarded per-call (context propagates into the RPC thread, #33057), so a whole-script prompt would fire
@@ -1191,7 +1415,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # and messaging ask-mode drive whole-script approval); when that leaks into a CLI with no notify callback, the
     # engine falls through to the CLI Dangerous Command panel instead of a silent pending_approval.
     if not is_gateway and not is_ask:
-        return _approved()
+        return _with_action_tags(_approved(), code_exec_tags)
 
     session_key = get_current_session_key()
     # Built only past the early-return gates so common paths don't copy a potentially-large script into this string.
@@ -1200,19 +1424,21 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # Without this, "Approve session" / "Always" choices are stored but never
     # consulted, so every execute_code call re-prompts (#39275).
     if is_approved(session_key, pattern_key):
-        return _approved()
+        return _with_action_tags(_approved(), code_exec_tags)
 
     # Smart mode: an APPROVE only suppresses the redundant whole-script prompt; the per-call terminal() guards still
     # run independently. The gateway renders the pending payload to Discord/Slack, so the script body is redacted for
     # display; the raw code is what gets assessed and run.
     from agent.redact import redact_sensitive_text
-    return _human_decision(
+    # _with_action_tags is setdefault-based, so the smart branch keeps the dual-signal decision's
+    # own tags (Phase A) and every other branch below gains the hardcoded code.exec.
+    return _with_action_tags(_human_decision(
         _EXECUTE_CODE_GATE, command=command, description=description, pattern_key=pattern_key,
         pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
         smart=approval_mode == "smart",
         pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
-    )
+    ), code_exec_tags)
 
 
 # Load permanent allowlist from config on module import
