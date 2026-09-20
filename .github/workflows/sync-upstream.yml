@@ -245,7 +245,9 @@ jobs:
         # push runs ONLY if the merge and the pre-push validation passed.
         if: success() && steps.check.outputs.upstream_ahead != '0'
         run: |
-          echo "pre_sync_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+          PRE_SYNC_SHA=$(git rev-parse origin/main)
+          echo "Pre-sync origin/main SHA (for rollback): $PRE_SYNC_SHA"
+          echo "pre_sync_sha=$PRE_SYNC_SHA" >> "$GITHUB_OUTPUT"
           if ! git push origin main; then
             echo "rejected=true" >> "$GITHUB_OUTPUT"
             echo "::error::Push rejected — origin/main moved since this run started (a concurrent human push or another dispatch). This is NOT a merge conflict; re-fetch and re-dispatch. origin/main left untouched by this run."
