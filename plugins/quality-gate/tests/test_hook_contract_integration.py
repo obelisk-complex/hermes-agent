@@ -180,6 +180,7 @@ class TestBlockedHookContract:
         objects with a ``.kind`` attribute, oldest first.
         """
         import hermes_cli.kanban_db as kdb
+        import hermes_cli.kanban_db_connect as kdb_connect
 
         class _FakeTask:
             pass
@@ -213,7 +214,7 @@ class TestBlockedHookContract:
         def fake_list_events(conn, task_id):
             return fake_events
 
-        monkeypatch.setattr(kdb, "connect", fake_connect, raising=False)
+        monkeypatch.setattr(kdb_connect, "connect", fake_connect, raising=False)
         monkeypatch.setattr(kdb, "get_task", fake_get_task, raising=False)
         monkeypatch.setattr(kdb, "requeue_blocked_task", fake_requeue, raising=False)
         monkeypatch.setattr(kdb, "update_task_field", fake_update_field, raising=False)

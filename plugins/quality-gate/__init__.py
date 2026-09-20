@@ -39,8 +39,9 @@ def _bind_requeue() -> Optional[Callable[..., Any]]:
     """
     try:
         from hermes_cli import kanban_db
+        from hermes_cli.kanban_db_connect import connect
         def _requeue(task_id: str, *, model_override: Optional[str] = None, **kw: Any) -> bool:
-            conn = kanban_db.connect()
+            conn = connect()
             try:
                 return kanban_db.requeue_blocked_task(conn, task_id, model_override=model_override)
             finally:
@@ -59,8 +60,9 @@ def _bind_update_field() -> Optional[Callable[..., Any]]:
     (max_retries=0) when the model ladder is exhausted."""
     try:
         from hermes_cli import kanban_db
+        from hermes_cli.kanban_db_connect import connect
         def _update_field(task_id: str, field: str, value: Any) -> bool:
-            conn = kanban_db.connect()
+            conn = connect()
             try:
                 return kanban_db.update_task_field(conn, task_id, field, value)
             finally:
@@ -110,8 +112,9 @@ def _bind_has_gate_block_evidence() -> Optional[Callable[[str], bool]]:
     """
     try:
         from hermes_cli import kanban_db
+        from hermes_cli.kanban_db_connect import connect
         def _has_evidence(task_id: str) -> bool:
-            conn = kanban_db.connect()
+            conn = connect()
             try:
                 events = kanban_db.list_events(conn, task_id)
             finally:
@@ -147,8 +150,9 @@ def _bind_get_model_override() -> Optional[Callable[[str], Optional[str]]]:
     """
     try:
         from hermes_cli import kanban_db
+        from hermes_cli.kanban_db_connect import connect
         def _get(task_id: str) -> Optional[str]:
-            conn = kanban_db.connect()
+            conn = connect()
             try:
                 task = kanban_db.get_task(conn, task_id)
                 return task.model_override if task is not None else None
