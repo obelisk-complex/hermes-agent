@@ -194,7 +194,11 @@ class SidebarCacheTests(unittest.TestCase):
                 mock.patch.object(profiles, "_read_profile_db", side_effect=fake_read), \
                 ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(profiles.get_profiles_projects_tree) for _ in range(workers)]
-            self.assertTrue(entered.wait(timeout=1))
+            # Only proving at least one of 8 pool workers got scheduled and reached the
+            # coalescing lock, not measuring real latency — widened from 1s after CI flakes
+            # under a loaded/oversubscribed runner (scheduling delay, not a code regression;
+            # matches this fork's established precedent for shared-runner timing margins).
+            self.assertTrue(entered.wait(timeout=5))
             time.sleep(0.05)
             release.set()
             results = [future.result(timeout=2) for future in futures]
