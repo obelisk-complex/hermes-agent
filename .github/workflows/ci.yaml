@@ -18,6 +18,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Explicit re-validation of main, e.g. from Sync Upstream: GITHUB_TOKEN
+  # cannot author a push that triggers the push: trigger above (recursion
+  # guard), so that workflow dispatches this run directly instead. detect's
+  # classifier already fails open (every lane "true") for any non-pull_request
+  # event, dispatch included — no classifier change needed.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -367,7 +373,11 @@ jobs:
           cat ci-timings-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save baseline cache (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # workflow_dispatch alongside push: the Sync Upstream workflow now
+        # dispatches this run explicitly (GITHUB_TOKEN pushes don't trigger
+        # ci.yaml's own push: trigger), so a dispatched run on main is the
+        # same "just landed on main" event this baseline update is for.
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         run: |
           # Degraded runs (API rate-limited) produce no ci-timings.json —
           # skip rather than fail, and never cache an empty baseline.
@@ -378,7 +388,7 @@ jobs:
           fi
 
       - name: Upload baseline to cache (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('ci-timings-baseline.json') != ''
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && hashFiles('ci-timings-baseline.json') != ''
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ci-timings-baseline.json
