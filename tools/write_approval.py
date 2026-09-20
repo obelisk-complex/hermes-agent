@@ -153,18 +153,25 @@ def current_origin() -> str:
 class GateDecision:
     """Result of evaluating the write gate; exactly one flag is True. ``allow``: do the real write;
     ``blocked``: user denied the inline prompt (``message`` says why); ``stage``: caller must
-    ``stage_write`` the payload (``message`` is the user-facing "staged for approval" note)."""
+    ``stage_write`` the payload (``message`` is the user-facing "staged for approval" note).
+
+    ``tags`` carries the subsystem's action tag (``memory.write`` / ``skill.write``) for the audit
+    trail. It never influences the decision."""
 
     allow: bool = False
     blocked: bool = False
     stage: bool = False
     message: str = ""
+    # Phase B (T11): the action tag for this write, for the audit trail. Observation only — this
+    # surface has no author verdict, so no auto-approval path exists here (D4, spec line 390).
+    tags: tuple = ()
 
 
-def _staged(subsystem: str) -> GateDecision:
+def _staged(subsystem: str, tags: tuple = ()) -> GateDecision:
     where = "/skills pending" if subsystem == SKILLS else "/memory pending"
-    return GateDecision(stage=True, message=(f"Staged for approval ({subsystem}.write_approval is on). "
-                                             f"Not yet saved — review with {where}."))
+    return GateDecision(stage=True, tags=tags,
+                        message=(f"Staged for approval ({subsystem}.write_approval is on). "
+                                 f"Not yet saved — review with {where}."))
 
 
 def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "") -> GateDecision:
@@ -172,17 +179,28 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
     background → stage; gate on + memory + foreground → inline prompt when an interactive channel
     exists, else stage. The gate only ever delays a write, never silently refuses it; ``blocked``
     is produced only when the user actively denies the inline prompt."""
+    from tools.action_tags import tag_for_write_subsystem
+
+    tag_values = (tag_for_write_subsystem(subsystem).value,)
+
     if not write_approval_enabled(subsystem):
-        return GateDecision(allow=True)
+        return GateDecision(allow=True, tags=tag_values)
+
+    # Gate is on: one audit line per gated write. Kept below the gate-off return so the default
+    # (gate off, writes flow freely) stays silent.
+    logger.info("action-tags surface=write_approval subsystem=%s tags=%s auto_approvable=no",
+                subsystem, ",".join(tag_values))
+
     # Skills are too big to review inline; a background write runs in a daemon thread with no user.
     if subsystem == SKILLS or current_origin() == "background_review":
-        return _staged(subsystem)
+        return _staged(subsystem, tag_values)
     granted = _prompt_inline_memory_approval(inline_summary, inline_detail)
     if granted is None:
-        return _staged(MEMORY)
+        return _staged(MEMORY, tag_values)
     if granted:
-        return GateDecision(allow=True)
-    return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
+        return GateDecision(allow=True, tags=tag_values)
+    return GateDecision(blocked=True, tags=tag_values,
+                        message="Memory write denied by user. The change was not saved.")
 
 
 def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:

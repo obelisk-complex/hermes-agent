@@ -122,10 +122,20 @@ def _smart_approve(command: str, description: str) -> str:
 
 
 def _smart_verdict(command: str, description: str, pattern_key: str,
-                   pattern_keys: list[str], session_key: str) -> str:
-    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
-    Redaction is observer-payload preparation, not approval policy: if it fails,
-    skip observability rather than leak raw data or block the LLM decision."""
+                   pattern_keys: list[str], session_key: str, decide=None) -> tuple:
+    """Run the guardian LLM with observer hooks; ``(verdict, decision)``.
+
+    ``verdict`` is 'approve' | 'deny' | 'escalate'. Redaction is observer-payload preparation,
+    not approval policy: if it fails, skip observability rather than leak raw data or block the
+    LLM decision.
+
+    ``decide`` (dual-signal gate, T6/T7) is an optional ``decide(verdict) -> decision | None``
+    run BETWEEN the guardian verdict and the post hook. Its fields (action_tags, reason,
+    enabled_by, outcome) ride THIS emission, because the frozen plugin-hook contract is exactly
+    ONE ``post_approval_response`` per verdict and the pre/post sequence must stay
+    ``[pre_approval_request, post_approval_response]`` with choice ``smart_approve``/
+    ``smart_deny``. The returned decision is handed back to the caller.
+    """
     try:
         from agent.redact import redact_sensitive_text
         payload = {
@@ -140,6 +150,13 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
     else:
         _ctx._fire_approval_hook("pre_approval_request", **payload)
     verdict = _smart_approve(command, description)
+    decision = decide(verdict) if decide is not None else None
     if payload is not None and verdict in {"approve", "deny"}:
-        _ctx._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
-    return verdict
+        hook_kwargs = dict(payload, choice=f"smart_{verdict}", decided_by="aux_llm")
+        if decision is not None:
+            hook_kwargs["action_tags"] = list(getattr(decision, "tags", ()))
+            hook_kwargs["auto_approval_reason"] = getattr(decision, "reason", "")
+            hook_kwargs["enabled_by"] = getattr(decision, "enabled_by", "")
+            hook_kwargs["dual_signal_outcome"] = "auto_approved" if decision.auto_approved else "manual"
+        _ctx._fire_approval_hook("post_approval_response", **hook_kwargs)
+    return verdict, decision

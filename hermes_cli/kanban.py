@@ -933,14 +933,24 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
                                  f"--force to close its run and complete anyway.")
                 return False
+            except kb.CompletionBlockedError as block_err:
+                fail_msg[tid] = f"completion blocked by quality gate: {block_err.block_message}"
+                return False
             if not done:
-                # complete_task returns bare False for a dependency refusal too;
-                # name the open parents instead of claiming the id is unknown.
-                blockers = kb.unsatisfied_parents(conn, tid)
-                if blockers:
-                    detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
-                    fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
-                                     f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+                # complete_task returns bare False for a dependency refusal, an
+                # unknown/terminal id, OR when the kernel auto-blocked the task
+                # after the quality gate blocked it _MAX_COMPLETION_BLOCKS
+                # times -- name the specific reason instead of a generic message.
+                t = kb.get_task(conn, tid)
+                if t is not None and t.status == "blocked":
+                    fail_msg[tid] = (f"{tid} was auto-blocked for human review after the quality "
+                                     f"gate blocked it repeatedly (now 'blocked')")
+                else:
+                    blockers = kb.unsatisfied_parents(conn, tid)
+                    if blockers:
+                        detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
+                        fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
+                                         f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
             return done
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)

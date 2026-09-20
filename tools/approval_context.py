@@ -236,6 +236,130 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(_get_approval_config().get("mode", "manual"))
 
 
+# --- Dual-signal auto-approval config readers (T4/T5 of the dual-signal plan) ----------------------------------------
+
+def _normalize_auto_approve(value) -> str:
+    """Normalize ``approvals.auto_approve`` (D16: fail closed, never permissive).
+
+    Returns one of 'legacy', 'dual_signal', 'off'.
+
+    Junk values are an *expressed intent that cannot be honoured* and fail closed to 'off' — the
+    opposite of :func:`_normalize_approval_mode`'s junk fallback, because here 'legacy' is the
+    permissive value. Distinct from the read-*failure* rule in :func:`_get_auto_approve_mode`
+    (last-known-good).
+    """
+    if isinstance(value, bool):
+        return "off" if value is False else "dual_signal"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("off", "false", "no"):
+            return "off"
+        if normalized in ("dual_signal", "true", "yes", "on"):
+            return "dual_signal"
+        if normalized == "legacy":
+            return "legacy"
+        logger.warning(
+            "Unknown approvals.auto_approve %r — defaulting to 'off' (LLM auto-approval disabled). "
+            "Valid values: legacy, dual_signal, off", value,
+        )
+        return "off"
+    if value is None:
+        return "off"
+    logger.warning("Non-scalar approvals.auto_approve %r — defaulting to 'off' "
+                   "(LLM auto-approval disabled).", value)
+    return "off"
+
+
+# Last successfully-resolved auto_approve mode (G13): a read failure keeps the last-known-good
+# value so a transient IO error can neither downgrade a dual_signal user to legacy nor switch a
+# default-config machine off.
+_last_known_good_auto_approve: str | None = None
+
+
+def _get_auto_approve_mode() -> str:
+    """Read ``approvals.auto_approve``, fail-closed per D16, total per G13.
+
+    Read failures return the last successfully-resolved value, or ``'legacy'`` (the shipped
+    default) when no read has ever succeeded — never a raise.
+    """
+    global _last_known_good_auto_approve
+    try:
+        resolved = _normalize_auto_approve(_get_approval_config().get("auto_approve", "legacy"))
+        _last_known_good_auto_approve = resolved
+        return resolved
+    except Exception as exc:
+        logger.warning("Failed to read approvals.auto_approve: %s", exc)
+        if _last_known_good_auto_approve is not None:
+            return _last_known_good_auto_approve
+        return "legacy"
+
+
+# (config-signature, dropped-set) -> warned; keeps drop warnings at WARNING once per distinct
+# config rather than once per command.
+_auto_approve_tags_warned: set[tuple] = set()
+
+
+def _get_auto_approve_tags() -> frozenset:
+    """Read ``approvals.auto_approve_tags`` as a validated frozenset (T4, G13).
+
+    - A non-list value (e.g. the scalar string ``hermes config set`` writes) is rejected wholesale
+      with a warning naming ``/approvals tags enable`` — never iterated (D11).
+    - Non-strings, unknown values, and anything in NEVER_AUTO_APPROVABLE or NOT_WIRED are dropped
+      with a warning.
+    - Any read failure returns ``frozenset()`` — never a raise.
+    """
+    try:
+        config = _get_approval_config()
+        from tools.action_tags import CONFIGURABLE_TAGS
+        value = config.get("auto_approve_tags", [])
+        if not isinstance(value, list):
+            if isinstance(value, str):
+                logger.warning(
+                    "approvals.auto_approve_tags is a string, not a list — ignored. Use "
+                    "/approvals tags enable <tag> (or hand-edit config.yaml) to set tags; "
+                    "`hermes config set` cannot write list values."
+                )
+            else:
+                logger.warning("approvals.auto_approve_tags has type %s — ignored.", type(value).__name__)
+            return frozenset()
+        kept: list[str] = []
+        dropped: set[str] = set()
+        for entry in value:
+            if not isinstance(entry, str):
+                dropped.add(repr(entry))
+            elif entry in CONFIGURABLE_TAGS:
+                kept.append(entry)
+            else:
+                dropped.add(entry)
+        if dropped:
+            warn_key = ((id(config),), frozenset(dropped))
+            if warn_key not in _auto_approve_tags_warned:
+                _auto_approve_tags_warned.add(warn_key)
+                logger.warning(
+                    "approvals.auto_approve_tags: dropping %s — not a configurable tag. "
+                    "Valid values: %s", sorted(dropped), ", ".join(sorted(CONFIGURABLE_TAGS)),
+                )
+        return frozenset(kept)
+    except Exception as exc:
+        logger.warning("Failed to read approvals.auto_approve_tags: %s", exc)
+        return frozenset()
+
+
+def _get_auto_approve_enabled_by() -> str:
+    """Attribution for the audit line (T9): the rule's enabled_by, or the config path."""
+    try:
+        value = _get_approval_config().get("auto_approve_enabled_by", "") or ""
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        try:
+            from hermes_cli.config import get_config_path
+            return f"config:{get_config_path()}"
+        except Exception:
+            return "config:<unresolved>"
+    except Exception:
+        return "config:<unresolved>"
+
+
 def _get_approval_timeout() -> int:
     """Read ``approvals.timeout`` (default 300s: gateway push notifications may
     not be seen for minutes; 60s failed closed before Telegram taps landed).

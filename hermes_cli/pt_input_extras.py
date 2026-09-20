@@ -193,7 +193,15 @@ def install_modify_other_keys_aliases() -> int:
     ``Keys.Ignore`` so they are consumed instead of leaking as literal text. kitty emits these CSI-u forms
     even in legacy mode for keys that have no legacy encoding.
     """
-    return _install(_modify_other_keys_aliases, overwrite=False)
+    changed = _install(_modify_other_keys_aliases, overwrite=False)
+    # Character-valued entries decode the KEY but self-insert types the RAW data
+    # bytes — install the parser-level data patch so Shift+letter (and every other
+    # character mapping) actually types its character (#87390). Runs
+    # unconditionally (idempotent inside), so a re-install after a prompt_toolkit
+    # reload re-wraps the parser, and so callers that install the aliases without
+    # the classic CLI startup path (hermes_cli/curses_ui.py) are covered too.
+    install_keypress_data_normalization()
+    return changed
 
 
 def _modify_other_keys_aliases(ANSI_SEQUENCES: dict, Keys) -> dict[str, object]:
@@ -258,7 +266,6 @@ def _modify_other_keys_aliases(ANSI_SEQUENCES: dict, Keys) -> dict[str, object]:
     for cp in range(33, 127):
         for modifier in (2, 9, 10):
             _put(f"\x1b[27;{modifier};{cp}~", chr(cp))
-
     # The Esc KEY under Kitty disambiguate mode: ESC[27u (+ modifiers 1-16 incl. super 9+, and
     # lock twins of the modifier-less form, which is how a lone Esc arrives with a lock on).
     _put("\x1b[27u", Keys.Escape)

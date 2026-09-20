@@ -1,0 +1,180 @@
+# Upstream sync runbook
+
+How the nightly `Sync Upstream` workflow keeps this fork current with
+`NousResearch/hermes-agent`, how to read a failure, and how to fix one so it
+never recurs. The trunk is the **remote** `origin/main`; every `hermes update`
+consumer hard-resets to it, so a broken sync must never reach it.
+
+## How the sync works
+
+`.github/workflows/sync-upstream.yml` runs daily (11:00 UTC) and on manual
+dispatch. Each run:
+
+1. Checks out `origin/main`, adds `upstream`, fetches `upstream/main`.
+2. Seeds `git rerere` from the committed `ci/rerere-cache/` (each `<hash>/`
+   holds the `preimage` + `postimage` of one resolved conflict).
+3. Rebases the fork's custom commits onto `upstream/main`. Recorded resolutions
+   auto-replay; the loop drives `git rebase --continue` through each
+   auto-resolved step.
+4. **Pre-push gate:** `py_compile`s the import-critical files, runs every
+   fork-local test file (found by diffing the rebased tree's `tests/` against
+   `upstream/main`'s — not a hand-maintained list), and checks `uv lock
+   --check` + `ruff check .`. The force-push happens only if all of this
+   passes, so a broken rebase never lands on `origin/main`.
+5. Force-pushes the validated, rebased tree to `origin/main`.
+6. **Post-push CI watch (advisory):** the push above is `SYNC_PAT`-authored,
+   which triggers a full `ci.yaml` run on `main` within ~1s. The sync job
+   watches that run's `All required checks pass` job (up to 45 min) and —
+   if it doesn't go green — reports it through the tracking issue, but the
+   **sync itself stays green**. The sync's job is to rebase the fork's
+   customisation onto upstream latest and push it; it does NOT gate on the
+   health of upstream's suite (a red upstream or a runner-label problem —
+   e.g. the 2026-08-22 larger-runner streak, which a personal account
+   cannot provision — must never block the daily patch application). What
+   the watch guarantees is that a red `main` is *announced* within minutes
+   instead of sitting unnoticed.
+
+There are now **two distinct failure/notice shapes**, and the tracking issue
+text tells you which one you're looking at:
+
+- **Rebase or pre-push gate failed → `origin/main` was NOT updated, sync
+  RED.** A conflict with no recorded resolution, or a pre-push check
+  failure, aborts the job before the push. This is the failure most of this
+  doc is about.
+- **Post-push CI watch reported red → `origin/main` WAS updated, sync still
+  GREEN.** The rebase and pre-push gate both passed, the push happened, and
+  the full `ci.yaml` run on that pushed SHA didn't come back green (or never
+  appeared, or hung past 45 min — the issue body names which). `origin/main`
+  is live and every `hermes update` consumer hard-resets to it. The sync is
+  fine; decide whether the red main needs action. **If the red is a real
+  break, roll back first, investigate second:**
+  `git push --force origin <pre-sync-sha>:main` using the SHA recorded in
+  the sync run's own log (the step before "Push validated rebase" prints
+  `origin/main` before the force-push). Then diagnose the failing `ci.yaml`
+  run linked in the issue like any other CI failure — it is not a rebase
+  problem, so the "Fixing it" section below (rerere, `ci/rerere-cache/`)
+  does not apply.
+
+Both shapes open or update the **same** single issue labelled
+`sync-upstream-blocked` — the Actions tab alone went unwatched for a 12-day
+failure streak (2026-07-22 to 2026-08-02) before anyone noticed, so the
+workflow now self-announces. The red-CI notice auto-closes on the next sync
+whose watch confirms a green CI gate; the blocked-sync notice auto-closes on
+the next successful sync. The workflow does not attempt to resolve either
+shape itself (see the "Fixing it" section below for the rebase-conflict
+case — this is still a one-time human step, deliberately: auto-resolving a
+semantic conflict is how the fork previously lost real hunks silently).
+
+## Reading a failure
+
+Open the failed run (linked from the `sync-upstream-blocked` issue, or via
+`gh run list --repo obelisk-complex/hermes-agent --workflow=sync-upstream.yml`).
+There is **no per-path NEW/STALE job-summary diagnosis today** — a prior
+version of this doc described one; nothing in `sync-upstream.yml` writes it.
+What's actually there to read:
+
+- **"Rebase custom commits onto upstream"** step log: git's own rebase output
+  names the conflicting path(s) directly. A conflict with no recorded
+  resolution ends in `::error::Upstream rebase hit an UNKNOWN conflict...`
+  (generic — the path is in the git output just above it, not in this line).
+- **"Validate rebased tree (pre-push gate)"** step log: a `py_compile` failure
+  names the exact file with conflict markers left in it.
+- **"Find fork-local test files"** / **"Run fork-local tests against the
+  rebased tree"** step logs: a fork-owned test broke under an upstream
+  refactor the rebase replayed cleanly (git sees no conflict — the breakage
+  is semantic, not textual). The pytest output names the failing test.
+- **"Verify uv.lock against the rebased tree"** / **"ruff check the rebased
+  tree"** step logs: the rebase replayed a lock pin or introduced a lint
+  violation that upstream's own `pyproject.toml`/style changes now disagree
+  with.
+- Either failure opens/updates the `sync-upstream-blocked` issue (see above),
+  but today that issue links to the run rather than embedding the path — you
+  still have to open the log.
+
+Whether git classifies a conflict as brand-new vs a previously-recorded
+resolution that no longer applies cleanly (a real distinction — see `git
+rerere status` / `MERGE_RR`) is not surfaced anywhere the workflow writes to.
+If this keeps costing real triage time, teaching the rebase step to capture
+`git diff --name-only --diff-filter=U` and put it in the `::error::` line and
+the issue body is a contained follow-up — flagging it, not doing it here.
+
+## Fixing it (reproduce, resolve, PROVE, seed, dispatch)
+
+1. **Reproduce in an isolated clone.** Use a fresh `git clone` of the fork URL,
+   not a worktree: linked worktrees share `.git/rr-cache` with the parent, which
+   would invalidate the proof.
+   ```sh
+   git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-proof
+   cd /tmp/sync-proof
+   git remote add upstream https://github.com/NousResearch/hermes-agent.git
+   git fetch upstream main
+   mkdir -p .git/rr-cache && cp -R ci/rerere-cache/. .git/rr-cache/
+   git config rerere.enabled true && git config rerere.autoupdate true
+   git config user.email "265670482+obelisk-complex@users.noreply.github.com"
+   git config user.name "obelisk-complex"
+   git rebase upstream/main      # stops at the unresolved conflict
+   ```
+2. **Resolve once, as a union where the change is additive.** When upstream and
+   the fork inserted independent lines at the same spot, keep BOTH (upstream's
+   block first, to match upstream's hunk order). Then `git add <file>` and drive
+   `GIT_EDITOR=true git rebase --continue` to completion. With
+   `rerere.autoupdate`, the resolution is recorded automatically.
+3. **Capture the new entry.** The new `rr-cache/<hash>/` now has a `postimage`.
+   Copy `preimage` + `postimage` into `ci/rerere-cache/<hash>/`.
+4. **PROVE the replay from a clean clone** seeded ONLY from the committed
+   `ci/rerere-cache` (now including the new entry). A second fresh clone must
+   rebase onto `upstream/main` and complete with zero unmerged paths and zero
+   manual edits. If it stops, the committed seed is insufficient: capture the
+   missing resolution and repeat. This proof is mandatory: a preimage hash is
+   context-free (always found) but a postimage is applied as a fuzzy patch, so a
+   resolution can be found yet fail to apply.
+5. **Run the pre-push gate locally** on the rebased tree:
+   ```sh
+   export PYTHONPATH="$PWD"
+   python3 -m py_compile hermes_cli/main.py hermes_cli/plugins.py \
+     hermes_cli/kanban_db.py agent/conversation_loop.py tools/delegate_tool.py
+
+   # Fork-local test files: anything under tests/ that exists in the
+   # rebased tree but not in upstream/main — upstream will never fix these
+   # for you, so they need to actually run against the rebased tree.
+   FORK_TESTS=$(comm -23 <(git ls-tree -r --name-only HEAD -- tests | sort) \
+                         <(git ls-tree -r --name-only upstream/main -- tests | sort) | paste -sd:)
+   scripts/run_tests.sh --files "$FORK_TESTS"
+
+   uv lock --check
+   ruff check .
+   ```
+6. **Commit the seed and sync.** Commit `ci/rerere-cache/<hash>/` to `origin/main`
+   (an additive, fork-only change), then dispatch the workflow and watch it go
+   green:
+   ```sh
+   gh workflow run sync-upstream.yml --repo obelisk-complex/hermes-agent
+   ```
+   Record the pre-sync `origin/main` SHA first; if a run ever force-pushes a bad
+   tree, roll back with `git push --force origin <pre-sync-sha>:main`.
+
+## Durability: commit every runtime resolution within 7 days
+
+If a sync resolves a conflict at runtime that is not in the committed
+`ci/rerere-cache`, **the workflow does not warn you** — a prior version of
+this doc claimed it emits a warning; it doesn't. The only place the new
+resolution lives is the `actions/cache/save` entry keyed
+`rerere-cache-${{ github.run_id }}`, which the Actions cache backend evicts
+after 7 days of no matching restore. An uncommitted runtime resolution is
+silently lost once that happens, and the same conflict re-fails cold later
+looking like a brand-new one. There is currently no signal telling you this
+happened — treat *any* green sync that followed a red one as a prompt to
+check whether `.git/rr-cache` in that run grew an entry not yet in
+`ci/rerere-cache/`, and commit it (steps above) before the cache window
+closes.
+
+## Notes
+
+- **`MERGE_RR` location.** In CI (a plain checkout) it is `.git/MERGE_RR`. In a
+  linked worktree it is `.git/worktrees/<name>/MERGE_RR` (use
+  `git rev-parse --git-path MERGE_RR`).
+- **Long-term simplification.** Squashing the fork's customisation into a single
+  rolling-patch commit reduces the rerere surface to at most one conflict-context
+  per upstream change and removes the multi-step replay loop. It is the standard
+  exit ramp for a long-lived fork if maintaining many per-conflict entries
+  becomes the bottleneck.
