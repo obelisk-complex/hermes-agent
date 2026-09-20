@@ -178,7 +178,7 @@ the issue body is a contained follow-up — flagging it, not doing it here.
 `GITHUB_TOKEN` cannot push commits touching `.github/workflows/`, on any
 branch — a hard GitHub-side restriction, not something a `permissions:`
 grant can lift. Since the `SYNC_PAT` fine-grained PAT that used to cover
-this is retired, a rebase pulling in an upstream workflow-file change stops
+this is retired, a merge pulling in an upstream workflow-file change stops
 at the "Check for workflow-file changes" step with the changed paths in the
 log, `origin/main` untouched. To land it:
 
@@ -203,7 +203,7 @@ keep permanent. Confirm the repo's branch settings actually expose the
 merge-commit option before relying on this.
 
 Re-dispatch `sync-upstream.yml`
-afterwards; with the workflow files already current, that rebase step is a
+afterwards; with the workflow files already current, that merge step is a
 no-op and the rest of the sync proceeds as usual.
 
 ## Durability: commit an unpushed runtime resolution within 7 days
