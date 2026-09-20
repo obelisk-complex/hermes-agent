@@ -14,9 +14,14 @@ sync-upstream.yml --repo obelisk-complex/hermes-agent`). Each run:
 1. Checks out `origin/main`, adds `upstream`, fetches `upstream/main`.
 2. Seeds `git rerere` from the committed `ci/rerere-cache/` (each `<hash>/`
    holds the `preimage` + `postimage` of one resolved conflict).
-3. Rebases the fork's custom commits onto `upstream/main`. Recorded resolutions
-   auto-replay; the loop drives `git rebase --continue` through each
-   auto-resolved step.
+3. Merges `upstream/main` into fork `main` (single-shot — merge pauses at
+   most once, never per-commit the way rebase did). Recorded rerere
+   resolutions auto-stage; if any path is still unmerged after that, it's
+   a genuinely new conflict and the run aborts for a human. A whole-tree
+   conflict-marker scan runs immediately after (catches a marker outside
+   the four `py_compile`'d files — `uv.lock`, `.ts`, `.json`, `.md`, etc),
+   and every file the merge touched is written to the run's job summary
+   for review, even on a green run.
 4. **Pre-push gate:** `py_compile`s the import-critical files, runs every
    fork-local test file (found by diffing the rebased tree's `tests/` against
    `upstream/main`'s — not a hand-maintained list), and checks `uv lock
@@ -126,22 +131,23 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    git config rerere.enabled true && git config rerere.autoupdate true
    git config user.email "265670482+obelisk-complex@users.noreply.github.com"
    git config user.name "obelisk-complex"
-   git rebase upstream/main      # stops at the unresolved conflict
+   git merge upstream/main      # stops at the unresolved conflict
    ```
 2. **Resolve once, as a union where the change is additive.** When upstream and
    the fork inserted independent lines at the same spot, keep BOTH (upstream's
-   block first, to match upstream's hunk order). Then `git add <file>` and drive
-   `GIT_EDITOR=true git rebase --continue` to completion. With
+   block first, to match upstream's hunk order). Then `git add <file>` and run
+   `git commit --no-edit` once all conflicts are resolved and staged. With
    `rerere.autoupdate`, the resolution is recorded automatically.
 3. **Capture the new entry.** The new `rr-cache/<hash>/` now has a `postimage`.
    Copy `preimage` + `postimage` into `ci/rerere-cache/<hash>/`.
-4. **PROVE the replay from a clean clone** seeded ONLY from the committed
-   `ci/rerere-cache` (now including the new entry). A second fresh clone must
-   rebase onto `upstream/main` and complete with zero unmerged paths and zero
-   manual edits. If it stops, the committed seed is insufficient: capture the
-   missing resolution and repeat. This proof is mandatory: a preimage hash is
-   context-free (always found) but a postimage is applied as a fuzzy patch, so a
-   resolution can be found yet fail to apply.
+4. **(Optional, but builds confidence before landing a new cache entry.)**
+   Prove the resolution replays from a clean clone seeded only from the
+   committed `ci/rerere-cache`. Under the old rebase model this was
+   mandatory — a resolution had to replay identically forever. Under
+   merge, a resolution is committed once as part of the merge commit and
+   never needs replaying again, so this step is now a confidence check,
+   not a required gate. Still worth doing when you're not sure the
+   resolution generalizes.
 5. **Run the pre-push gate locally** on the rebased tree:
    ```sh
    export PYTHONPATH="$PWD"
@@ -151,8 +157,8 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    # Fork-local test files: anything under tests/ that exists in the
    # rebased tree but not in upstream/main — upstream will never fix these
    # for you, so they need to actually run against the rebased tree.
-   FORK_TESTS=$(comm -23 <(git ls-tree -r --name-only HEAD -- tests | sort) \
-                         <(git ls-tree -r --name-only upstream/main -- tests | sort) | paste -sd:)
+   FORK_TESTS=$(git diff --name-only --diff-filter=d upstream/main HEAD -- tests \
+     | grep -E '\.py$' | paste -sd:)
    scripts/run_tests.sh --files "$FORK_TESTS"
 
    uv lock --check
@@ -182,30 +188,39 @@ cd /tmp/sync-workflow-push  # no-tmp: ok — same manual clone
 git remote add upstream https://github.com/NousResearch/hermes-agent.git
 git fetch upstream main
 git checkout -b sync/workflow-files
-git rebase upstream/main   # same rebase the workflow attempted; resolve any conflict as in step 2 above
+git merge upstream/main   # same merge the workflow attempted; resolve any conflict as in step 2 above
 git push -u origin sync/workflow-files   # your own push credentials — not GITHUB_TOKEN
 ```
 
 Open a PR from `sync/workflow-files` and merge it normally (a human merging
 through the web UI is unaffected by the `GITHUB_TOKEN` restriction — it only
-applies to token-authored `git push`). Re-dispatch `sync-upstream.yml`
+applies to token-authored `git push`).
+
+**When merging this PR through the GitHub web UI, use "Create a merge
+commit" — never "Squash and merge" or "Rebase and merge".** Either of
+those would rewrite the merge history this whole sync model exists to
+keep permanent. Confirm the repo's branch settings actually expose the
+merge-commit option before relying on this.
+
+Re-dispatch `sync-upstream.yml`
 afterwards; with the workflow files already current, that rebase step is a
 no-op and the rest of the sync proceeds as usual.
 
-## Durability: commit every runtime resolution within 7 days
+## Durability: commit an unpushed runtime resolution within 7 days
 
-If a sync resolves a conflict at runtime that is not in the committed
-`ci/rerere-cache`, **the workflow does not warn you** — a prior version of
-this doc claimed it emits a warning; it doesn't. The only place the new
-resolution lives is the `actions/cache/save` entry keyed
-`rerere-cache-${{ github.run_id }}`, which the Actions cache backend evicts
-after 7 days of no matching restore. An uncommitted runtime resolution is
-silently lost once that happens, and the same conflict re-fails cold later
-looking like a brand-new one. There is currently no signal telling you this
-happened — treat *any* green sync that followed a red one as a prompt to
-check whether `.git/rr-cache` in that run grew an entry not yet in
-`ci/rerere-cache/`, and commit it (steps above) before the cache window
-closes.
+A resolution recorded during a run that successfully **pushed** is
+permanent the moment it lands — it's part of the merge commit on
+`origin/main`, never re-derived, never at risk of being lost. The
+remaining risk is narrower than it was under rebase: a run that
+resolves a conflict at runtime but then **aborts before pushing** (the
+workflow-file guard, `py_compile`, fork-local tests, `uv lock --check`,
+or `ruff` can all still fail after the merge and before the push) only
+has that resolution in the `actions/cache` entry keyed
+`rerere-cache-${{ github.run_id }}`, which the Actions cache backend
+evicts after 7 days of no matching restore. Treat any run that resolved
+conflicts but did not push as a prompt to check whether `.git/rr-cache`
+grew an entry not yet in `ci/rerere-cache/`, and commit it (see "Fixing
+it" above) before that window closes.
 
 ## Notes
 
