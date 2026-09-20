@@ -117,6 +117,49 @@ jobs:
             echo "✓ Merge completed using recorded rerere resolution(s)."
           fi
 
+      # Under the old rebase model, a bad rerere.autoupdate auto-resolution
+      # got re-presented and re-tested every single run, so it had many
+      # chances to be caught. Under merge, a resolution is committed once,
+      # permanently. py_compile below only catches markers in four
+      # import-critical Python files; this scans the whole tree (uv.lock,
+      # .ts, .json, .md, anywhere) and reports every file the merge actually
+      # touched to $GITHUB_STEP_SUMMARY unconditionally, so a human reviewing
+      # an otherwise-green run still sees what rerere did.
+      #
+      # Excludes: ci/rerere-cache/ — git rerere's own on-disk format stores
+      # the ORIGINAL conflicted hunk (real markers included) as the
+      # "preimage" signature it matches future conflicts against; this repo
+      # commits that cache, so those markers are permanent, by-design tree
+      # content, not survived damage. tests/tools/test_mcp_oauth_metadata.py
+      # — an unrelated docstring section-header underline happens to be
+      # exactly 7 `=` characters, coincidentally matching the marker regex.
+      - name: Scan merged tree for conflict markers, report rerere activity
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          markers=$(git grep -nE '^(<{7}|={7}|>{7})( |$)' HEAD -- . ':!ci/rerere-cache' ':!tests/tools/test_mcp_oauth_metadata.py' || true)
+          if [ -n "$markers" ]; then
+            echo "::error::Conflict markers survived in the merged tree — a resolution left markers in a file this gate doesn't otherwise parse-check (uv.lock, .ts, .json, .md, etc). origin/main left untouched."
+            echo "$markers"
+            exit 1
+          fi
+
+          resolved=$(git diff --name-only HEAD^1 HEAD^2 2>/dev/null | while read -r f; do
+            git diff HEAD^1..HEAD -- "$f" | grep -q . && echo "$f"
+          done || true)
+
+          {
+            echo "### Sync Upstream merge report"
+            echo ""
+            if [ -n "$resolved" ]; then
+              echo "Files touched by this merge (review, especially any rerere-auto-resolved conflict):"
+              echo '```'
+              echo "$resolved"
+              echo '```'
+            else
+              echo "Clean merge, no conflicts."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # GITHUB_TOKEN cannot push commits touching .github/workflows/, on ANY
       # branch — a hard GitHub-side restriction, unrelated to the permissions:
       # block above. With SYNC_PAT retired, a merge that pulls in an upstream
