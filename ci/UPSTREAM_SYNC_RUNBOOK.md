@@ -7,8 +7,9 @@ consumer hard-resets to it, so a broken sync must never reach it.
 
 ## How the sync works
 
-`.github/workflows/sync-upstream.yml` runs daily (11:00 UTC) and on manual
-dispatch. Each run:
+`.github/workflows/sync-upstream.yml` runs on manual dispatch only (the
+nightly 11:00 UTC cron was dropped 2026-09-14 — `gh workflow run
+sync-upstream.yml --repo obelisk-complex/hermes-agent`). Each run:
 
 1. Checks out `origin/main`, adds `upstream`, fetches `upstream/main`.
 2. Seeds `git rerere` from the committed `ci/rerere-cache/` (each `<hash>/`
@@ -21,12 +22,21 @@ dispatch. Each run:
    `upstream/main`'s — not a hand-maintained list), and checks `uv lock
    --check` + `ruff check .`. The force-push happens only if all of this
    passes, so a broken rebase never lands on `origin/main`.
-5. Force-pushes the validated, rebased tree to `origin/main`.
-6. **Post-push CI watch (advisory):** the push above is `SYNC_PAT`-authored,
-   which triggers a full `ci.yaml` run on `main` within ~1s. The sync job
-   watches that run's `All required checks pass` job (up to 45 min) and —
-   if it doesn't go green — reports it through the tracking issue, but the
-   **sync itself stays green**. The sync's job is to rebase the fork's
+5. Force-pushes the validated, rebased tree to `origin/main`, authored by
+   `GITHUB_TOKEN` (the `SYNC_PAT` fine-grained PAT this used to run as is
+   retired — dead 2026-08-30, revoked). If the rebase touched anything under
+   `.github/workflows/`, step 5 never happens: `GITHUB_TOKEN` cannot push
+   those paths on any branch (a hard GitHub-side restriction, not a
+   `permissions:` gap), so a guard between steps 4 and 5 fails loud instead
+   and leaves `origin/main` untouched — see "Fixing it" below for the
+   manual-push procedure that case needs.
+6. **Post-push CI watch (advisory):** `GITHUB_TOKEN`-authored pushes
+   deliberately do not trigger downstream workflow runs (recursion guard),
+   so this step explicitly dispatches `ci.yaml` on `main` (`gh workflow run
+   ci.yaml --ref main`) right after the push, then watches that run's `All
+   required checks pass` job (up to 45 min) and — if it doesn't go green —
+   reports it through the tracking issue, but the **sync itself stays
+   green**. The sync's job is to rebase the fork's
    customisation onto upstream latest and push it; it does NOT gate on the
    health of upstream's suite (a red upstream or a runner-label problem —
    e.g. the 2026-08-22 larger-runner streak, which a personal account
@@ -40,7 +50,11 @@ text tells you which one you're looking at:
 - **Rebase or pre-push gate failed → `origin/main` was NOT updated, sync
   RED.** A conflict with no recorded resolution, or a pre-push check
   failure, aborts the job before the push. This is the failure most of this
-  doc is about.
+  doc is about. A rebase that touches `.github/workflows/` is one specific
+  case of this: `GITHUB_TOKEN` cannot push those paths, so the "Check for
+  workflow-file changes" step aborts before even reaching the pre-push gate
+  — see "Manual push for workflow-file changes" below, not the rerere
+  procedure.
 - **Post-push CI watch reported red → `origin/main` WAS updated, sync still
   GREEN.** The rebase and pre-push gate both passed, the push happened, and
   the full `ci.yaml` run on that pushed SHA didn't come back green (or never
@@ -152,6 +166,31 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    ```
    Record the pre-sync `origin/main` SHA first; if a run ever force-pushes a bad
    tree, roll back with `git push --force origin <pre-sync-sha>:main`.
+
+## Manual push for workflow-file changes
+
+`GITHUB_TOKEN` cannot push commits touching `.github/workflows/`, on any
+branch — a hard GitHub-side restriction, not something a `permissions:`
+grant can lift. Since the `SYNC_PAT` fine-grained PAT that used to cover
+this is retired, a rebase pulling in an upstream workflow-file change stops
+at the "Check for workflow-file changes" step with the changed paths in the
+log, `origin/main` untouched. To land it:
+
+```sh
+git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-workflow-push
+cd /tmp/sync-workflow-push
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+git fetch upstream main
+git checkout -b sync/workflow-files
+git rebase upstream/main   # same rebase the workflow attempted; resolve any conflict as in step 2 above
+git push -u origin sync/workflow-files   # your own push credentials — not GITHUB_TOKEN
+```
+
+Open a PR from `sync/workflow-files` and merge it normally (a human merging
+through the web UI is unaffected by the `GITHUB_TOKEN` restriction — it only
+applies to token-authored `git push`). Re-dispatch `sync-upstream.yml`
+afterwards; with the workflow files already current, that rebase step is a
+no-op and the rest of the sync proceeds as usual.
 
 ## Durability: commit every runtime resolution within 7 days
 

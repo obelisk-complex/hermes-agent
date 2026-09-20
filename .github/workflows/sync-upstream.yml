@@ -6,10 +6,12 @@ on:
 permissions:
   contents: write
   issues: write
-  # Read the Actions API to poll the post-push CI run on main. An explicit
-  # `permissions:` block sets every unlisted scope to `none`, so without this
-  # line GITHUB_TOKEN gets 403 on /actions/runs even though the repo is public.
-  actions: read
+  # `write` (not `read`): this job now explicitly workflow_dispatches ci.yaml
+  # after the push (GITHUB_TOKEN-authored pushes don't auto-trigger it — see
+  # "Watch post-push CI on main" below) and polls the Actions API for that run.
+  # An explicit `permissions:` block sets every unlisted scope to `none`, so
+  # without this line GITHUB_TOKEN gets 403 on /actions/* even on a public repo.
+  actions: write
 
 # Never let two manual dispatches race the force-push to main.
 concurrency:
@@ -28,31 +30,20 @@ jobs:
         with:
           fetch-depth: 0         # full history needed for rebase
           ref: main
-          # SYNC_PAT = fine-grained PAT with Contents + Workflows write. Required
-          # because the default GITHUB_TOKEN may NOT push changes under
-          # .github/workflows/, so the sync fails whenever upstream touches a
-          # workflow file. Falls back to GITHUB_TOKEN if the secret is unset
-          # (sync then still fails on upstream workflow changes, as before).
-          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN only — the SYNC_PAT fine-grained PAT (Contents +
+          # Workflows write) this used to fall back from is retired (dead
+          # 2026-08-30 onward, revoked). GITHUB_TOKEN cannot push changes under
+          # .github/workflows/ even with contents: write (a hard GitHub-side
+          # restriction, not a permissions: gap) — the "workflow-file changed"
+          # guard below turns that into a loud, expected failure instead of a
+          # silent push rejection.
+          token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
       - name: Add upstream remote and fetch
         run: |
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch upstream main --quiet
-
-      # GITHUB_TOKEN-authored pushes deliberately do NOT trigger workflows
-      # (recursion guard). The checkout above falls back to GITHUB_TOKEN when
-      # SYNC_PAT is unset, in which case the push to main creates no CI run at
-      # all and the post-push watch below has nothing to watch. Say so up
-      # front instead of letting it read as "CI never started".
-      - name: Assert SYNC_PAT is present
-        env:
-          HAS_PAT: ${{ secrets.SYNC_PAT != '' }}
-        run: |
-          if [ "$HAS_PAT" != "true" ]; then
-            echo "::warning::SYNC_PAT is unset — the push to main will be GITHUB_TOKEN-authored and will NOT trigger ci.yaml. The post-push CI gate will report 'no CI run appeared'."
-          fi
 
       # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
       # conflict resolved once (here or in a manual rebase) auto-replays on the single
@@ -145,6 +136,25 @@ jobs:
               fi
             done
             echo "✓ Rebase completed using recorded rerere resolution(s)."
+          fi
+
+      # GITHUB_TOKEN cannot push commits touching .github/workflows/, on ANY
+      # branch — a hard GitHub-side restriction, unrelated to the permissions:
+      # block above. With SYNC_PAT retired, a rebase that pulls in an upstream
+      # workflow-file change would otherwise reach "Push validated rebase" and
+      # fail there with an opaque permission error. Catch it here, before
+      # spending the rest of the pre-push gate on a push that can't land, and
+      # fail through the same "Notify sync failure" tracking-issue path as any
+      # other pre-push abort (origin/main left untouched either way).
+      - name: Check for workflow-file changes (GITHUB_TOKEN push guard)
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          changed=$(git diff --name-only origin/main HEAD -- .github/workflows/)
+          if [ -n "$changed" ]; then
+            echo "Changed workflow file(s):"
+            echo "$changed"
+            echo "::error::Rebase touches .github/workflows/ — GITHUB_TOKEN cannot push these paths (SYNC_PAT is retired). origin/main left untouched. Apply manually with your own push credentials: checkout this rebase output, 'git diff origin/main HEAD -- .github/workflows/' onto a branch, push with a personal token, and land it — then re-dispatch this workflow."
+            exit 1
           fi
 
       - name: Validate rebased tree (pre-push gate)
@@ -263,14 +273,27 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
 
+      # GITHUB_TOKEN-authored pushes deliberately do NOT trigger downstream
+      # workflow runs (recursion guard) — the SYNC_PAT push this used to rely
+      # on for that is retired, so ci.yaml on main no longer starts itself.
+      # Dispatch it explicitly instead (workflow_dispatch is an intentional
+      # API call, not a GITHUB_TOKEN-authored event, so the recursion guard
+      # does not apply to it). Requires ci.yaml to accept workflow_dispatch
+      # and the job's `actions: write` permission above.
+      - name: Dispatch CI on main (post-push)
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: gh workflow run ci.yaml --repo "$REPO" --ref main
+
       # ── Post-push CI watch (ADVISORY) ────────────────────────────────────
       # The pre-push gate above is fast and cheap but structurally partial: it
       # runs fork-local tests + a lockfile/lint check, in one job, on one
       # Python version. It cannot see upstream-owned tests, the JS/TS matrix,
       # the docs site, or the main-only jobs (e.g. tests.yml's save-durations,
-      # which is what actually broke main on 2026-08-07). The SYNC_PAT push
-      # above already creates a full ci.yaml run on main within ~1s (measured
-      # against runs 31103795631, 31007893479, 30912081013).
+      # which is what actually broke main on 2026-08-07). The explicit
+      # dispatch above creates the full ci.yaml run this step watches.
       #
       # The sync's job is to rebase the fork's customisation onto upstream
       # latest and push it; it is NOT to gate on the health of upstream's
@@ -314,20 +337,24 @@ jobs:
 
           # ── 1. Find OUR run, by head SHA ─────────────────────────────────
           # Query ci.yaml's runs directly: tests.yml is workflow_call-only and
-          # has no runs of its own. head_sha + event=push + head_branch=main
-          # is an exact match; newest by run_started_at handles the (benign)
-          # case of a manual re-dispatch racing us.
+          # has no runs of its own. event=workflow_dispatch matches the
+          # explicit dispatch above (not a push — GITHUB_TOKEN pushes create
+          # no run at all now). A workflow_dispatch run's head_sha is main's
+          # tip at dispatch time, which is our just-pushed SHA unless
+          # something else pushed to main in the same instant; newest by
+          # run_started_at handles the (benign) case of a manual re-dispatch
+          # racing us.
           run_id=""
           appear_deadline=$(( $(date +%s) + APPEAR_SECONDS ))
           while : ; do
             run_id=$(gh api \
-              "repos/$REPO/actions/workflows/ci.yaml/runs?head_sha=$HEAD_SHA&event=push&per_page=100" \
+              "repos/$REPO/actions/workflows/ci.yaml/runs?head_sha=$HEAD_SHA&event=workflow_dispatch&per_page=100" \
               --jq '[.workflow_runs[] | select(.head_branch=="main")]
                     | sort_by(.run_started_at) | last | .id // empty' 2>/dev/null || true)
             [ -n "$run_id" ] && break
             if [ "$(date +%s)" -ge "$appear_deadline" ]; then
               echo "reason=no-run" >> "$GITHUB_OUTPUT"
-              echo "::warning::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either SYNC_PAT is unset (GITHUB_TOKEN pushes do not trigger workflows) or ci.yaml's push-branch allowlist no longer includes main. origin/main HAS been updated and is UNVALIDATED — see the tracking issue."
+              echo "::warning::No ci.yaml run appeared for main@$HEAD_SHA within $((APPEAR_SECONDS/60))m. Either the 'Dispatch CI on main' step's \`gh workflow run\` call failed, or ci.yaml no longer accepts workflow_dispatch. origin/main HAS been updated and is UNVALIDATED — see the tracking issue."
               exit 0
             fi
             sleep "$POLL_SECONDS"
@@ -485,7 +512,7 @@ jobs:
           case "$REASON" in
             ci-red)     detail="\`All required checks pass\` concluded RED on \`main@$PUSHED_SHA\`. Failing jobs: $CI_RUN_URL" ;;
             ci-timeout) detail="\`All required checks pass\` did not conclude within 45 minutes on \`main@$PUSHED_SHA\` — the run is HUNG, not failed. Inspect and cancel/re-run: $CI_RUN_URL" ;;
-            no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either \`SYNC_PAT\` is unset (GITHUB_TOKEN-authored pushes do not trigger workflows) or \`ci.yaml\`'s \`push: branches:\` allowlist no longer matches \`main\`. **The post-push CI watch is silently non-functional — fix this first.**" ;;
+            no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either the 'Dispatch CI on main' step's \`gh workflow run\` call failed, or \`ci.yaml\` no longer accepts \`workflow_dispatch\`. **The post-push CI watch is silently non-functional — fix this first.**" ;;
             *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
           esac
           body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED, and the sync itself is green.**
