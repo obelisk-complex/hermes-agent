@@ -3,7 +3,8 @@
 How the nightly `Sync Upstream` workflow keeps this fork current with
 `NousResearch/hermes-agent`, how to read a failure, and how to fix one so it
 never recurs. The trunk is the **remote** `origin/main`; every `hermes update`
-consumer hard-resets to it, so a broken sync must never reach it.
+consumer fast-forwards to it (falling back to a hard reset only if it has
+diverged), so a broken sync must never reach it.
 
 ## How the sync works
 
@@ -23,13 +24,16 @@ sync-upstream.yml --repo obelisk-complex/hermes-agent`). Each run:
    and every file the merge touched is written to the run's job summary
    for review, even on a green run.
 4. **Pre-push gate:** `py_compile`s the import-critical files, runs every
-   fork-local test file (found by diffing the rebased tree's `tests/` against
+   fork-local test file (found by diffing the merged tree's `tests/` against
    `upstream/main`'s — not a hand-maintained list), and checks `uv lock
-   --check` + `ruff check .`. The force-push happens only if all of this
-   passes, so a broken rebase never lands on `origin/main`.
-5. Force-pushes the validated, rebased tree to `origin/main`, authored by
-   `GITHUB_TOKEN` (the `SYNC_PAT` fine-grained PAT this used to run as is
-   retired — dead 2026-08-30, revoked). If the rebase touched anything under
+   --check` + `ruff check .`. The push happens only if all of this passes,
+   so a broken merge never lands on `origin/main`.
+5. **Plain (non-force) pushes** the validated, merged tree to `origin/main`,
+   authored by `GITHUB_TOKEN` (the `SYNC_PAT` fine-grained PAT this used to
+   run as is retired — dead 2026-08-30, revoked). Because the push is a
+   plain fast-forward, a rejection here means something else moved `main`
+   concurrently (a human push or another dispatch) — NOT a bad merge; see
+   the "push rejected" shape below. If the merge touched anything under
    `.github/workflows/`, step 5 never happens: `GITHUB_TOKEN` cannot push
    those paths on any branch (a hard GitHub-side restriction, not a
    `permissions:` gap), so a guard between steps 4 and 5 fails loud instead
@@ -41,7 +45,7 @@ sync-upstream.yml --repo obelisk-complex/hermes-agent`). Each run:
    ci.yaml --ref main`) right after the push, then watches that run's `All
    required checks pass` job (up to 45 min) and — if it doesn't go green —
    reports it through the tracking issue, but the **sync itself stays
-   green**. The sync's job is to rebase the fork's
+   green**. The sync's job is to merge the fork's
    customisation onto upstream latest and push it; it does NOT gate on the
    health of upstream's suite (a red upstream or a runner-label problem —
    e.g. the 2026-08-22 larger-runner streak, which a personal account
@@ -49,40 +53,47 @@ sync-upstream.yml --repo obelisk-complex/hermes-agent`). Each run:
    the watch guarantees is that a red `main` is *announced* within minutes
    instead of sitting unnoticed.
 
-There are now **two distinct failure/notice shapes**, and the tracking issue
-text tells you which one you're looking at:
+There are now **three distinct failure/notice shapes**, and the tracking
+issue text tells you which one you're looking at:
 
-- **Rebase or pre-push gate failed → `origin/main` was NOT updated, sync
+- **Merge or pre-push gate failed → `origin/main` was NOT updated, sync
   RED.** A conflict with no recorded resolution, or a pre-push check
   failure, aborts the job before the push. This is the failure most of this
-  doc is about. A rebase that touches `.github/workflows/` is one specific
+  doc is about. A merge that touches `.github/workflows/` is one specific
   case of this: `GITHUB_TOKEN` cannot push those paths, so the "Check for
   workflow-file changes" step aborts before even reaching the pre-push gate
   — see "Manual push for workflow-file changes" below, not the rerere
   procedure.
+- **Push rejected → `origin/main` was NOT updated, sync RED, but this is
+  NOT a merge conflict.** The merge and pre-push gate both PASSED, but the
+  plain push to `origin/main` was rejected because something else moved
+  `main` after the run started (a concurrent human push or another
+  dispatch). Do not run the rerere resolve procedure — just re-dispatch the
+  workflow.
 - **Post-push CI watch reported red → `origin/main` WAS updated, sync still
-  GREEN.** The rebase and pre-push gate both passed, the push happened, and
+  GREEN.** The merge and pre-push gate both passed, the push happened, and
   the full `ci.yaml` run on that pushed SHA didn't come back green (or never
   appeared, or hung past 45 min — the issue body names which). `origin/main`
-  is live and every `hermes update` consumer hard-resets to it. The sync is
-  fine; decide whether the red main needs action. **If the red is a real
-  break, roll back first, investigate second:**
-  `git push --force origin <pre-sync-sha>:main` using the SHA recorded in
-  the sync run's own log (the step before "Push validated rebase" prints
-  `origin/main` before the force-push). Then diagnose the failing `ci.yaml`
-  run linked in the issue like any other CI failure — it is not a rebase
+  is live and every `hermes update` consumer will fast-forward to it. The
+  sync is fine; decide whether the red main needs action. **If the red is a
+  real break, roll back first, investigate second:**
+  `git push --force origin <pre-sync-sha>:main` using the SHA embedded
+  directly in the tracking issue body (also printed inside the "Push merged
+  main" step's own plain log output). Then diagnose the failing `ci.yaml`
+  run linked in the issue like any other CI failure — it is not a merge
   problem, so the "Fixing it" section below (rerere, `ci/rerere-cache/`)
   does not apply.
 
-Both shapes open or update the **same** single issue labelled
+All three shapes open or update the **same** single issue labelled
 `sync-upstream-blocked` — the Actions tab alone went unwatched for a 12-day
 failure streak (2026-07-22 to 2026-08-02) before anyone noticed, so the
 workflow now self-announces. The red-CI notice auto-closes on the next sync
 whose watch confirms a green CI gate; the blocked-sync notice auto-closes on
-the next successful sync. The workflow does not attempt to resolve either
-shape itself (see the "Fixing it" section below for the rebase-conflict
-case — this is still a one-time human step, deliberately: auto-resolving a
-semantic conflict is how the fork previously lost real hunks silently).
+the next successful sync. The workflow does not attempt to resolve the
+merge-conflict shape itself (see the "Fixing it" section below — this is
+still a one-time human step, deliberately: auto-resolving a semantic
+conflict is how the fork previously lost real hunks silently). The
+push-rejected shape needs no resolution at all, just a re-dispatch.
 
 ## Reading a failure
 
@@ -92,20 +103,21 @@ There is **no per-path NEW/STALE job-summary diagnosis today** — a prior
 version of this doc described one; nothing in `sync-upstream.yml` writes it.
 What's actually there to read:
 
-- **"Rebase custom commits onto upstream"** step log: git's own rebase output
+- **"Merge upstream into fork main"** step log: git's own merge output
   names the conflicting path(s) directly. A conflict with no recorded
-  resolution ends in `::error::Upstream rebase hit an UNKNOWN conflict...`
-  (generic — the path is in the git output just above it, not in this line).
-- **"Validate rebased tree (pre-push gate)"** step log: a `py_compile` failure
+  resolution ends in `::error::Upstream merge hit an UNKNOWN conflict (no
+  recorded rerere resolution)...` (generic — the path is in the git output
+  just above it, not in this line).
+- **"Validate merged tree (pre-push gate)"** step log: a `py_compile` failure
   names the exact file with conflict markers left in it.
 - **"Find fork-local test files"** / **"Run fork-local tests against the
-  rebased tree"** step logs: a fork-owned test broke under an upstream
-  refactor the rebase replayed cleanly (git sees no conflict — the breakage
+  merged tree"** step logs: a fork-owned test broke under an upstream
+  refactor the merge replayed cleanly (git sees no conflict — the breakage
   is semantic, not textual). The pytest output names the failing test.
-- **"Verify uv.lock against the rebased tree"** / **"ruff check the rebased
-  tree"** step logs: the rebase replayed a lock pin or introduced a lint
-  violation that upstream's own `pyproject.toml`/style changes now disagree
-  with.
+- **"Verify uv.lock against the merged tree (pre-push gate)"** / **"ruff
+  check the merged tree (pre-push gate)"** step logs: the merge replayed a
+  lock pin or introduced a lint violation that upstream's own
+  `pyproject.toml`/style changes now disagree with.
 - Either failure opens/updates the `sync-upstream-blocked` issue (see above),
   but today that issue links to the run rather than embedding the path — you
   still have to open the log.
@@ -113,7 +125,7 @@ What's actually there to read:
 Whether git classifies a conflict as brand-new vs a previously-recorded
 resolution that no longer applies cleanly (a real distinction — see `git
 rerere status` / `MERGE_RR`) is not surfaced anywhere the workflow writes to.
-If this keeps costing real triage time, teaching the rebase step to capture
+If this keeps costing real triage time, teaching the merge step to capture
 `git diff --name-only --diff-filter=U` and put it in the `::error::` line and
 the issue body is a contained follow-up — flagging it, not doing it here.
 
@@ -148,15 +160,15 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    never needs replaying again, so this step is now a confidence check,
    not a required gate. Still worth doing when you're not sure the
    resolution generalizes.
-5. **Run the pre-push gate locally** on the rebased tree:
+5. **Run the pre-push gate locally** on the merged tree:
    ```sh
    export PYTHONPATH="$PWD"
    python3 -m py_compile hermes_cli/main.py hermes_cli/plugins.py \
      hermes_cli/kanban_db.py agent/conversation_loop.py tools/delegate_tool.py
 
    # Fork-local test files: anything under tests/ that exists in the
-   # rebased tree but not in upstream/main — upstream will never fix these
-   # for you, so they need to actually run against the rebased tree.
+   # merged tree but not in upstream/main — upstream will never fix these
+   # for you, so they need to actually run against the merged tree.
    FORK_TESTS=$(git diff --name-only --diff-filter=d upstream/main HEAD -- tests \
      | grep -E '\.py$' | paste -sd:)
    scripts/run_tests.sh --files "$FORK_TESTS"
@@ -170,7 +182,7 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    ```sh
    gh workflow run sync-upstream.yml --repo obelisk-complex/hermes-agent
    ```
-   Record the pre-sync `origin/main` SHA first; if a run ever force-pushes a bad
+   Record the pre-sync `origin/main` SHA first; if a run ever pushes a bad
    tree, roll back with `git push --force origin <pre-sync-sha>:main`.
 
 ## Manual push for workflow-file changes
@@ -189,6 +201,15 @@ git remote add upstream https://github.com/NousResearch/hermes-agent.git
 git fetch upstream main
 git checkout -b sync/workflow-files
 git merge upstream/main   # same merge the workflow attempted; resolve any conflict as in step 2 above
+```
+
+**Run the pre-push gate locally before opening the PR** — see "Fixing it"
+step 5 above for the exact commands (`py_compile`, fork-local tests, `uv
+lock --check`, `ruff check .`). This PR bypasses every automated check the
+workflow itself applies, and under the merge model whatever lands here is
+permanent history.
+
+```sh
 git push -u origin sync/workflow-files   # your own push credentials — not GITHUB_TOKEN
 ```
 
@@ -227,8 +248,12 @@ it" above) before that window closes.
 - **`MERGE_RR` location.** In CI (a plain checkout) it is `.git/MERGE_RR`. In a
   linked worktree it is `.git/worktrees/<name>/MERGE_RR` (use
   `git rev-parse --git-path MERGE_RR`).
-- **Long-term simplification.** Squashing the fork's customisation into a single
-  rolling-patch commit reduces the rerere surface to at most one conflict-context
-  per upstream change and removes the multi-step replay loop. It is the standard
-  exit ramp for a long-lived fork if maintaining many per-conflict entries
-  becomes the bottleneck.
+- **Long-term simplification.** There is no periodic squashing of the fork's
+  customisation under the merge model — the whole point of moving off rebase
+  is that a conflict resolved once becomes permanent history, and squashing
+  across merge commits would require rewriting that history. The one
+  sanctioned exception is a full, deliberate, ANNOUNCED re-baseline (this
+  fork did one on 2026-08-03), which resets the permanence property on
+  purpose and needs a backup ref plus a re-seeded rerere cache. It may be
+  needed again if upstream absorbs most of the fork's remaining
+  customisation, but it's a deliberate event, not a routine practice.

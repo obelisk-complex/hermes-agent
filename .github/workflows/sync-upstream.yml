@@ -46,9 +46,10 @@ jobs:
           git fetch upstream main --quiet
 
       # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
-      # conflict resolved once (here or in a manual merge) auto-replays on the single
-      # rolling fork-patch commit, and the nightly sync stops re-litigating the same
-      # hunks. Best-effort: a missing/empty cache just means "no recorded resolutions
+      # conflict resolved once (here or in a manual merge) is permanent under the
+      # merge model and never needs re-litigating. Cadence is currently manual
+      # dispatch only (a later, separate piece of work may re-add a schedule).
+      # Best-effort: a missing/empty cache just means "no recorded resolutions
       # yet".
       - name: Restore rerere resolution cache
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -95,7 +96,14 @@ jobs:
         id: fork-tests-before
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
-          mapfile -t files < <(git diff --name-only --diff-filter=d upstream/main origin/main -- tests \
+          # The "after" comparison (below, in "Find fork-local test files")
+          # diffs against upstream/main HEAD post-merge, so the "before"
+          # baseline must be the merge-base, not upstream/main HEAD pre-merge
+          # — otherwise upstream's own new commits inflate this "before" set
+          # by more than the merge could ever add to the "after" set, and
+          # growth can never be detected.
+          MB=$(git merge-base origin/main upstream/main)
+          mapfile -t files < <(git diff --name-only --diff-filter=d "$MB" origin/main -- tests \
             | grep -E '\.py$' | sort)
           echo "before_count=${#files[@]}" >> "$GITHUB_OUTPUT"
           IFS=:; echo "before_files=${files[*]}" >> "$GITHUB_OUTPUT"; unset IFS
@@ -105,6 +113,9 @@ jobs:
         env:
           UPSTREAM_AHEAD: ${{ steps.check.outputs.upstream_ahead }}
         run: |
+          # MUST be obelisk-complex's real noreply id, not the old
+          # `obelisk@…` (which is an unrelated user and re-stamps every
+          # custom commit's committer with the wrong author).
           git config user.email "265670482+obelisk-complex@users.noreply.github.com"
           git config user.name "obelisk-complex"
           git config rerere.enabled true
@@ -165,9 +176,13 @@ jobs:
             echo "### Sync Upstream merge report"
             echo ""
             if [ -n "$resolved" ]; then
-              echo "Files touched by this merge (review, especially any rerere-auto-resolved conflict):"
+              total=$(printf '%s\n' "$resolved" | grep -c .)
+              echo "Files touched by this merge (review, especially any rerere-auto-resolved conflict) — $total total:"
               echo '```'
-              echo "$resolved"
+              printf '%s\n' "$resolved" | head -n 50
+              if [ "$total" -gt 50 ]; then
+                echo "... and $((total - 50)) more (see \`git diff HEAD^1..HEAD^2 --name-only\` for the full list)"
+              fi
               echo '```'
             else
               echo "Clean merge, no conflicts."
@@ -247,7 +262,7 @@ jobs:
           # rebase used to. This is exactly the 2026-09-06 silent test-revert
           # shape (tests/cli/test_cli_preloaded_skills.py), just inverted:
           # here the set GROWS instead of a member silently reverting.
-          if [ "${#files[@]}" -gt "$BEFORE_COUNT" ]; then
+          if [ "${#files[@]}" -gt "${BEFORE_COUNT:-0}" ]; then
             new_files=$(comm -13 <(echo "$BEFORE_FILES" | tr ':' '\n' | sort) \
                                   <(printf '%s\n' "${files[@]}" | sort))
             echo "::warning::Fork-owned test set grew from $BEFORE_COUNT to ${#files[@]} file(s) during this merge — a merge resolution may have taken 'ours' over an upstream change to a file the fork hadn't previously customised (this is how the 2026-09-06 silent test-revert happened, inverted). New file(s): $new_files"
@@ -309,7 +324,8 @@ jobs:
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
         # This is the real "CI tests as persistence" gate — it runs BEFORE the
         # push, so a merge that silently breaks a fork-owned test never
-        # reaches origin/main (which every `hermes update` consumer hard-resets to).
+        # reaches origin/main (which every `hermes update` consumer normally
+        # fast-forwards to under the merge model).
         run: |
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ steps.fork-tests.outputs.files }}'
@@ -376,6 +392,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          # Matched by exact head SHA rather than "latest run on main" — a
+          # concurrent human push, a re-run, or a leftover queued run would
+          # otherwise be mistaken for ours.
           HEAD_SHA: ${{ steps.push.outputs.sha }}
           # ci.yaml's aggregate gate — its own comment says branch protection
           # should require only this check, so it's the correct thing to watch.
@@ -477,7 +496,7 @@ jobs:
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${{ github.repository }}" \
-              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) merged, pushed, and the CI gate on \`origin/main\` came back green. Closing."
+              --body "Sync succeeded — ${{ steps.check.outputs.upstream_ahead }} commit(s) merged, pushed, and the CI gate on \`origin/main\` came back green. Closing."
             gh issue close "$existing" --repo "${{ github.repository }}"
             echo "Closed tracking issue #$existing"
           fi
@@ -569,9 +588,10 @@ jobs:
           REASON: ${{ steps.postci.outputs.reason }}
           CI_RUN_URL: ${{ steps.postci.outputs.run_url }}
           PUSHED_SHA: ${{ steps.push.outputs.sha }}
+          PRE_SYNC_SHA: ${{ steps.push.outputs.pre_sync_sha }}
         run: |
           gh label create sync-upstream-blocked --color B60205 \
-            --description "Nightly Sync Upstream merge needs manual conflict resolution" \
+            --description "Sync Upstream needs manual attention" \
             --force >/dev/null 2>&1 || true
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -588,7 +608,7 @@ jobs:
 
           $detail
 
-          \`origin/main\` **has** been updated and every \`hermes update\` consumer hard-resets to it. To roll back, reset \`main\` to the pre-sync SHA recorded in the sync run log per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`. This issue auto-closes on the next sync whose watch confirms a green CI gate.
+          \`origin/main\` **has** been updated and every \`hermes update\` consumer will fast-forward to it (the merge model never force-pushes, so a consumer only hard-resets on divergence, which this run does not create). To roll back: \`git push --force origin $PRE_SYNC_SHA:main\` (the pre-sync SHA — see \`ci/UPSTREAM_SYNC_RUNBOOK.md\`). This issue auto-closes on the next sync whose watch confirms a green CI gate.
 
           Sync run: $run_url"
 
