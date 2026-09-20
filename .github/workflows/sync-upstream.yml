@@ -86,6 +86,20 @@ jobs:
           echo "Upstream ahead by $UPSTREAM_AHEAD commits"
           echo "Fork ahead by $CUSTOM_AHEAD commits (custom)"
 
+      # Captured BEFORE the merge so the "Find fork-local test files" step
+      # below can detect a fork-owned test set that GREW during the merge —
+      # the signature of a conflict resolved 'ours' over an upstream change to
+      # a file the fork hadn't previously customised. See that step for why
+      # this matters under merge specifically.
+      - name: Capture fork-owned test set before merge
+        id: fork-tests-before
+        if: steps.check.outputs.upstream_ahead != '0'
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=d upstream/main origin/main -- tests \
+            | grep -E '\.py$' | sort)
+          echo "before_count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          IFS=:; echo "before_files=${files[*]}" >> "$GITHUB_OUTPUT"; unset IFS
+
       - name: Merge upstream into fork main
         if: steps.check.outputs.upstream_ahead != '0'
         env:
@@ -196,6 +210,9 @@ jobs:
       - name: Find fork-local test files
         id: fork-tests
         if: steps.check.outputs.upstream_ahead != '0'
+        env:
+          BEFORE_COUNT: ${{ steps.fork-tests-before.outputs.before_count }}
+          BEFORE_FILES: ${{ steps.fork-tests-before.outputs.before_files }}
         run: |
           # Upstream can't update a test file it has never seen. A rebase can
           # replay a fork commit cleanly onto an upstream refactor and still
@@ -222,6 +239,21 @@ jobs:
           printf '  %s\n' "${files[@]}"
           IFS=:; echo "files=${files[*]}" >> "$GITHUB_OUTPUT"; unset IFS
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+
+          # Advisory-only: a merge that resolved a conflict 'ours' over an
+          # upstream change to a file the fork hadn't previously customised
+          # silently joins that file to the fork-owned set — and under merge
+          # that's now permanent, never re-derived and re-presented the way
+          # rebase used to. This is exactly the 2026-09-06 silent test-revert
+          # shape (tests/cli/test_cli_preloaded_skills.py), just inverted:
+          # here the set GROWS instead of a member silently reverting.
+          if [ "${#files[@]}" -gt "$BEFORE_COUNT" ]; then
+            new_files=$(comm -13 <(echo "$BEFORE_FILES" | tr ':' '\n' | sort) \
+                                  <(printf '%s\n' "${files[@]}" | sort))
+            echo "::warning::Fork-owned test set grew from $BEFORE_COUNT to ${#files[@]} file(s) during this merge — a merge resolution may have taken 'ours' over an upstream change to a file the fork hadn't previously customised (this is how the 2026-09-06 silent test-revert happened, inverted). New file(s): $new_files"
+            echo "grew=true" >> "$GITHUB_OUTPUT"
+            echo "grew_files=$new_files" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install uv
         # No longer gated on there being fork-local tests: the lockfile/lint
