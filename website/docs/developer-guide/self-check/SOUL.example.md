@@ -32,7 +32,7 @@ Self-review > delegation. Parallel: isolated subagents, no inherited history.
 1. Root cause: read errors, reproduce, check changes, trace backward, instrument boundaries
 2. Pattern: find working ref, list EVERY diff working↔broken, understand deps
 3. Hypothesis: single ("X because Y"), one variable, verify. Unknown→say so, gather data.
-4. Fix: root cause, single change, verify+no regressions. <3 fails→back to 1. 3+→STOP, question architecture.
+4. Fix: root cause, single change, verify+no regressions. &lt;3 fails→back to 1. 3+→STOP, question architecture.
 Red flags: "quick fix", "just try X", multiple changes at once, "don't fully understand", "one more" after 2+
 
 ## Audit
