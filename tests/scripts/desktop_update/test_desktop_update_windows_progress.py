@@ -144,7 +144,15 @@ def test_progress_advances_while_the_orchestrator_blocks(tmp_path: Path) -> None
         # -- which is what a stalled update looks like to the user.
         assert int(second["elapsed_seconds"]) > int(first["elapsed_seconds"])
 
-        assert process.wait(timeout=60) == 0
+        # process.wait's own budget must clear $hold (60s, see
+        # HOLD_SECONDS above) plus whatever of it already elapsed while
+        # polling for the held stage above, plus PS shutdown overhead --
+        # not just match $hold with no margin. Upstream's 60s wait carries
+        # a 30s margin over its 30s hold; keep that margin when HOLD_SECONDS
+        # doubled to 60 instead of leaving the wait flat (run 35528310483,
+        # Sep 2026: 'timed out after 60 seconds' against a 60s hold that had
+        # already been running for part of the polling window above).
+        assert process.wait(timeout=90) == 0
     finally:
         if process.poll() is None:
             process.kill()
