@@ -33,6 +33,8 @@ import sys
 import time
 from pathlib import Path
 
+from hermes_constants import get_hermes_home
+
 # ── Tier Configuration ──────────────────────────────────────────────────────
 
 TIER_CONFIG = {
@@ -335,7 +337,7 @@ def restore_config(baseline: dict) -> None:
 
 # ── Failure Cache ────────────────────────────────────────────────────────────
 
-CACHE_DIR = Path(os.environ.get("HOME", "/tmp")) / ".hermes/skills/escalation-ladder"
+CACHE_DIR = get_hermes_home() / "skills" / "escalation-ladder"
 CACHE_FILE = CACHE_DIR / "failure_cache.json"
 MAX_ATTEMPTS = 4
 CACHE_TTL = 86400  # 24 hours

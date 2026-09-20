@@ -118,8 +118,8 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    not a worktree: linked worktrees share `.git/rr-cache` with the parent, which
    would invalidate the proof.
    ```sh
-   git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-proof
-   cd /tmp/sync-proof
+   git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-proof  # no-tmp: ok — manual clone in a human's own terminal, not model-executed
+   cd /tmp/sync-proof  # no-tmp: ok — same manual clone
    git remote add upstream https://github.com/NousResearch/hermes-agent.git
    git fetch upstream main
    mkdir -p .git/rr-cache && cp -R ci/rerere-cache/. .git/rr-cache/
@@ -177,8 +177,8 @@ at the "Check for workflow-file changes" step with the changed paths in the
 log, `origin/main` untouched. To land it:
 
 ```sh
-git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-workflow-push
-cd /tmp/sync-workflow-push
+git clone https://github.com/obelisk-complex/hermes-agent.git /tmp/sync-workflow-push  # no-tmp: ok — manual clone in a human's own terminal, not model-executed
+cd /tmp/sync-workflow-push  # no-tmp: ok — same manual clone
 git remote add upstream https://github.com/NousResearch/hermes-agent.git
 git fetch upstream main
 git checkout -b sync/workflow-files

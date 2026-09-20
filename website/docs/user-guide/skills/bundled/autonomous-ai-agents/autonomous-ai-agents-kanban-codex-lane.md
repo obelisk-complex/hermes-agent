@@ -75,7 +75,7 @@ REPO="/path/to/repo"
 BASE="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
 SAFE_TASK="$(printf '%s' "$TASK_ID" | tr -cd '[:alnum:]_-')"
 BRANCH="codex/${SAFE_TASK}/$(date -u +%Y%m%d%H%M%S)"
-WORKTREE="/tmp/${SAFE_TASK}-codex-lane"
+WORKTREE="${TMPDIR:-/tmp}/${SAFE_TASK}-codex-lane"
 ```
 
 Create the isolated lane:
@@ -122,7 +122,7 @@ Use `codex exec` for bounded one-shot edits where Codex should exit on its own:
 
 ```python
 terminal(
-    command="codex exec --full-auto '$(cat /tmp/codex_prompt.md)'",
+    command="codex exec --full-auto '$(cat ${TMPDIR:-/tmp}/codex_prompt.md)'",
     workdir=WORKTREE,
     background=True,
     pty=True,
@@ -175,7 +175,7 @@ Start long Codex lanes in the background with PTY and completion notification:
 
 ```python
 result = terminal(
-    command="codex exec --full-auto '$(cat /tmp/codex_prompt.md)'",
+    command="codex exec --full-auto '$(cat ${TMPDIR:-/tmp}/codex_prompt.md)'",
     workdir=WORKTREE,
     background=True,
     pty=True,
