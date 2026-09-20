@@ -170,7 +170,10 @@ def _capture_preloaded_skills(monkeypatch, cli_mod, config_skills, **main_kwargs
     )
     captured: list[list[str]] = []
 
-    def fake_build(skills, task_id=None):
+    def fake_build(skills, task_id=None, excluded_loaded_names=None):
+        # None of these tests set skills.auto_load, so excluded_loaded_names is always
+        # empty — irrelevant to what this helper verifies (the skills.always merge into
+        # parsed_skills). Accepted to match the real build_preloaded_skills_prompt signature.
         captured.append(list(skills))
         return ("skill prompt", list(skills), [])
 
