@@ -21,14 +21,14 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # Rebase + pre-push gate is a few minutes; up to 45 more waiting on the
+    # Merge + pre-push gate is a few minutes; up to 45 more waiting on the
     # post-push CI gate, plus slack.
     timeout-minutes: 60
     steps:
       - name: Checkout fork main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0         # full history needed for rebase
+          fetch-depth: 0         # full history needed for merge
           ref: main
           # GITHUB_TOKEN only — the SYNC_PAT fine-grained PAT (Contents +
           # Workflows write) this used to fall back from is retired (dead
@@ -46,7 +46,7 @@ jobs:
           git fetch upstream main --quiet
 
       # Reuse previously-recorded conflict resolutions (git rerere) across runs so a
-      # conflict resolved once (here or in a manual rebase) auto-replays on the single
+      # conflict resolved once (here or in a manual merge) auto-replays on the single
       # rolling fork-patch commit, and the nightly sync stops re-litigating the same
       # hunks. Best-effort: a missing/empty cache just means "no recorded resolutions
       # yet".
@@ -189,22 +189,22 @@ jobs:
           if [ -n "$changed" ]; then
             echo "Changed workflow file(s):"
             echo "$changed"
-            echo "::error::Rebase touches .github/workflows/ — GITHUB_TOKEN cannot push these paths (SYNC_PAT is retired). origin/main left untouched. Apply manually with your own push credentials: checkout this rebase output, 'git diff origin/main HEAD -- .github/workflows/' onto a branch, push with a personal token, and land it — then re-dispatch this workflow."
+            echo "::error::Merge touches .github/workflows/ — GITHUB_TOKEN cannot push these paths (SYNC_PAT is retired). origin/main left untouched. Apply manually with your own push credentials: checkout this merge output, 'git diff origin/main HEAD -- .github/workflows/' onto a branch, push with a personal token, and land it — then re-dispatch this workflow."
             exit 1
           fi
 
-      - name: Validate rebased tree (pre-push gate)
+      - name: Validate merged tree (pre-push gate)
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
           # The guard tests import the in-repo `agent`/`hermes_cli` packages, so the
           # repo root must be on sys.path. Running `python3 tests/...py` bare puts only
           # the test's own directory on the path -> ModuleNotFoundError: 'agent'.
           export PYTHONPATH="$PWD"
-          # Catch conflict markers / syntax breakage the rebase may have left in
+          # Catch conflict markers / syntax breakage the merge may have left in
           # the import-critical and fork-customised files. Cheap smoke check that
           # runs before the heavier fork-local test pass below.
-          for f in hermes_cli/main.py hermes_cli/plugins.py agent/conversation_loop.py tools/delegate_tool.py; do
-            python3 -m py_compile "$f" || { echo "::error::rebased tree: $f does not compile (conflict markers?)"; exit 1; }
+          for f in hermes_cli/main.py hermes_cli/plugins.py hermes_cli/kanban_db.py agent/conversation_loop.py tools/delegate_tool.py; do
+            python3 -m py_compile "$f" || { echo "::error::merged tree: $f does not compile (conflict markers?)"; exit 1; }
           done
 
       - name: Find fork-local test files
@@ -274,7 +274,7 @@ jobs:
       # under tests/. Mirrors uv-lockfile-check.yml's retry loop: `uv lock
       # --check` re-resolves against PyPI, so a registry blip must not read as
       # "lockfile stale".
-      - name: Verify uv.lock against the rebased tree (pre-push gate)
+      - name: Verify uv.lock against the merged tree (pre-push gate)
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
           ok=false
@@ -285,18 +285,18 @@ jobs:
             sleep 10
           done
           if [ "$ok" != true ]; then
-            echo "::error::rebased tree: uv.lock is out of sync with pyproject.toml. The rebase replayed a lock pin against an upstream dependency change. Resolve per ci/UPSTREAM_SYNC_RUNBOOK.md, run \`uv lock\`, commit the result. origin/main left untouched."
+            echo "::error::merged tree: uv.lock is out of sync with pyproject.toml. The merge replayed a lock pin against an upstream dependency change. Resolve per ci/UPSTREAM_SYNC_RUNBOOK.md, run \`uv lock\`, commit the result. origin/main left untouched."
             exit 1
           fi
 
-      # ci.yml's blocking lint (Python lints / ruff enforcement). A rebase that
+      # ci.yml's blocking lint (Python lints / ruff enforcement). A merge that
       # reintroduces a rule violation upstream just fixed is exactly the
       # semantic-conflict shape this whole gate exists for.
-      - name: ruff check the rebased tree (pre-push gate)
+      - name: ruff check the merged tree (pre-push gate)
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
           uv tool install ruff
-          ruff check . || { echo "::error::rebased tree fails \`ruff check .\` — ci.yml's blocking lint would go red on main. origin/main left untouched."; exit 1; }
+          ruff check . || { echo "::error::merged tree fails \`ruff check .\` — ci.yml's blocking lint would go red on main. origin/main left untouched."; exit 1; }
 
       - name: Install dependencies
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
@@ -305,10 +305,10 @@ jobs:
         # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1).
         run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
 
-      - name: Run fork-local tests against the rebased tree
+      - name: Run fork-local tests against the merged tree
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'
         # This is the real "CI tests as persistence" gate — it runs BEFORE the
-        # push, so a rebase that silently breaks a fork-owned test never
+        # push, so a merge that silently breaks a fork-owned test never
         # reaches origin/main (which every `hermes update` consumer hard-resets to).
         run: |
           source .venv/bin/activate
@@ -353,7 +353,7 @@ jobs:
       # which is what actually broke main on 2026-08-07). The explicit
       # dispatch above creates the full ci.yaml run this step watches.
       #
-      # The sync's job is to rebase the fork's customisation onto upstream
+      # The sync's job is to merge the fork's customisation onto upstream
       # latest and push it; it is NOT to gate on the health of upstream's
       # suite. Upstream runs its own CI, and a red upstream or runner issue
       # (e.g. larger-runner labels a personal account cannot provision,
@@ -477,7 +477,7 @@ jobs:
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "${{ github.repository }}" \
-              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, pushed, and the CI gate on \`origin/main\` came back green. Closing."
+              --body "Sync succeeded — ${{ steps.check.outputs.custom_ahead }} commit(s) merged, pushed, and the CI gate on \`origin/main\` came back green. Closing."
             gh issue close "$existing" --repo "${{ github.repository }}"
             echo "Closed tracking issue #$existing"
           fi
@@ -495,7 +495,7 @@ jobs:
       - name: Report sync failure
         if: failure()
         run: |
-          echo "::error::Upstream sync FAILED — origin/main was NOT updated. A rebase conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
+          echo "::error::Upstream sync FAILED — origin/main was NOT updated. A merge conflict or a pre-push validation failure blocked the sync; the customisation needs manual attention. See the failing step above."
 
       # The Actions tab alone is not a notification channel — nobody was
       # watching it, so an unrecorded conflict repeated identically for 12
@@ -571,7 +571,7 @@ jobs:
           PUSHED_SHA: ${{ steps.push.outputs.sha }}
         run: |
           gh label create sync-upstream-blocked --color B60205 \
-            --description "Nightly Sync Upstream rebase needs manual conflict resolution" \
+            --description "Nightly Sync Upstream merge needs manual conflict resolution" \
             --force >/dev/null 2>&1 || true
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -582,9 +582,9 @@ jobs:
             no-run)     detail="No \`ci.yaml\` run ever appeared for \`main@$PUSHED_SHA\`. Either the 'Dispatch CI on main' step's \`gh workflow run\` call failed, or \`ci.yaml\` no longer accepts \`workflow_dispatch\`. **The post-push CI watch is silently non-functional — fix this first.**" ;;
             *)          detail="The post-push CI watch step was killed by its own step timeout. See $run_url" ;;
           esac
-          body="⚠️ **This is NOT a rebase conflict — the rebase and the pre-push gate both PASSED, and the sync itself is green.**
+          body="⚠️ **This is NOT a merge conflict — the merge and the pre-push gate both PASSED, and the sync itself is green.**
 
-          The rebased tree was force-pushed to \`origin/main\` (\`$PUSHED_SHA\`), then the full CI pipeline on \`main\` did not come back green.
+          The merged tree was pushed to \`origin/main\` (\`$PUSHED_SHA\`), then the full CI pipeline on \`main\` did not come back green.
 
           $detail
 
