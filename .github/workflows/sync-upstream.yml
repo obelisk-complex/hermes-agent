@@ -13,7 +13,7 @@ permissions:
   # without this line GITHUB_TOKEN gets 403 on /actions/* even on a public repo.
   actions: write
 
-# Never let two manual dispatches race the force-push to main.
+# Never let two manual dispatches race the push to main.
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
@@ -120,7 +120,7 @@ jobs:
       # GITHUB_TOKEN cannot push commits touching .github/workflows/, on ANY
       # branch — a hard GitHub-side restriction, unrelated to the permissions:
       # block above. With SYNC_PAT retired, a merge that pulls in an upstream
-      # workflow-file change would otherwise reach "Push validated rebase" and
+      # workflow-file change would otherwise reach "Push merged main" and
       # fail there with an opaque permission error. Catch it here, before
       # spending the rest of the pre-push gate on a push that can't land, and
       # fail through the same "Notify sync failure" tracking-issue path as any
@@ -239,18 +239,20 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ steps.fork-tests.outputs.files }}'
 
-      - name: Push validated rebase
+      - name: Push merged main
         id: push
         # Explicit success() (already implicit) makes the gate unmistakable: the
-        # force-push runs ONLY if the rebase and the pre-push validation passed.
+        # push runs ONLY if the merge and the pre-push validation passed.
         if: success() && steps.check.outputs.upstream_ahead != '0'
         run: |
-          git push --force-with-lease origin main
-          # The watch step below must match the CI run by THIS exact SHA, never
-          # by "latest run on main" — a concurrent human push, a re-run, or a
-          # leftover queued run would otherwise be mistaken for ours.
+          echo "pre_sync_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+          if ! git push origin main; then
+            echo "rejected=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Push rejected — origin/main moved since this run started (a concurrent human push or another dispatch). This is NOT a merge conflict; re-fetch and re-dispatch. origin/main left untouched by this run."
+            exit 1
+          fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "✓ Fork synced — ${{ steps.check.outputs.custom_ahead }} commit(s) rebased, validated, and pushed to origin/main"
+          echo "✓ Fork synced — ${{ steps.check.outputs.upstream_ahead }} upstream commit(s) merged, validated, and pushed to origin/main"
 
       # GITHUB_TOKEN-authored pushes deliberately do NOT trigger downstream
       # workflow runs (recursion guard) — the SYNC_PAT push this used to rely
@@ -437,17 +439,26 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUSH_REJECTED: ${{ steps.push.outputs.rejected }}
         run: |
           gh label create sync-upstream-blocked --color B60205 \
-            --description "Sync Upstream rebase needs manual conflict resolution" \
+            --description "Sync Upstream needs manual attention" \
             --force >/dev/null 2>&1 || true
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          title="Sync Upstream blocked: manual rebase conflict resolution needed"
-          body="The Sync Upstream workflow hit a rebase conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
+
+          if [ "$PUSH_REJECTED" = "true" ]; then
+            title="Sync Upstream: push rejected (origin/main moved concurrently)"
+            body="The merge and pre-push gate both PASSED, but the push to \`origin/main\` was rejected — something else moved \`main\` after this run started (a concurrent human push or another dispatch). This is NOT a merge conflict: do not run the rerere resolve procedure. Just re-dispatch the workflow.
+
+          Failing run: $run_url"
+          else
+            title="Sync Upstream blocked: manual merge conflict resolution needed"
+            body="The Sync Upstream workflow hit a merge conflict with no recorded rerere resolution, or the pre-push validation gate failed, and aborted. \`origin/main\` was left untouched.
 
           Resolve per \`ci/UPSTREAM_SYNC_RUNBOOK.md\`, commit the new \`ci/rerere-cache/<hash>/\` entry, and this issue auto-closes on the next successful sync.
 
           Failing run: $run_url"
+          fi
 
           existing=$(gh issue list --repo "${{ github.repository }}" \
             --label sync-upstream-blocked --state open \
