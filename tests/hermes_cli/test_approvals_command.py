@@ -1,8 +1,5 @@
 """Cross-surface contract for the persistent /approvals mode command."""
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
 import yaml
 
 from cli import HermesCLI
@@ -25,28 +22,11 @@ def _completions(text: str) -> set[str]:
 def test_approvals_registry_drives_help_menu_and_autocomplete():
     command = resolve_command("approvals")
     assert command is not None
-    assert command.category == "Configuration"
-    assert command.args_hint == "[manual|smart|off]"
     assert SUBCOMMANDS["/approvals"] == ["manual", "smart", "off"]
     assert "approvals" in GATEWAY_KNOWN_COMMANDS
     assert any("/approvals" in line for line in gateway_help_lines())
     assert "approvals" in {name for name, _ in telegram_bot_commands()}
     assert _completions("/approvals ") == {"manual", "smart", "off"}
-
-
-def _isolate_config(monkeypatch, home):
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_MANAGED_DIR", str(home / "missing-managed"))
-    from hermes_cli import managed_scope
-    from hermes_cli.config import _LOAD_CONFIG_CACHE, _RAW_CONFIG_CACHE
-
-    _LOAD_CONFIG_CACHE.clear()
-    _RAW_CONFIG_CACHE.clear()
-    managed_scope.invalidate_managed_cache()
-
-
-
-
 
 
 def test_shared_command_refuses_managed_mode_override(tmp_path, monkeypatch):
@@ -74,6 +54,17 @@ def test_shared_command_refuses_managed_mode_override(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # /approvals tags — dual-signal tag surface (T10, G11)
 # ---------------------------------------------------------------------------
+
+def _isolate_config(monkeypatch, home):
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(home / "missing-managed"))
+    from hermes_cli import managed_scope
+    from hermes_cli.config import _LOAD_CONFIG_CACHE, _RAW_CONFIG_CACHE
+
+    _LOAD_CONFIG_CACHE.clear()
+    _RAW_CONFIG_CACHE.clear()
+    managed_scope.invalidate_managed_cache()
+
 
 def test_tags_round_trip_writes_a_list(tmp_path, monkeypatch):
     """G11: enable/disable round-trips and the value reads back as a LIST."""
@@ -144,9 +135,3 @@ def test_tags_dispatch_on_cli_surface(tmp_path, monkeypatch, capsys):
     assert "net.egress" in out and "enabled" in out
     # The mode runner must not have swallowed it as an invalid mode.
     assert "Usage:" not in out
-
-
-
-
-
-

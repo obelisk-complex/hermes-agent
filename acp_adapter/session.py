@@ -139,6 +139,11 @@ class SessionState:
     history: List[Dict[str, Any]] = field(default_factory=list)
     cancel_event: Any = None  # threading.Event
     is_running: bool = False
+    # A state-mutating slash command (/reset, /compress, /model) is in flight. Turn claims
+    # must queue behind it: /compress's LLM call and /model's agent rebuild take seconds, so
+    # a bare is_running check in the slash thread would leave a check-then-act window where
+    # a prompt claims the turn mid-mutation.
+    command_op: bool = False
     queued_prompts: List[str] = field(default_factory=list)
     runtime_lock: Any = field(default_factory=threading.Lock)
     current_prompt_text: str = ""
@@ -470,9 +475,11 @@ class SessionManager:
         elif isinstance(model_cfg, str):
             default_model = model_cfg.strip()
 
+        from tools.mcp_tool_common import mcp_server_enabled
+
         configured_mcp_servers = [
             name for name, cfg in (config.get("mcp_servers") or {}).items()
-            if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
+            if not isinstance(cfg, dict) or mcp_server_enabled(cfg)
         ]
         kwargs = {
             "platform": "acp", "quiet_mode": True, "session_id": session_id, "session_db": self._get_db(),

@@ -6,6 +6,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
@@ -299,6 +300,17 @@ def platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bo
     expected_mode = PORT_BINDING_CONDITIONAL_MODES.get(platform_value)
     return expected_mode is None or str((extra or {}).get("connection_mode", "websocket")).strip().lower() == expected_mode
 
+_DISCORD_CHANNEL_LINK_RE = re.compile(
+    r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/(?:[0-9]+|@me)/([0-9]+)/?")
+
+
+def discord_channel_id_from_link(value: str) -> Optional[str]:
+    """Channel id from a pasted Discord channel link (``https://discord.com/channels/<guild>/<channel>``),
+    else None. Message links (a third path segment) and anything that is not a channel link are
+    left alone so callers keep their own error path."""
+    match = _DISCORD_CHANNEL_LINK_RE.fullmatch(value)
+    return match.group(1) if match else None
+
 
 @dataclass
 class HomeChannel:
@@ -311,6 +323,12 @@ class HomeChannel:
     # Authenticated logical-target provenance (relay egress re-attaches; connector stays the authz boundary).
     user_id: Optional[str] = None
     scope_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Copy Link is next to Copy Channel ID in Discord. Normalize at the
+        # shared home boundary so env, YAML and plugin-seeded homes agree.
+        if self.platform == Platform.DISCORD and isinstance(self.chat_id, str):
+            self.chat_id = discord_channel_id_from_link(self.chat_id.strip()) or self.chat_id
 
     def to_dict(self) -> Dict[str, Any]:
         optional = {k: v for k in ("thread_id", "user_id", "scope_id") if (v := getattr(self, k))}
