@@ -131,7 +131,7 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
     try:
         return submit_managed_fal_with_rate_limit_retry(
             lambda headers: _get_managed_fal_client(managed_gateway).submit(
-                model, arguments=arguments, headers=headers),
+                model, arguments=arguments, headers={**headers, "X-Fal-Store-IO": "0"}),
             what="image model", name=model)
     except Exception as exc:
         # A managed-gateway 4xx usually means the portal doesn't proxy this model

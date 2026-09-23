@@ -933,12 +933,14 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
                                  f"--force to close its run and complete anyway.")
                 return False
+<<<<<<<
+            except kb.CompletionBlockedError as block_err:
+                fail_msg[tid] = f"completion blocked by quality gate: {block_err.block_message}"
+=======
             except kb.EmptyCompletionError as empty_err:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
-                return False
-            except kb.CompletionBlockedError as block_err:
-                fail_msg[tid] = f"completion blocked by quality gate: {block_err.block_message}"
+>>>>>>>
                 return False
             if not done:
                 # complete_task returns bare False for a dependency refusal, an
