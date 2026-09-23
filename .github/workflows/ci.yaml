@@ -16,8 +16,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
   # Explicit re-validation of main, e.g. from Sync Upstream: GITHUB_TOKEN
   # cannot author a push that triggers the push: trigger above (recursion
   # guard), so that workflow dispatches this run directly instead. detect's

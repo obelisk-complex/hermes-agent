@@ -361,6 +361,19 @@ jobs:
           REPO: ${{ github.repository }}
         run: gh workflow run ci.yaml --repo "$REPO" --ref main
 
+      # docker.yml's own push: trigger was removed as redundant (every merge
+      # commit rebuilt :main/:latest even when the merge touched nothing
+      # under the image's build context) — this dispatch is now the only
+      # thing that refreshes those tags after a sync. Fire-and-forget, same
+      # as the ci.yaml dispatch above: this workflow's job is to land the
+      # merge, not to babysit a downstream publish.
+      - name: Dispatch Docker publish on main (post-push)
+        if: success() && steps.check.outputs.upstream_ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: gh workflow run docker.yml --repo "$REPO" --ref main
+
       # ── Post-push CI watch (ADVISORY) ────────────────────────────────────
       # The pre-push gate above is fast and cheap but structurally partial: it
       # runs fork-local tests + a lockfile/lint check, in one job, on one
