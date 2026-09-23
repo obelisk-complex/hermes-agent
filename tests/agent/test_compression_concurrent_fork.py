@@ -1912,7 +1912,18 @@ def test_hard_cancel_between_compress_return_and_commit_begin_wins_atomically(
         daemon=True,
     )
     worker.start()
-    assert before_commit.wait(timeout=2)
+    # 2s was too tight (same class as gateway/test_turn_lease.py's 1s->10s fix, run
+    # 33220844313, Aug 2026): _compress_context dispatches the real attempt onto the
+    # process-wide compress-ctx-timeout DaemonThreadPoolExecutor (agent/conversation_
+    # compression.py's _get_compress_timeout_executor, max_workers=4) and only reaches
+    # this barrier after commit_memory_session + the anti-growth salvage check run for
+    # real against a real SessionDB/sqlite file. Under CI's default `-j cpu_count*2`
+    # file-level parallelism (8 pytest subprocesses on a 4-vCPU ubuntu-latest runner),
+    # thread-pool dispatch plus that real I/O can eat a multi-second budget before the
+    # worker thread even starts. 10s leaves generous headroom for that while staying
+    # far short of the 5s `allow_commit_check.wait()` downstream and the compressor's
+    # own 120s idle / 600s total ceiling, so a genuine hang is still caught.
+    assert before_commit.wait(timeout=10)
 
     agent.hard_interrupt("cancel before commit admission")
     allow_commit_check.set()
@@ -1956,7 +1967,21 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
         daemon=True,
     )
     compression.start()
-    assert commit_started.wait(timeout=2)
+    # 2s was too tight (run 35902823285, Sep 2026 — same class as gateway/test_turn_
+    # lease.py's 1s->10s fix and this file's before_commit.wait() above): reaching
+    # this barrier means the real attempt was dispatched onto the process-wide
+    # compress-ctx-timeout DaemonThreadPoolExecutor (max_workers=4) and ran
+    # commit_memory_session + the anti-growth salvage check for real against a real
+    # SessionDB/sqlite file before archive_and_compact — the thing that sets
+    # commit_started — is even called. Reproduced locally: the gap is ~40-650ms
+    # under synthetic CPU contention up to 48 busy loops pinned against this
+    # process, but CI's default `-j cpu_count*2` file-level parallelism (8 pytest
+    # subprocesses sharing 4 vCPUs on ubuntu-latest) adds real dispatch/I-O
+    # scheduling latency this dev box's spare cores and fast local disk don't
+    # reproduce. 10s leaves generous headroom while staying far short of the 5s
+    # `allow_commit.wait()` downstream and the compressor's own 120s idle / 600s
+    # total ceiling, so a genuine hang is still caught, just less snappily.
+    assert commit_started.wait(timeout=10)
 
     stop = threading.Thread(
         target=lambda: (
