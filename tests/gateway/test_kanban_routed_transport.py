@@ -253,7 +253,17 @@ def test_pinned_profile_without_this_platform_delivers_via_primary(tmp_path, mon
     assert len(primary.sent) == len(primary.handled) == 1
     assert primary.handled[0].source.profile == "yuki"
     assert not unseen(task)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # Scoped to the notifier's own logger, matching the `caplog.at_level(...,
+    # logger=notifier.logger.name)` above: this checks the notifier's delivery
+    # path is warning-free, not that no other plugin logged anything. The
+    # fork's quality-gate completion hook (plugins/quality-gate/completion_hook.py)
+    # deliberately warns on every completion whose task has no workspace_path
+    # (see its own test_no_workspace_allows_but_warns) -- unrelated to routing,
+    # and `completion()` here never sets a workspace_path.
+    assert not [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == notifier.logger.name
+    ]
 
     # An owner stamped with the invoking shell's profile (#76483) instead of the route's
     # is a permanent dead-end and must surface once at WARNING.
