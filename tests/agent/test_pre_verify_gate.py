@@ -178,7 +178,7 @@ def test_iteration_budget_exit_rechecks_a_leaking_claim(monkeypatch):
         _response_was_previewed = False
 
     agent = _BudgetAgent()
-    final_response, exit_reason, preserved = turn_finalizer._resolve_budget_fallback(
+    final_response, exit_reason, preserved, _interrupted = turn_finalizer._resolve_budget_fallback(
         agent, final_response=None, api_call_count=3, interrupted=False, failed=False,
         messages=[], _turn_exit_reason="unknown",
         _pending_verification_response="ALL CLEAR, task complete.",

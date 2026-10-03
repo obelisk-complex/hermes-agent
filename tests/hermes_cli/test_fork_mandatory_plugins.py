@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS, PluginManager
 
@@ -123,8 +123,8 @@ class TestMandatoryPluginsLoadUnconditionally:
 
 class TestCmdDisableRefusesMandatoryPlugins:
     @pytest.mark.parametrize("key", MANDATORY_KEYS)
-    @patch("hermes_cli.plugins_cmd._save_disabled_set")
-    @patch("hermes_cli.plugins_cmd._save_enabled_set")
+    @patch("hermes_cli.plugins_cmd._set_plugin_enabled")
+    @patch("hermes_cli.plugins_cmd._admit_and_save_plugin_sets")
     @patch("hermes_cli.plugins_cmd._get_disabled_set", return_value=set())
     @patch("hermes_cli.plugins_cmd._get_enabled_set", return_value=set())
     def test_cmd_disable_exits_nonzero_and_writes_nothing(
@@ -143,8 +143,8 @@ class TestCmdDisableRefusesMandatoryPlugins:
     def test_dashboard_disable_returns_ok_false(self, key):
         from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
 
-        with patch("hermes_cli.plugins_cmd._save_disabled_set") as mock_save_dis, \
-             patch("hermes_cli.plugins_cmd._save_enabled_set") as mock_save_en:
+        with patch("hermes_cli.plugins_cmd._set_plugin_enabled") as mock_save_dis, \
+             patch("hermes_cli.plugins_cmd._admit_and_save_plugin_sets") as mock_save_en:
             result = dashboard_set_agent_plugin_enabled(key, enabled=False)
 
         assert result["ok"] is False
@@ -158,9 +158,10 @@ class TestCmdDisableRefusesMandatoryPlugins:
         only the misleading disable path is refused."""
         from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
 
-        with patch("hermes_cli.plugins_cmd._save_disabled_set"), \
-             patch("hermes_cli.plugins_cmd._save_enabled_set"), \
-             patch("hermes_cli.plugins_cmd._toggle_plugin_toolset"):
+        with patch("hermes_cli.plugins_cmd._set_plugin_enabled"), \
+             patch("hermes_cli.plugins_cmd._admit_and_save_plugin_sets"), \
+             patch("hermes_cli.plugins_cmd._toggle_plugin_toolset"), \
+             patch("hermes_cli.plugins_activation.activate_plugin_now", return_value={}):
             result = dashboard_set_agent_plugin_enabled(key, enabled=True)
 
         assert result["ok"] is True
@@ -201,6 +202,47 @@ class TestPluginStatusReportsMandatory:
         keys = {entry[5] for entry in filtered}
         assert keys == {"self-check-enforcer", "quality-gate"}
 
+
+
+# ── hermes plugins (interactive picker) ─────────────────────────────────────
+
+
+_PICKER_ENTRIES = [
+    ("self-check-enforcer", "3.7.3", "desc", "bundled", Path("/x"), "self-check-enforcer"),
+    ("quality-gate", "1.0.0", "desc", "bundled", Path("/y"), "quality-gate"),
+    ("other-plugin", "1.0.0", "desc", "user", Path("/z"), "other-plugin"),
+]
+
+
+class TestPluginPickerTreatsMandatoryAsActive:
+    @patch("hermes_cli.plugins_cmd._category_active_names", return_value=set())
+    def test_mandatory_rows_open_ticked_even_when_config_says_disabled(self, _active):
+        from hermes_cli.plugins_cmd_toggle import _effective_plugin_selection
+
+        selected = _effective_plugin_selection(_PICKER_ENTRIES, set(), set(MANDATORY_KEYS))
+        assert selected == {0, 1}
+
+    @patch("hermes_cli.plugins_cmd._admit_and_save_plugin_sets")
+    @patch("hermes_cli.plugins_cmd._discover_all_plugins", return_value=_PICKER_ENTRIES)
+    @patch("hermes_cli.plugins_cmd._get_enabled_set", return_value={"other-plugin"})
+    def test_unticking_mandatory_rows_never_persists_them_as_disabled(self, _en, _disc, mock_save):
+        from hermes_cli.plugins_cmd import _persist_plugin_selection
+
+        keys = [entry[5] for entry in _PICKER_ENTRIES]
+        _on, turned_off = _persist_plugin_selection(keys, set(), set(), {0, 1, 2}, expected_config=1)
+
+        assert turned_off == ["other-plugin"]
+        _enabled, new_disabled = mock_save.call_args.args
+        assert new_disabled == {"other-plugin"}
+
+    @patch("hermes_cli.plugins_cmd._admit_and_save_plugin_sets")
+    def test_unticking_only_mandatory_rows_writes_nothing(self, mock_save):
+        from hermes_cli.plugins_cmd import _persist_plugin_selection
+
+        result = _persist_plugin_selection(list(MANDATORY_KEYS), set(), set(), {0, 1}, expected_config=1)
+
+        assert result == ([], [])
+        mock_save.assert_not_called()
 
 def test_carve_out_is_restricted_to_bundled_plugins():
     """A user-dir plugin that squats a mandatory name must NOT inherit the

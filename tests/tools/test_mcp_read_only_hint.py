@@ -87,6 +87,24 @@ class TestCaptureThroughRegistration:
             _register_server_tools("hint_srv2", server, {})
         assert mcp_tool_read_only_hint("hint_srv2", "reader") is False
 
+    def test_capture_under_a_profile_scope_is_found(self, monkeypatch):
+        """Multi-profile/gateway processes key the capture by ``(scope, name)``; the accessor must
+        resolve the calling scope's connection key the way the trust gate does, not miss on the
+        bare name."""
+        import tools.mcp_tool as core
+        from tools.mcp_tool_registration import _record_tool_trust_metadata
+
+        monkeypatch.setattr(core, "_mcp_registry_scope", lambda: "profile-a")
+        monkeypatch.setattr(core, "_tool_read_only_hints", {})
+        _record_tool_trust_metadata("scoped_srv", {}, [
+            _tool("reader", SimpleNamespace(readOnlyHint=True)),
+            _tool("writer", SimpleNamespace(readOnlyHint=False)),
+        ])
+        assert ("profile-a", "scoped_srv") in core._tool_read_only_hints
+        assert mcp_tool_read_only_hint("scoped_srv", "reader") is True
+        assert mcp_tool_read_only_hint("scoped_srv", "writer") is False
+        assert mcp_tool_read_only_hint("scoped_srv", "absent") is None
+
 
 import asyncio  # noqa: E402  -- top-level imports above are importorskip-gated
 
