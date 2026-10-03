@@ -21,7 +21,7 @@ def _mock_conn(monkeypatch):
             return object()
         def __exit__(self, *a):
             return False
-    monkeypatch.setattr(kc.kb, "connect_closing", lambda *a, **k: _Ctx(),
+    monkeypatch.setattr(kc.kbc, "connect_closing", lambda *a, **k: _Ctx(),
                         raising=True)
     monkeypatch.setattr(kc.kb, "get_task",
                         lambda conn, tid: _NonGoalTask(), raising=True)
@@ -65,7 +65,7 @@ def test_cmd_complete_auto_block_reported(monkeypatch, capsys):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(kc.kb, "connect_closing", lambda *a, **k: _Ctx(),
+    monkeypatch.setattr(kc.kbc, "connect_closing", lambda *a, **k: _Ctx(),
                         raising=True)
     monkeypatch.setattr(kc, "_worker_run_id_for", lambda tid: None,
                         raising=False)
