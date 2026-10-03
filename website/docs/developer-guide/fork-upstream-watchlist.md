@@ -27,7 +27,31 @@ fix (search their commit history / the linked file for the same symptom).
 
 ## Entries
 
-_None open as of 2026-09-11._
+- **electron 41.10.3** (fork CVE fix, GHSA-9f4c-93c8-jc8g / GHSA-r4w5-6pfg-jxp5).
+  Upstream rolled back to 40.10.2 in `bb8280b753` over a Windows VC++/extract-zip
+  fresh-install problem and calls 41.x deferred. Keep ours until upstream moves
+  to 41+; untested with upstream's electron-builder 27.0.0-alpha.6.
+- **`@xmldom/xmldom` overrides** (0.8.15 / 0.9.12, GHSA-6gmq-8vp8-gcm6). Upstream
+  still resolves 0.8.13 (deprecated). Drop once upstream's lock is at or above.
+- **MCP readOnlyHint lookup** (`tools/mcp_tool.py`, keyed via
+  `_resolve_server_key` since 2026-10-03). Its only caller,
+  `tools/mcp_tool_sampling.py`, runs in the MCP receive loop, which does not
+  inherit context variables, so in a multiplexed gateway the scope may still
+  resolve to none. Unverified.
+
+### Resolved 2026-10-03 (kept for history)
+
+- **`skills.always` / `skills.always_load`**: superseded by upstream
+  `skills.auto_load` (`1976869c01`). `hermes_cli/skills_always.py` deleted; a
+  key-merge shim in `agent/skill_commands.py` `resolve_auto_load_skills` folds
+  the old keys into `auto_load`.
+- **Cron model-drift helpers** in `hermes_cli/config.py`: upstream deliberately
+  removed that design in `0469740ab3`; the 2026-09-14 rolling patch had brought
+  them back. Deleted.
+- **npm overrides for browserslist, fast-uri, sanitize-html**: upstream's lock
+  resolves at or above the fork's CVE floors. Dropped.
+- **Duration-balanced test slicing in `tests.yml`**: superseded by upstream's
+  `HERMES_TEST_SLICE`.
 
 ### Resolved 2026-09-11 (kept for history)
 
