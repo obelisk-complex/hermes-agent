@@ -30,14 +30,45 @@ fix (search their commit history / the linked file for the same symptom).
 - **electron 41.10.3** (fork CVE fix, GHSA-9f4c-93c8-jc8g / GHSA-r4w5-6pfg-jxp5).
   Upstream rolled back to 40.10.2 in `bb8280b753` over a Windows VC++/extract-zip
   fresh-install problem and calls 41.x deferred. Keep ours until upstream moves
-  to 41+; untested with upstream's electron-builder 27.0.0-alpha.6.
+  to 41+; untested with upstream's electron-builder 27.0.0-alpha.6. Re-checked
+  2026-10-05: upstream `apps/desktop/package.json` is still on 40.10.2.
 - **`@xmldom/xmldom` overrides** (0.8.15 / 0.9.12, GHSA-6gmq-8vp8-gcm6). Upstream
-  still resolves 0.8.13 (deprecated). Drop once upstream's lock is at or above.
+  still resolves 0.8.13 (deprecated) and 0.9.10 in `tests-js` (re-checked
+  2026-10-05). Drop once upstream's lock is at or above.
 - **MCP readOnlyHint lookup** (`tools/mcp_tool.py`, keyed via
   `_resolve_server_key` since 2026-10-03). Its only caller,
   `tools/mcp_tool_sampling.py`, runs in the MCP receive loop, which does not
   inherit context variables, so in a multiplexed gateway the scope may still
-  resolve to none. Unverified.
+  resolve to none. Unverified. Upstream's elicitation path is unchanged
+  (`_pending_call_context` replay only wraps the consent call, not the hint
+  lookup), so this stays open.
+- **`install_modify_other_keys_aliases()` also installs the keypress data
+  normalisation** (`hermes_cli/pt_input_extras.py`). Upstream calls
+  `install_keypress_data_normalization()` only from `cli.py`; the curses pickers
+  (`hermes_cli/curses_ui.py`) install the aliases alone, so they miss the
+  normalisation the fork adds. Drop once upstream's `install_modify_other_keys_aliases()` (or
+  `curses_ui.py`) installs the normalisation itself.
+- **Upstream's code-health ratchet vs a sync PR** (`.github/workflows/lint.yml`,
+  `scripts/code_health`, `ENFORCEMENT = "blocking"`, added since 2026-10-03). On a
+  pull request it compares the merge commit with its first parent, which for a
+  sync PR is fork `main`, so every upstream-side file or function that grew since
+  the last sync counts as a regression (89 blocking findings on the 2026-10-05
+  sync). Against `upstream/main` the fork's own code still has 40 (mostly `BLE001`
+  blind `except Exception` in `plugins/quality-gate`, `plugins/self-check-enforcer`,
+  `tools/approval*.py`, `hermes_cli/approval_mode.py`, `hermes_cli/kanban_db.py`,
+  plus `FILE_LINES` on the files the fork extends). `sync-upstream.yml`'s pre-push
+  gate does not run it; only a manually opened sync PR does. Undecided: flip
+  `ENFORCEMENT` to `"advisory"` on the fork, or clean the 40.
+
+### Resolved 2026-10-05 (kept for history)
+
+- **`request_elicitation_consent`** (`tools/approval_prompt.py`): upstream's new
+  version (`762f419fe8`, `0df1837e81`, `ef1faa4cf8`: decline at once via
+  `_no_user_can_answer()`, `pre_approval_request`/`post_approval_response` hooks,
+  the agent thread's panel callback) taken whole. Only the fork's
+  `_manual_gate_scope` (T8 head-of-line barrier) wraps the prompt call on top.
+  Nothing dropped: upstream's `on_human_input_*` hooks are observer-only and
+  cannot feed the barrier's depth counter.
 
 ### Resolved 2026-10-03 (kept for history)
 
