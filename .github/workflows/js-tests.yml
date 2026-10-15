@@ -3,6 +3,11 @@ name: JS Tests
 
 on:
   workflow_call:
+    inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
 
 # Fork: upstream runs every check in one job on a 32-core larger runner
 # (via .github/scripts/run-workspace-checks.mjs). Larger runners never resolve
@@ -92,7 +97,9 @@ jobs:
         include: ${{ fromJson(needs.workspaces.outputs.checks) }}
       fail-fast: false # report all failures, not just the first one
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        with:
+          ref: ${{ inputs.commit }}
       - name: Set up the locked JS build toolchain
         id: node
         uses: ./.github/actions/setup-pm

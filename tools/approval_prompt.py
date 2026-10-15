@@ -306,6 +306,10 @@ def request_elicitation_consent(message: str, description: str, *,
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
+    # A finite gateway turn (``chat -q`` / ``-z`` over the daemon) has no one to answer: parking the prompt
+    # would detach the viewer mid-turn instead of failing closed like the in-process ``-q`` input() path.
+    if _ctx._is_single_query_approval_context():
+        return "decline"
 
     # Phase B (T11): tags for observability only. Row 6 of the surface inventory — a real human
     # decision with no author verdict, so no auto-approval path is added (D4). _resolve_tags maps
