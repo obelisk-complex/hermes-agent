@@ -142,7 +142,11 @@ class TestDualSignalCommandGate:
                                               interactive_cli, cli_prompt):
         cli_prompt.return_value = "deny"
         _set_config(monkeypatch, tags=("config.write", "command.delete"))
-        result = check_all_command_guards("rm -rf ~/.hermes", "local")
+        # rm -rf ~/.hermes itself now trips the runtime self-delete floor BEFORE the gate
+        # (#58748) on layouts where the pm-managed interpreter lives under ~/.hermes, so the
+        # probe deletes a subdirectory: still D14 config.write (recursive delete of a Hermes
+        # home child), still never-auto (G8), but it reaches the gate this test exercises.
+        result = check_all_command_guards("rm -rf ~/.hermes/config", "local")
         assert result["approved"] is False  # G8: config.write is never-auto
         cli_prompt.assert_called_once()
 

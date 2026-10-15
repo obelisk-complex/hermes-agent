@@ -41,7 +41,7 @@ def _read(relpath):
 
 def _valid_hooks_literal(src):
     """Return the text of the VALID_HOOKS set literal."""
-    m = re.search(r"VALID_HOOKS\s*:\s*Set\[str\]\s*=\s*\{", src)
+    m = re.search(r"VALID_HOOKS\s*:\s*[sS]et\[str\]\s*=\s*\{", src)
     assert m, "VALID_HOOKS literal not found in plugins.py"
     start = m.end() - 1  # the '{'
     depth = 0
