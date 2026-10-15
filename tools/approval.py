@@ -909,7 +909,7 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 
 
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
-                    pattern_key: str, pattern_keys: list[str],
+                    pattern_key: str, pattern_keys: list[str], warnings: list[tuple],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
                     is_ask: bool, smart: bool = False, pending_body=None) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
@@ -917,6 +917,11 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
     owner override reduces every surface to once/deny and persists nothing. ``pending_body`` is a thunk, built only once a human is
     actually asked, so a smart APPROVE never pays for redacting a large script.
+
+    ``warnings`` are the ``(key, description, is_tirith)`` tuples the dual-signal gate resolves
+    to action tags (:func:`~tools.approval_detection._resolve_tags`). The retired tirith scanner
+    produced content-level entries; with the scanner gone every caller passes the pattern-level
+    tuple(s) only.
     """
     from agent.redact import redact_sensitive_text
 
@@ -1206,7 +1211,7 @@ def _run_approval_gate(
 
     return _with_action_tags(_human_decision(
         _ACTION_GATE, command=display_target, description=description, pattern_key=pattern_key,
-        pattern_keys=[pattern_key], session_key=session_key,
+        pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
     ), action_tags)
 
@@ -1371,6 +1376,7 @@ def check_all_command_guards(command: str, env_type: str,
     return _human_decision(
         _COMMAND_GATE, command=command, description=description,
         pattern_key=pattern_key, pattern_keys=[pattern_key],
+        warnings=[(pattern_key, description, False)],
         session_key=session_key, approval_callback=approval_callback,
         is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, smart=approval_mode == "smart",
     )
@@ -1466,7 +1472,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # own tags (Phase A) and every other branch below gains the hardcoded code.exec.
     return _with_action_tags(_human_decision(
         _EXECUTE_CODE_GATE, command=command, description=description, pattern_key=pattern_key,
-        pattern_keys=[pattern_key], session_key=session_key,
+        pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
         smart=approval_mode == "smart",
         pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
