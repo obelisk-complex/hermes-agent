@@ -1,9 +1,12 @@
 # Sync notes — 2026-10-15
 
 Completes the 2026-10-12 sync (session killed mid-verification) and extends it
-to upstream tip `3bdb82d6ec`. Branch: `sync/upstream-2026-10-12` (worktree
-`.worktrees/sync-2026-10-12`), now a single merge chain on top of pre-sync
-`origin/main` (`809bf295d3`).
+to upstream tip `60f56a6b13` (final `git merge upstream/main` on 2026-10-15:
+82 further commits, auto-merged clean — the single overlap,
+`hermes_cli/config_defaults.py`, was browser-doc comment text upstream vs the
+fork's `max_verify_nudges`/`auto_approve*` keys in disjoint hunks). Branch:
+`sync/upstream-2026-10-12` (worktree `.worktrees/sync-2026-10-12`), now a
+single merge chain on top of pre-sync `origin/main` (`809bf295d3`).
 
 ## Range
 
