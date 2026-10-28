@@ -281,9 +281,9 @@ class TestExecuteCodeParity:
         res_vercel = check_execute_code_guard("print(1)", "vercel_sandbox")
         assert res_vercel["approved"] is True
         assert "action_tags" not in res_vercel
-        res_singularity = check_execute_code_guard("print(1)", "singularity")
-        assert res_singularity["approved"] is True
-        assert "action_tags" not in res_singularity
+        res_modal = check_execute_code_guard("print(1)", "modal")
+        assert res_modal["approved"] is True
+        assert "action_tags" not in res_modal
 
     def test_yolo_still_bypasses(self, monkeypatch):
         _set_config(monkeypatch)
@@ -387,11 +387,11 @@ class TestExecuteCodeTags:
     def test_bypass_returns_stay_untagged(self, monkeypatch):
         """All three pre-gate bypasses return before the gate is entered.
 
-        vercel_sandbox and _should_skip_container_guards (singularity here)
+        vercel_sandbox and _should_skip_container_guards (modal here)
         are distinct return statements (:4719-4722); yolo is a third.
         """
         _set_config(monkeypatch)
         assert "action_tags" not in check_execute_code_guard("print(1)", "vercel_sandbox")
-        assert "action_tags" not in check_execute_code_guard("print(1)", "singularity")
+        assert "action_tags" not in check_execute_code_guard("print(1)", "modal")
         _patch(monkeypatch, "is_current_session_yolo_enabled", lambda: True)
         assert "action_tags" not in check_execute_code_guard("print(1)", "local")

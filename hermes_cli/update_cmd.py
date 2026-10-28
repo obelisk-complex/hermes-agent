@@ -216,7 +216,7 @@ _UPDATE_CRITICAL_FILES = (
     "model_tools.py", "toolsets.py", "hermes_constants.py",
     "agent/skill_commands.py",
     "agent/turn_final_response.py", "agent/turn_finalizer.py", "agent/turn_stop_gates.py",
-    "gateway/slash_commands.py", "hermes_cli/agent_import.py", "hermes_cli/approval_mode.py",
+    "gateway/slash_commands.py", "hermes_cli/approval_mode.py",
     "hermes_cli/cli_commands_mixin.py", "hermes_cli/config_defaults.py", "hermes_cli/kanban.py",
     "hermes_cli/kanban_db.py", "hermes_cli/kanban_db_dispatch.py", "hermes_cli/oneshot.py",
     "hermes_cli/plugins.py", "hermes_cli/plugins_cmd.py", "hermes_cli/plugins_cmd_listing.py",
