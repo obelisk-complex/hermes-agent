@@ -27,27 +27,21 @@ fix (search their commit history / the linked file for the same symptom).
 
 ## Entries
 
-- **electron 41.10.3** (fork CVE fix, GHSA-9f4c-93c8-jc8g / GHSA-r4w5-6pfg-jxp5).
-  Upstream rolled back to 40.10.2 in `bb8280b753` over a Windows VC++/extract-zip
-  fresh-install problem and calls 41.x deferred. Keep ours until upstream moves
-  to 41+; untested with upstream's electron-builder 27.0.0-alpha.6. Re-checked
-  2026-10-05: upstream `apps/desktop/package.json` is still on 40.10.2.
-- **`@xmldom/xmldom` overrides** (0.8.15 / 0.9.12, GHSA-6gmq-8vp8-gcm6). Upstream
-  still resolves 0.8.13 (deprecated) and 0.9.10 in `tests-js` (re-checked
-  2026-10-05). Drop once upstream's lock is at or above.
 - **MCP readOnlyHint lookup** (`tools/mcp_tool.py`, keyed via
   `_resolve_server_key` since 2026-10-03). Its only caller,
   `tools/mcp_tool_sampling.py`, runs in the MCP receive loop, which does not
   inherit context variables, so in a multiplexed gateway the scope may still
   resolve to none. Unverified. Upstream's elicitation path is unchanged
   (`_pending_call_context` replay only wraps the consent call, not the hint
-  lookup), so this stays open.
+  lookup), so this stays open. Re-checked 2026-10-28: `upstream/main` still has
+  no `mcp_tool_read_only_hint` or caller of the hint in `mcp_tool_sampling.py`.
 - **`install_modify_other_keys_aliases()` also installs the keypress data
   normalisation** (`hermes_cli/pt_input_extras.py`). Upstream calls
   `install_keypress_data_normalization()` only from `cli.py`; the curses pickers
   (`hermes_cli/curses_ui.py`) install the aliases alone, so they miss the
   normalisation the fork adds. Drop once upstream's `install_modify_other_keys_aliases()` (or
-  `curses_ui.py`) installs the normalisation itself.
+  `curses_ui.py`) installs the normalisation itself. Re-checked 2026-10-28: unchanged
+  upstream.
 - **Upstream's code-health ratchet vs a sync PR** (`.github/workflows/lint.yml`,
   `scripts/code_health`, `ENFORCEMENT = "blocking"`, added since 2026-10-03). On a
   pull request it compares the merge commit with its first parent, which for a
@@ -58,7 +52,34 @@ fix (search their commit history / the linked file for the same symptom).
   `tools/approval*.py`, `hermes_cli/approval_mode.py`, `hermes_cli/kanban_db.py`,
   plus `FILE_LINES` on the files the fork extends). `sync-upstream.yml`'s pre-push
   gate does not run it; only a manually opened sync PR does. Undecided: flip
-  `ENFORCEMENT` to `"advisory"` on the fork, or clean the 40.
+  `ENFORCEMENT` to `"advisory"` on the fork, or clean the 40. Re-checked
+  2026-10-28: `upstream/main` is still `ENFORCEMENT = "blocking"`; counts above not
+  re-measured.
+- **Workflow runners and the JS check matrix** (`desktop-bundle-smoke.yml`,
+  `install-e2e-windows-run.yml`, `js-tests.yml`). Upstream moved these to larger
+  runners (`windows-latest-32-core`, `blacksmith-32vcpu-ubuntu-2404`) that never
+  resolve on a personal account, so the fork keeps the standard runners. `js-tests.yml`
+  keeps the fork's per-package matrix on `ubuntu-latest` and takes upstream's
+  "Prepare locked Electron runtime" step, but not its `run-workspace-checks.mjs`
+  step. Re-check each sync: runner labels and the step list.
+
+### Resolved 2026-10-28 (kept for history)
+
+- **electron 41.10.3 pin**: upstream is on 44.9.3, past the fork's CVE floor.
+  Pin dropped.
+- **`@xmldom/xmldom` overrides**: upstream's lock resolves 0.8.15 and 0.9.12.
+  Overrides dropped.
+- **`qs: 6.16.0` override** (`website/package.json`) and the `qs` min-release-age
+  exclude (`website/.npmrc`): upstream's lock is at 6.16.0 and the exclude expired.
+  Both dropped.
+- **`hermes_cli/agent_import.py`**: upstream moved it out of core into the
+  agent-importers plugin (`1342ab8553`). The fork's only change was one glyph
+  (`⚷` to `◆` in "Secrets stripped"); dropped, not reapplied.
+- **`request_elicitation_consent`** (`tools/approval_prompt.py`): upstream's new
+  `remember_key` parameter and scoped `allow_permanent`/`allow_session` taken; the
+  fork's `read_only_hint` parameter and `_manual_gate_scope` wrapper kept.
+- **`VALID_HOOKS`** (`hermes_cli/plugins.py`): union of the fork's three kanban
+  hooks and upstream's `post_compaction`.
 
 ### Resolved 2026-10-05 (kept for history)
 
