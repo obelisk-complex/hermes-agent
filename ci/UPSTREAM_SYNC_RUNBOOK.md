@@ -145,9 +145,15 @@ the issue body is a contained follow-up — flagging it, not doing it here.
    git config user.name "obelisk-complex"
    git merge upstream/main      # stops at the unresolved conflict
    ```
-2. **Resolve once, as a union where the change is additive.** When upstream and
-   the fork inserted independent lines at the same spot, keep BOTH (upstream's
-   block first, to match upstream's hunk order). Then `git add <file>` and run
+2. **Resolve once, defaulting to upstream.** This fork defers to upstream: take
+   upstream's side of each conflict, and keep fork lines only when they are
+   load-bearing, meaning removing them would break a fork feature, a fork-local
+   test, or fork CI on a personal account (for example the `ubuntu-latest`
+   runners that replace upstream's larger-runner labels). Lines that are merely
+   additive and would compile alongside upstream's are not a reason to keep both.
+   When a fork hunk does stay, place it after upstream's block to match
+   upstream's hunk order, and note why in
+   `website/docs/developer-guide/fork-upstream-watchlist.md`. Then `git add <file>` and run
    `git commit --no-edit` once all conflicts are resolved and staged. With
    `rerere.autoupdate`, the resolution is recorded automatically.
 3. **Capture the new entry.** The new `rr-cache/<hash>/` now has a `postimage`.
