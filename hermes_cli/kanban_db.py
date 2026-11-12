@@ -3347,14 +3347,13 @@ def block_task(
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
-        if kind == "dependency":
-            # Historical ordering: the dependency lane fires inside the txn.
-            _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
-            return True
-        # Capture the fork-local observer kwargs INSIDE the txn (the dependency
-        # lane returned above; ``new_status`` is whatever _route_block chose).
-        # block_task is the manual-block entry point, so trigger is always
-        # "manual"; _record_task_failure carries trigger="auto_block".
+        # Capture the fork-local observer kwargs INSIDE the txn (``new_status``
+        # is whatever _route_block chose). block_task is the manual-block entry
+        # point, so trigger is always "manual"; _record_task_failure carries
+        # trigger="auto_block". The dependency lane parks in ``todo`` rather
+        # than blocking, so it never fired the fork hook and still does not;
+        # upstream (d4283a9c9c) now fires its own hook post-commit for it too.
+        fire_fork_blocked_hook = kind != "dependency"
         blocked_hook_kwargs = dict(
             task_id=task_id, reason=reason, run_id=run_id, trigger="manual",
         )
@@ -3364,7 +3363,8 @@ def block_task(
     # slow callback cannot hold the BEGIN IMMEDIATE lock. Only reached when the
     # UPDATE matched; the early ``return False`` short-circuits the no-op case,
     # so the hook never fires on a non-block.
-    _invoke_kanban_hook("fork_kanban_task_blocked", **blocked_hook_kwargs)
+    if fire_fork_blocked_hook:
+        _invoke_kanban_hook("fork_kanban_task_blocked", **blocked_hook_kwargs)
     return True
 
 

@@ -16,7 +16,7 @@ on:
 # sub-scripts of a package, else its ``check``).
 jobs:
   workspaces:
-    name: List npm workspaces
+    name: List pnpm workspaces
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -29,9 +29,9 @@ jobs:
         with:
           toolchain: node
 
-      # setup-pm caches npm downloads, not the installed workspace tree.
+      # setup-pm caches pnpm's store, not the installed workspace tree.
       # Cache the installed tree itself, keyed on the lockfile, and skip
-      # ``npm ci`` on an exact hit. No restore-keys: a partial hit would leave
+      # ``pnpm install`` on an exact hit. No restore-keys: a partial hit would leave
       # a stale tree, so anything but an exact lockfile match reinstalls from
       # scratch. The discovery job installs with --ignore-scripts, so its tree
       # differs from the check jobs' — hence the distinct ``-noscripts`` key.
@@ -46,14 +46,16 @@ jobs:
             ui-tui/packages/*/node_modules
             tests-js/node_modules
             web/node_modules
-          key: node-modules-noscripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-npm${{ steps.node.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-noscripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-pnpm${{ steps.node.outputs.pnpm-version }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml') }}
 
       - uses: ./.github/actions/retry
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
-          command: npm ci --ignore-scripts
+          command: pnpm install --frozen-lockfile --ignore-scripts
 
-      # Discovery is ``npm query .workspace``. A new package or a new
+      # Discovery is ``pnpm ls -r --depth -1 --json``, the same rule as
+      # upstream's .github/scripts/run-workspace-checks.mjs (the root project
+      # is skipped: its ``check`` runs every workspace). A new package or a new
       # ``check:*`` script needs no change here. An empty list is an error and
       # not an empty matrix, because an empty matrix reports green after it
       # checks nothing.
@@ -61,7 +63,13 @@ jobs:
         run: |
           node -e '
           const { execSync } = require("child_process");
-          const pkgs = JSON.parse(execSync("npm query .workspace", { encoding: "utf-8" }));
+          const { readFileSync } = require("fs");
+          const path = require("path");
+          const root = process.cwd();
+          const pkgs = JSON.parse(execSync("pnpm ls --recursive --depth -1 --json", { encoding: "utf-8" }))
+            .map(p => ({ location: path.relative(root, p.path).split(path.sep).join("/"), dir: p.path }))
+            .filter(p => p.location !== "")
+            .map(p => ({ location: p.location, ...JSON.parse(readFileSync(path.join(p.dir, "package.json"), "utf-8")) }));
           if (pkgs.length === 0) {
             console.error("::error::Workspace discovery produced an empty package list — refusing to emit a zero-length matrix (would skip all JS/TS checks silently).");
             process.exit(1);
@@ -120,16 +128,19 @@ jobs:
       # so give the runner a virtual one the same way the Playwright lane does.
       - name: Install zsh and a virtual display for Electron
         if: runner.os == 'Linux'
+        # Refresh the package index first, like every other apt step here: a
+        # runner image without a populated list can't resolve zsh/libnotify4.
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y zsh xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
             xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
 
-      # setup-pm caches npm downloads, not the installed workspace tree.
-      # The job then extracts the full workspace node_modules
+      # setup-pm caches pnpm's store, not the installed workspace tree.
+      # The job then links the full workspace node_modules
       # again and runs the native postinstalls again. Electron's binary is
       # prepared explicitly below. This caches the installed tree itself, keyed on the
-      # lockfile, and skips ``npm ci`` on an exact hit. There are no
+      # lockfile, and skips ``pnpm install`` on an exact hit. There are no
       # restore-keys: a partial hit leaves a stale tree, so anything other
       # than an exact lockfile match reinstalls from the start.
       #
@@ -137,7 +148,7 @@ jobs:
       # artifacts and the explicitly prepared Electron dist, both inside the cached tree.
       #
       # The ~/.cache/electron download cache stays out of the key on purpose.
-      # ``npm ci`` is skipped on a hit, so nothing reads that cache. It only
+      # ``pnpm install`` is skipped on a hit, so nothing reads that cache. It only
       # makes the archive larger.
       - name: Restore node_modules
         id: node-modules-cache
@@ -150,17 +161,53 @@ jobs:
             ui-tui/packages/*/node_modules
             tests-js/node_modules
             web/node_modules
-          key: node-modules-scripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-npm${{ steps.node.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-scripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.node-version }}-pnpm${{ steps.node.outputs.pnpm-version }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml') }}
 
+      # Vitest records each file's duration and result under
+      # node_modules/.vite/vitest and orders the next run from it, longest first.
+      # The run that misses the cache writes it before the post step saves the
+      # tree, so every hit until the next lockfile change replays that one run's
+      # order: the slowest jsdom suites all start cold together and starve the
+      # rest past their 15s timeout. Drop it so each run orders from scratch.
+      - name: Drop vitest run history from the restored tree
+        run: rm -rf node_modules/.vite/vitest apps/*/node_modules/.vite/vitest ui-tui/node_modules/.vite/vitest ui-tui/packages/*/node_modules/.vite/vitest tests-js/node_modules/.vite/vitest web/node_modules/.vite/vitest
+
+      # No --trust-lockfile: this install is the gate that checks every locked
+      # version against pnpm-workspace.yaml's release-age policy.
       - uses: ./.github/actions/retry
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
-          command: npm ci
+          command: just js-install
+
+      # The cached tree is keyed on the lockfile alone, so an exact hit proves
+      # nothing about the manifests. This checks the lockfile still matches
+      # every package.json and passes the release-age policy, without
+      # touching node_modules.
+      - name: Check the lockfile against the manifests and policy
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+        run: pnpm install --frozen-lockfile --lockfile-only
+
+      # tests-js/pnpm-workspace-policy.test.mjs reads pnpm-workspace.yaml after the install above; an
+      # install that rewrites it (an exclude prune, say) would hide what was committed, and the
+      # clean-checkout step at the end only warns.
+      - name: Check the install kept pnpm-workspace.yaml as committed
+        run: git diff --exit-code -- pnpm-workspace.yaml
 
       - name: Prepare locked Electron runtime before parallel checks
-        run: node scripts/build/electron-runtime.mjs --source .
+        run: just electron-runtime
 
-      - run: npm run --prefix ${{ matrix.package }} ${{ matrix.script }}
+      # The WhatsApp bridge is a standalone npm package, outside the root
+      # workspaces, so run-workspace-checks never sees it. Two of its suites
+      # import @whiskeysockets/baileys, so install its own lockfile first;
+      # --ignore-scripts because the tests need no native build.
+      - name: Install WhatsApp bridge dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: just js-install-whatsapp-bridge
+      - name: Run WhatsApp bridge node tests
+        run: just test-whatsapp-bridge
+
+      - run: pnpm --dir ${{ matrix.package }} run ${{ matrix.script }}
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when
