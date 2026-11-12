@@ -1,5 +1,5 @@
 // Runs one shard of the UI vitest suite, deriving the shard index/count from
-// the npm script NAME (npm_lifecycle_event), so the name and the flag can
+// the package script NAME (npm_lifecycle_event, which pnpm also sets), so the name and the flag can
 // never disagree. A copy-paste slip like "check:test:ui:shard-2of3" running
 // --shard=1/3 would silently skip a third of the suite while CI stays green;
 // deriving from the name makes that impossible.
@@ -18,7 +18,7 @@ const scriptName = process.env.npm_lifecycle_event ?? ''
 const match = scriptName.match(SHARD_RE)
 if (!match) {
   console.error(
-    `run-ui-shard: must be invoked via an npm script named check:test:ui:shard-<N>of<M> (got ${JSON.stringify(scriptName)})`,
+    `run-ui-shard: must be invoked via a package script named check:test:ui:shard-<N>of<M> (got ${JSON.stringify(scriptName)})`,
   )
   process.exit(1)
 }
@@ -48,11 +48,12 @@ if (counts.size !== 1 || indices.length !== count || indices.some((v, i) => v !=
 }
 
 // Delegate through test:ui so the vitest command stays single-sourced.
-// npm resolves to npm.cmd on Windows, which needs a shell (same handling as
-// test-desktop.mjs and stage-native-deps.mjs).
+// pnpm resolves to pnpm.cmd on Windows, which needs a shell (same handling as
+// test-desktop.mjs and stage-native-deps.mjs). pnpm forwards every argument
+// after the script name to the script, so no ``--`` separator.
 const result = spawnSync(
-  'npm',
-  ['run', 'test:ui', '--', `--shard=${index}/${count}`, ...process.argv.slice(2)],
+  'pnpm',
+  ['run', 'test:ui', `--shard=${index}/${count}`, ...process.argv.slice(2)],
   { stdio: 'inherit', cwd: pkgDir, shell: process.platform === 'win32' },
 )
 if (result.error) {

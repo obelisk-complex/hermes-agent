@@ -158,10 +158,12 @@ jobs:
       # content, not survived damage. tests/tools/test_mcp_oauth_metadata.py
       # — an unrelated docstring section-header underline happens to be
       # exactly 7 `=` characters, coincidentally matching the marker regex.
+      # tests/test_audit_old_updater_imports.py: upstream's fixture for a
+      # committed merge conflict writes literal markers into a temp repo.
       - name: Scan merged tree for conflict markers, report rerere activity
         if: steps.check.outputs.upstream_ahead != '0'
         run: |
-          markers=$(git grep -nE '^(<{7}|={7}|>{7})( |$)' HEAD -- . ':!ci/rerere-cache' ':!tests/tools/test_mcp_oauth_metadata.py' || true)
+          markers=$(git grep -nE '^(<{7}|={7}|>{7})( |$)' HEAD -- . ':!ci/rerere-cache' ':!tests/tools/test_mcp_oauth_metadata.py' ':!tests/test_audit_old_updater_imports.py' || true)
           if [ -n "$markers" ]; then
             echo "::error::Conflict markers survived in the merged tree — a resolution left markers in a file this gate doesn't otherwise parse-check (uv.lock, .ts, .json, .md, etc). origin/main left untouched."
             echo "$markers"
@@ -318,7 +320,7 @@ jobs:
         # Same extras as tests.yml — several fork-local tests exercise the
         # lazy-install provider SDKs directly, and the hermetic test env
         # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1).
-        run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+        run: uv sync --locked --python 3.11 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra keychain
 
       - name: Run fork-local tests against the merged tree
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'

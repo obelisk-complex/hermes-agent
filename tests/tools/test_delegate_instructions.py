@@ -28,7 +28,10 @@ from tools.delegate_tool_progress import _build_child_system_prompt
 
 
 def _prompt(role="leaf"):
-    return _build_child_system_prompt("do the thing", role=role)
+    # Upstream e7ff451652 moved the goal out of the system prompt into the
+    # child's first user turn (child_task_message), so the builder takes no
+    # goal: the prompt is identical across siblings for prompt caching.
+    return _build_child_system_prompt(role=role)
 
 
 def test_noop_rejection_instruction_present():

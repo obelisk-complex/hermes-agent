@@ -35,13 +35,14 @@ fix (search their commit history / the linked file for the same symptom).
   (`_pending_call_context` replay only wraps the consent call, not the hint
   lookup), so this stays open. Re-checked 2026-10-28: `upstream/main` still has
   no `mcp_tool_read_only_hint` or caller of the hint in `mcp_tool_sampling.py`.
+  Re-checked 2026-11-11: unchanged.
 - **`install_modify_other_keys_aliases()` also installs the keypress data
   normalisation** (`hermes_cli/pt_input_extras.py`). Upstream calls
   `install_keypress_data_normalization()` only from `cli.py`; the curses pickers
   (`hermes_cli/curses_ui.py`) install the aliases alone, so they miss the
   normalisation the fork adds. Drop once upstream's `install_modify_other_keys_aliases()` (or
-  `curses_ui.py`) installs the normalisation itself. Re-checked 2026-10-28: unchanged
-  upstream.
+  `curses_ui.py`) installs the normalisation itself. Re-checked 2026-10-28 and
+  2026-11-11: unchanged upstream.
 - **Upstream's code-health ratchet vs a sync PR** (`.github/workflows/lint.yml`,
   `scripts/code_health`, `ENFORCEMENT = "blocking"`, added since 2026-10-03). On a
   pull request it compares the merge commit with its first parent, which for a
@@ -54,14 +55,56 @@ fix (search their commit history / the linked file for the same symptom).
   gate does not run it; only a manually opened sync PR does. Undecided: flip
   `ENFORCEMENT` to `"advisory"` on the fork, or clean the 40. Re-checked
   2026-10-28: `upstream/main` is still `ENFORCEMENT = "blocking"`; counts above not
-  re-measured.
+  re-measured. Re-checked 2026-11-11: still `"blocking"`.
 - **Workflow runners and the JS check matrix** (`desktop-bundle-smoke.yml`,
   `install-e2e-windows-run.yml`, `js-tests.yml`). Upstream moved these to larger
   runners (`windows-latest-32-core`, `blacksmith-32vcpu-ubuntu-2404`) that never
   resolve on a personal account, so the fork keeps the standard runners. `js-tests.yml`
   keeps the fork's per-package matrix on `ubuntu-latest` and takes upstream's
   "Prepare locked Electron runtime" step, but not its `run-workspace-checks.mjs`
-  step. Re-check each sync: runner labels and the step list.
+  step. Re-check each sync: runner labels and the step list. Since 2026-11-11 the
+  script itself is kept (upstream's `just check-js-ci` runs it locally); only the
+  fork's CI does not call it. `.github/actionlint.yaml` (upstream's Blacksmith
+  runner-label list) stays deleted.
+- **npm to pnpm** (upstream `7062229090`, taken 2026-11-11). The fork's
+  `js-tests.yml` matrix discovery now installs with `pnpm install --frozen-lockfile
+  --ignore-scripts` and lists packages with `pnpm ls -r --depth -1 --json` (the rule
+  `run-workspace-checks.mjs` uses); each leg runs `pnpm --dir <pkg> run <script>`.
+  `apps/desktop/scripts/run-ui-shard.mjs` delegates to `pnpm run test:ui`. Neither
+  was run on a real runner before the sync PR; check the first `js-tests` run.
+- **`block_task` and the fork's `fork_kanban_task_blocked` hook**
+  (`hermes_cli/kanban_db.py`). Upstream `d4283a9c9c` dropped the dependency lane's
+  in-transaction early return, so upstream's `kanban_task_blocked` now fires
+  post-commit for every kind. The fork hook still skips the dependency lane (it parks
+  in `todo`, not `blocked`), via `fire_fork_blocked_hook`. Revisit if upstream gives
+  the dependency lane its own event.
+- **Dual-signal tags on a multi-key prompt** (`tools/approval.py`). Upstream now asks
+  once for every pending pattern key (`detect_content_rule_keys`, `_pending_findings`).
+  The fork passes one `warnings` tuple per key to `_resolve_tags`, so auto-approval
+  needs every key's tag enabled; a content-rule key with no taxonomy entry resolves
+  `UNTAGGED` and falls through to the human. Re-check if upstream changes how keys
+  reach `_human_decision`.
+- **`tui_gateway/slash_worker.py` `env_float` import**. Upstream removed it with the
+  env-tunable watchdog; the fork re-adds it for
+  `HERMES_SLASH_WORKER_MCP_DISCOVERY_TIMEOUT_S`. Drop the fork's join bound if
+  upstream raises the slash worker's discovery wait itself.
+- **Fork-owned debt the sync gate trips on** (both pre-date 2026-11-11 and are
+  identical on `origin/main` `b277306cb0`). `ruff check .` reports 92 findings, all in
+  fork files (`plugins/quality-gate`, fork tests, `tools/action_tags.py`, ...), so
+  `sync-upstream.yml`'s ruff step fails; upstream's own tree is clean.
+  `tests/gateway/test_kanban_recovery.py` (`custom`, `restart`) fails on the fork but
+  passes on upstream: the mandatory quality-gate plugin's tier classification times
+  out and a `pre_kanban_spawn` model override applies inside upstream's recovery
+  probe. Neither is in the fork-local test set the gate runs.
+
+### Resolved 2026-11-11 (kept for history)
+
+- **`qs: 6.16.0` override** (`scripts/whatsapp-bridge/package.json`): upstream's
+  bridge lock resolves 6.16.1 with `body-parser` 1.20.9. Override dropped.
+- **`sync-upstream.yml` dependency install**: asked for the `dev` and `hindsight`
+  extras upstream no longer defines; now mirrors `tests.yml` (`--group dev`,
+  `keychain`). Its marker scan also skips upstream's
+  `tests/test_audit_old_updater_imports.py` fixture, which holds literal markers.
 
 ### Resolved 2026-10-28 (kept for history)
 
