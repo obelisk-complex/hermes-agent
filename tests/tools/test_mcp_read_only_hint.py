@@ -257,6 +257,7 @@ class TestPendingCallToolNameLifecycle:
     if either line goes missing."""
 
     def test_tool_name_is_set_during_the_call_and_cleared_after(self):
+        import tools.mcp_tool as core
         from tools.mcp_tool import _servers
         from tools.mcp_tool_handlers import _make_tool_handler
 
@@ -277,6 +278,8 @@ class TestPendingCallToolNameLifecycle:
         mock_session.call_tool = AsyncMock(side_effect=_capture)
         server.session = mock_session
         _servers["call_lifecycle_srv"] = server
+        # Upstream's trust gate refuses an unregistered write-capable tool before the call is made.
+        core._tool_read_only_hints.setdefault("call_lifecycle_srv", {})["reader"] = True
 
         try:
             assert server._pending_call_tool_name is None  # sanity: pre-call
@@ -285,6 +288,7 @@ class TestPendingCallToolNameLifecycle:
                 handler({})
         finally:
             _servers.pop("call_lifecycle_srv", None)
+            core._tool_read_only_hints.pop("call_lifecycle_srv", None)
 
         assert seen_during_call["tool_name"] == "reader"
         # The more important half: if the finally-clear is deleted, this
