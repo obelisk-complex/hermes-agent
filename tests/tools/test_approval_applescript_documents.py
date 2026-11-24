@@ -215,7 +215,7 @@ def smart_interactive(monkeypatch):
 
     def guardian(command, *_args, **_kwargs):
         guardian_calls.append(command)
-        return "approve"
+        return "approve", None  # the fork's (verdict, decision) shape
 
     monkeypatch.setattr(approval_module, "_smart_verdict", guardian)
     approval_module.clear_session(session_key)
