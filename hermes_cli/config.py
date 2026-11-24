@@ -2777,7 +2777,7 @@ def edit_config():
     subprocess.run([editor, str(config_path)], check=False)
 
 
-def warn_auto_approve_dependencies(key: str, config: Optional[Dict[str, Any]] = None) -> None:
+def warn_auto_approve_dependencies(key: str, config: Optional[dict[str, Any]] = None) -> None:
     """Post-write warnings for ``approvals.auto_approve*`` (T4 of the dual-signal plan).
 
     D7/R13/R14/R16 of the plan rest on config-set-time warnings, and ``set_config_value`` has no

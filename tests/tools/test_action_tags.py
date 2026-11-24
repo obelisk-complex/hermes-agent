@@ -115,7 +115,7 @@ class TestHermesConfigDetection:
         "hermes -p ade config set approvals.mode off",
     ])
     def test_write_verbs_detected(self, cmd):
-        detected, key, desc = self._module.detect_dangerous_command(cmd)
+        detected, _key, desc = self._module.detect_dangerous_command(cmd)
         assert detected, f"{cmd!r} should be detected"
         assert desc == "hermes config set approval settings"
         assert tag_for_pattern_key(desc) is ActionTag.CONFIG_WRITE

@@ -28,7 +28,7 @@ def _slug(value: str) -> str:
     return _SAFE.sub("-", value or "").strip("-")
 
 
-def evidence_dir(workspace: Union[str, Path]) -> Path:
+def evidence_dir(workspace: str | Path) -> Path:
     """Return <workspace>/.hermes/gate-runs, ensuring it + its .gitignore."""
     d = Path(workspace) / ".hermes" / "gate-runs"
     d.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ def evidence_dir(workspace: Union[str, Path]) -> Path:
 
 
 def record_run(
-    workspace: Union[str, Path],
+    workspace: str | Path,
     gate_run: runner.GateRun,
     *,
     kind: str,

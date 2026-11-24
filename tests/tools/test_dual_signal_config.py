@@ -13,7 +13,7 @@ import pytest
 # three getters, but NOT _last_known_good_auto_approve / _auto_approve_tags_warned:
 # those are module state, and `from X import` copies the binding, so resetting them
 # on the facade would silently miss the caches the getters actually write.
-import tools.approval_context as approval_context
+from tools import approval_context
 from hermes_cli.config import warn_auto_approve_dependencies
 
 

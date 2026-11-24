@@ -251,7 +251,7 @@ def test_carve_out_is_restricted_to_bundled_plugins():
 
     from hermes_cli.plugins import FORK_MANDATORY_PLUGIN_KEYS, PluginManager
 
-    name = sorted(FORK_MANDATORY_PLUGIN_KEYS)[0]
+    name = min(FORK_MANDATORY_PLUGIN_KEYS)
     mgr = PluginManager.__new__(PluginManager)
     mgr._plugins = {}
     squatter = MagicMock(name="manifest", key=name, source="user")

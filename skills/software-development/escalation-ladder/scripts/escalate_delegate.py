@@ -132,6 +132,7 @@ def _call_ollama(model: str, prompt: str, timeout: int = 10) -> str | None:
             capture_output=True,
             text=True,
             timeout=timeout,
+            check=False,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -230,7 +231,8 @@ def _hermes_config_get(key: str) -> str:
     try:
         result = subprocess.run(
             ["hermes", "config", "get", key],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            check=False,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -247,7 +249,8 @@ def _hermes_config_set(key: str, value: str) -> bool:
     try:
         result = subprocess.run(
             ["hermes", "config", "set", key, value],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            check=False,
         )
         if result.returncode == 0:
             return True

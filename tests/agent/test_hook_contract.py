@@ -93,7 +93,7 @@ def test_pre_verify_precondition_still_widened():
 
 def test_terminal_substitution_helper_present():
     """The other half: without it an exhausted budget ships the refused answer."""
-    from agent.turn_stop_gates import pre_verify_terminal_substitute  # noqa: F401
+    from agent.turn_stop_gates import pre_verify_terminal_substitute
 
 
 # Both fork edits in agent/turn_final_response.py are single lines in a file
@@ -137,7 +137,7 @@ if __name__ == "__main__":
         except AssertionError as e:
             _failed += 1
             print(f"  ✗ {_t.__name__} — {e}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _failed += 1
             print(f"  ✗ {_t.__name__} — ERROR: {e!r}")
     print(f"\n=== {_passed} passed, {_failed} failed ===")

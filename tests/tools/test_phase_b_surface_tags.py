@@ -13,8 +13,8 @@ import os
 import pytest
 
 import tools.approval as approval_module
-import tools.approval_context as approval_context
-import tools.approval_prompt as approval_prompt
+from tools import approval_context
+from tools import approval_prompt
 from tools.action_tags import CONFIGURABLE_TAGS
 from tools.approval import (
     check_execute_code_guard,

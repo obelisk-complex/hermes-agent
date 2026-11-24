@@ -270,11 +270,11 @@ VALID_HOOKS: set[str] = {
 # just these IDs. Narrow, fork-only carve-out — opt-in behaviour is unchanged
 # for every other plugin. The matching CLI-side refusal lives in
 # hermes_cli/plugins_cmd.py::cmd_disable.
-FORK_MANDATORY_PLUGIN_KEYS: Set[str] = frozenset(
+FORK_MANDATORY_PLUGIN_KEYS: set[str] = frozenset(
     {"self-check-enforcer", "quality-gate"}
 )
 
-SHELL_UNSUPPORTED_HOOKS: Set[str] = {"transform_api_error_classification"}
+SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification"}
 
 _env_enabled = env_var_enabled  # imported by plugins/memory
 

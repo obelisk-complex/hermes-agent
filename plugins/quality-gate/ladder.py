@@ -12,7 +12,7 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 # Weakest -> strongest. Overridden by config quality_gate.model_ladder.
-DEFAULT_LADDER: List[str] = [
+DEFAULT_LADDER: list[str] = [
     "claude-3-5-haiku",
     "claude-sonnet-4-5",
     "claude-opus-4-8",
@@ -25,9 +25,9 @@ RETRIABLE_FAILURES = frozenset({
 })
 
 
-def _dedupe(seq: List[str]) -> List[str]:
+def _dedupe(seq: list[str]) -> list[str]:
     seen: set = set()
-    out: List[str] = []
+    out: list[str] = []
     for x in seq:
         if x not in seen:
             seen.add(x)
@@ -35,7 +35,7 @@ def _dedupe(seq: List[str]) -> List[str]:
     return out
 
 
-def load_ladder(config: Optional[dict]) -> List[str]:
+def load_ladder(config: Optional[dict]) -> list[str]:
     """Return the configured ladder, or DEFAULT_LADDER, de-duped in order."""
     if isinstance(config, dict):
         qg = config.get("quality_gate")
@@ -46,7 +46,7 @@ def load_ladder(config: Optional[dict]) -> List[str]:
     return list(DEFAULT_LADDER)
 
 
-def next_rung(current: Optional[str], ladder: List[str]) -> Optional[str]:
+def next_rung(current: Optional[str], ladder: list[str]) -> Optional[str]:
     """The next stronger rung after *current*; None if already at the top.
 
     Unknown/None current -> the first rung. A NON-None current that is not on
@@ -68,7 +68,7 @@ def next_rung(current: Optional[str], ladder: List[str]) -> Optional[str]:
     return ladder[0]
 
 
-def initial_rung_for_tier(ladder: List[str], tier: Optional[str]) -> str:
+def initial_rung_for_tier(ladder: list[str], tier: Optional[str]) -> str:
     """Tier-aware starting rung, capped at len-2 so one escalation always remains.
 
     quick    -> weakest rung   (ladder[0])
@@ -97,7 +97,7 @@ def initial_rung_for_tier(ladder: List[str], tier: Optional[str]) -> str:
     return ladder[idx]
 
 
-def initial_rung(ladder: List[str]) -> str:
+def initial_rung(ladder: list[str]) -> str:
     """Backward-compatible default starting rung (the 'thorough' rung).
 
     Retained for existing callers/tests; delegates to ``initial_rung_for_tier``

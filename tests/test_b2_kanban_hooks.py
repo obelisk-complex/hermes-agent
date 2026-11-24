@@ -466,7 +466,7 @@ if __name__ == "__main__":
         except AssertionError as e:
             _failed += 1
             print(f"  FAIL {_t.__name__} -- {e}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _failed += 1
             print(f"  ERROR {_t.__name__} -- ERROR: {e!r}")
     print(f"\n=== {_passed} passed, {_failed} failed ===")

@@ -74,7 +74,7 @@ class TestCompletionHookContract:
         """
         import gate as gate_mod  # conftest-aliased flat name
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
         ws = tmp_path / "ws_fail"
         ws.mkdir()
         (ws / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
@@ -114,7 +114,7 @@ class TestCompletionHookContract:
         """
         import gate as gate_mod
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
         ws = tmp_path / "ws_pass"
         ws.mkdir()
 
@@ -144,7 +144,7 @@ class TestCompletionHookContract:
         """
         import gate as gate_mod
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         called = []
         def fake_eval(*a, **kw):
@@ -236,7 +236,7 @@ class TestBlockedHookContract:
             events=(),  # no completion_blocked_plugin event anywhere
         )
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         # Fire with REAL flat kwargs from the fork's auto-block path -- a
         # plain crash, not a gate failure.
@@ -266,7 +266,7 @@ class TestBlockedHookContract:
             events=(),
         )
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         ctx.hooks["fork_kanban_task_blocked"](
             task_id="t-auto-violation",
@@ -300,7 +300,7 @@ class TestBlockedHookContract:
             events=("completed", "completion_blocked_plugin"),
         )
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         ctx.hooks["fork_kanban_task_blocked"](
             task_id="t-auto-gate",
@@ -336,7 +336,7 @@ class TestBlockedHookContract:
             events=("completion_blocked_plugin", "completed"),
         )
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         ctx.hooks["fork_kanban_task_blocked"](
             task_id="t-auto-stale",
@@ -369,7 +369,7 @@ class TestBlockedHookContract:
         update_calls: list = []
         self._patch_kdb(monkeypatch, "claude-sonnet-4-5", requeue_calls, update_calls)
 
-        entry, ctx = _fresh_entry_and_ctx()
+        _entry, ctx = _fresh_entry_and_ctx()
 
         # Fire with REAL flat kwargs from the fork's manual-block path.
         ctx.hooks["fork_kanban_task_blocked"](
@@ -414,7 +414,7 @@ class TestSpawnHookContract:
             return "standard"  # controlled return
         monkeypatch.setattr(classify_mod, "classify_tier", recording_classify)
 
-        entry, ctx = _fresh_entry_and_ctx()
+        entry, _ctx = _fresh_entry_and_ctx()
         ws = tmp_path / "spawn_ws"
         ws.mkdir()
 
@@ -457,7 +457,7 @@ class TestSpawnHookContract:
         # Sidecar must have been written (proves workspace_path was non-None).
         sidecar = ws / ".hermes" / "quality-gate" / "tier"
         assert sidecar.exists(), (
-            f"Tier sidecar not written -- workspace_path was None in task dict"
+            "Tier sidecar not written -- workspace_path was None in task dict"
         )
 
         # classify_tier was called with the real title from flat kwargs (not "").

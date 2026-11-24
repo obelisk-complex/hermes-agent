@@ -46,7 +46,7 @@ def _scan_dir(d: Path, found: set) -> None:
                 found.add("python")
 
 
-def detect_stacks(workspace: Union[str, Path]) -> List[str]:
+def detect_stacks(workspace: str | Path) -> list[str]:
     """Return sorted detected stack names under *workspace*.
 
     Scans the root and its immediate (non-skipped) subdirectories. Skipped

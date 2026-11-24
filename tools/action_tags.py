@@ -25,16 +25,16 @@ from enum import Enum
 from typing import Literal
 
 __all__ = [
-    "ActionTag",
-    "ActionNature",
     "ACTION_NATURE",
+    "CONFIGURABLE_TAGS",
     "DANGEROUS_PATTERN_TAGS",
     "DETECTION_FAMILY_TAGS",
-    "CONFIGURABLE_TAGS",
     "NEVER_AUTO_APPROVABLE",
     "NOT_WIRED",
-    "tag_for_pattern_key",
     "WRITE_SUBSYSTEM_TAGS",
+    "ActionNature",
+    "ActionTag",
+    "tag_for_pattern_key",
     "tag_for_write_subsystem",
 ]
 
@@ -82,7 +82,7 @@ class ActionNature:
 
     destructive: bool | None
     reversible: bool | None
-    kind: Literal["content", "switch", None]
+    kind: Literal["content", "switch"] | None
 
 
 ACTION_NATURE: dict[ActionTag, ActionNature] = {

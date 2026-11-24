@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_TOTAL_S = 1800.0
 
 
-def _budget_skip(cmd: List[str], cwd: Union[str, Path]) -> "runner.GateRun":
+def _budget_skip(cmd: list[str], cwd: str | Path) -> runner.GateRun:
     """A synthetic skipped run for a command not executed due to the budget."""
     return runner.GateRun(
         cmd=list(cmd), cwd=str(cwd), rc=-4, stdout="", stderr="",
@@ -43,8 +43,8 @@ def _budget_skip(cmd: List[str], cwd: Union[str, Path]) -> "runner.GateRun":
 class GateResult:
     passed: bool
     summary: str
-    runs: List[runner.GateRun] = field(default_factory=list)
-    stacks: List[str] = field(default_factory=list)
+    runs: list[runner.GateRun] = field(default_factory=list)
+    stacks: list[str] = field(default_factory=list)
     tier: str = tiers.DEFAULT_TIER
     hygiene_clean: bool = True
 
@@ -57,7 +57,7 @@ def _fmt_run(stack: str, kind: str, r: runner.GateRun) -> str:
 
 
 def evaluate_completion(
-    workspace: Union[str, Path],
+    workspace: str | Path,
     tier: str = tiers.DEFAULT_TIER,
     *,
     task_id: str = "",
@@ -72,8 +72,8 @@ def evaluate_completion(
             runs=[], stacks=[], tier=tier, hygiene_clean=True,
         )
 
-    runs: List[runner.GateRun] = []
-    lines: List[str] = []
+    runs: list[runner.GateRun] = []
+    lines: list[str] = []
     kinds = tiers.kinds_for_tier(tier)
     any_real_failure = False
 

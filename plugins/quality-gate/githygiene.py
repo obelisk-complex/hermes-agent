@@ -19,17 +19,18 @@ logger = logging.getLogger(__name__)
 class HygieneResult:
     is_repo: bool
     clean: bool
-    dirty_paths: List[str] = field(default_factory=list)
+    dirty_paths: list[str] = field(default_factory=list)
     reason: str = ""
 
 
-def check_hygiene(workspace: Union[str, Path]) -> HygieneResult:
+def check_hygiene(workspace: str | Path) -> HygieneResult:
     ws = str(workspace)
     try:
         proc = subprocess.run(
             ["git", "-C", ws, "status", "--porcelain"],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=30,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.warning("quality-gate: git hygiene check could not run: %s", exc)
@@ -39,7 +40,7 @@ def check_hygiene(workspace: Union[str, Path]) -> HygieneResult:
         # Not a git repo (or git errored) -> nothing to be dirty about.
         return HygieneResult(is_repo=False, clean=True, reason="not a git repo")
 
-    dirty: List[str] = []
+    dirty: list[str] = []
     for line in proc.stdout.splitlines():
         if not line.strip():
             continue
