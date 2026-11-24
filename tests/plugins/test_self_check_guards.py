@@ -30,6 +30,7 @@ def _git(repo, *args):
     return subprocess.run(
         ["git", "-C", repo, *args],
         capture_output=True, text=True, timeout=15,
+        check=False,
     )
 
 

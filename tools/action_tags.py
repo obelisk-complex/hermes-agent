@@ -25,16 +25,16 @@ from enum import Enum
 from typing import Literal
 
 __all__ = [
-    "ActionTag",
-    "ActionNature",
     "ACTION_NATURE",
+    "CONFIGURABLE_TAGS",
     "DANGEROUS_PATTERN_TAGS",
     "DETECTION_FAMILY_TAGS",
-    "CONFIGURABLE_TAGS",
     "NEVER_AUTO_APPROVABLE",
     "NOT_WIRED",
-    "tag_for_pattern_key",
     "WRITE_SUBSYSTEM_TAGS",
+    "ActionNature",
+    "ActionTag",
+    "tag_for_pattern_key",
     "tag_for_write_subsystem",
 ]
 
@@ -82,7 +82,7 @@ class ActionNature:
 
     destructive: bool | None
     reversible: bool | None
-    kind: Literal["content", "switch", None]
+    kind: Literal["content", "switch"] | None
 
 
 ACTION_NATURE: dict[ActionTag, ActionNature] = {
@@ -243,8 +243,8 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "in-place edit of Hermes config/env": ActionTag.CONFIG_WRITE,
     "in-place edit of Hermes config/env (long flag)": ActionTag.CONFIG_WRITE,
     "in-place edit of Hermes config/env (perl/ruby)": ActionTag.CONFIG_WRITE,
-    # T2a (D19): hermes config CLI write verbs — tagged statically
-    "write hermes config via CLI (approval policy lives here)": ActionTag.CONFIG_WRITE,
+    # T2a (D19): `hermes config set|unset` of an approval-policy key (upstream's anchored rule), tagged statically
+    "hermes config set approval settings": ActionTag.CONFIG_WRITE,
     # interpreters / heredoc shell
     "shell execution via heredoc": ActionTag.COMMAND_INTERPRETER,
     # vcs

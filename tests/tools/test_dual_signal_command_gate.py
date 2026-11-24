@@ -22,8 +22,8 @@ import pytest
 # the module that DEFINES it — both are resolved as module globals at call time, so a patch
 # there reaches every consumer, including the ones tools.approval calls through.
 import tools.approval as approval_module
-import tools.approval_context as approval_context
-import tools.approval_smart as approval_smart
+from tools import approval_context
+from tools import approval_smart
 from tools.approval import (
     _manual_gate_scope,
     check_all_command_guards,
@@ -228,7 +228,7 @@ class TestBarrierPrimitives:
     def test_manual_gate_scope_ignores_synthetic_callback(self):
         """Control 17: subagent callbacks are not human decisions."""
         set_current_session_key("sess-s")
-        cb = lambda *a, **k: "deny"  # noqa: E731
+        cb = lambda *a, **k: "deny"
         cb._hermes_synthetic_approval = True
         with patch("tools.terminal_tool._get_approval_callback", return_value=cb):
             with _manual_gate_scope("sess-s"):

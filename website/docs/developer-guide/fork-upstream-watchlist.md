@@ -88,14 +88,48 @@ fix (search their commit history / the linked file for the same symptom).
   env-tunable watchdog; the fork re-adds it for
   `HERMES_SLASH_WORKER_MCP_DISCOVERY_TIMEOUT_S`. Drop the fork's join bound if
   upstream raises the slash worker's discovery wait itself.
-- **Fork-owned debt the sync gate trips on** (both pre-date 2026-11-11 and are
-  identical on `origin/main` `b277306cb0`). `ruff check .` reports 92 findings, all in
-  fork files (`plugins/quality-gate`, fork tests, `tools/action_tags.py`, ...), so
-  `sync-upstream.yml`'s ruff step fails; upstream's own tree is clean.
-  `tests/gateway/test_kanban_recovery.py` (`custom`, `restart`) fails on the fork but
-  passes on upstream: the mandatory quality-gate plugin's tier classification times
-  out and a `pre_kanban_spawn` model override applies inside upstream's recovery
-  probe. Neither is in the fork-local test set the gate runs.
+- **Head-of-line barrier store has no producer** (`tools/approval.py`). Upstream
+  `f3aebdb91c` deleted the unreached no-notify `_pending` store and its
+  `submit_pending` call in `_pending_result`. The fork keeps `_pending`, `_pending_at`,
+  `_manual_prompt_depth`, `submit_pending`, `clear_pending`, `_manual_gate_scope` and
+  `session_has_open_human_decision` because `tests/tools/test_dual_signal_command_gate.py`
+  calls them, but nothing in production calls `submit_pending` any more, so limb (b) of
+  the barrier never fires. Limbs (a) and (c) still do. Undecided: re-add the call in
+  `_pending_result`, or drop limb (b) and its tests.
+- **MCP elicitation hint on upstream's rewrite** (`tools/mcp_tool_handlers.py`,
+  `tools/mcp_tool_sampling.py`). Upstream replaced the consent thunk with `_ask` and
+  moved the in-flight context into `_tool_call_scope`. The fork's `in_flight_tool`
+  thunk, `_pending_call_tool_name` (set and cleared in `_tool_call_scope`, which takes
+  an optional `tool_name`) and the `read_only_hint=` argument to
+  `request_elicitation_consent` are re-applied on top, for
+  `tests/tools/test_mcp_read_only_hint.py`. Drop with that test if upstream adds its own.
+- **`docker.yml` `merge` job** keeps the fork's `workflow_dispatch` gate and
+  `ubuntu-latest` runner (upstream: `push`, Blacksmith); the fork has no `push` trigger.
+- **`tests/gateway/test_kanban_recovery.py` (`custom`, `restart`) fails on the fork
+  but passes on upstream.** The mandatory quality-gate plugin's tier classification
+  times out and a `pre_kanban_spawn` model override applies inside upstream's recovery
+  probe. Accepted and left red on 2026-11-24; the file is not in the fork-local test
+  set the gate runs.
+- **Dropped: the fork's `write hermes config via CLI` pattern**
+  (`tools/approval_detection.py`). Upstream's anchored `hermes config set approval
+  settings` rule (`tools/approval_config_set.py`) gates `config set|unset` of an
+  approval-policy key and leaves reads of the text alone; the fork's unanchored
+  `config set|unset|edit` pattern also fired on the commands
+  `tests/tools/test_approval_hermes_config_set.py` requires to stay ungated. Fork
+  fallout: `tools/action_tags.py` now tags upstream's description as `CONFIG_WRITE`,
+  and `tests/tools/test_action_tags.py` (T2a, negative control 20) is written against
+  upstream's rule. Behaviour change: `hermes config edit` and `hermes config set` of a
+  non-policy key are no longer gated.
+- **`tests/tools/test_approval_applescript_documents.py`** stubs `_smart_verdict` with
+  the fork's `(verdict, decision)` return shape (upstream returns a bare verdict).
+
+### Resolved 2026-11-24 (kept for history)
+
+- **`sync-upstream.yml` Python version**: `uv sync --python 3.11` failed against
+  upstream's 3.14-only `uv.lock`; now `--python 3.14`.
+- **Fork-owned `ruff check .` debt** (93 findings in fork files; upstream tip clean):
+  cleared under the pinned `ruff==0.15.22`. The workflow's pre-push step installs
+  unpinned `ruff` (`uv tool install ruff`), so a newer release can still add findings.
 
 ### Resolved 2026-11-11 (kept for history)
 

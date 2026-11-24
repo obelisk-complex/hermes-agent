@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from tools.action_tags import ActionTag, CONFIGURABLE_TAGS
 
-__all__ = ["evaluate_dual_signal", "AutoApprovalDecision"]
+__all__ = ["AutoApprovalDecision", "evaluate_dual_signal"]
 
 
 @dataclass(frozen=True)

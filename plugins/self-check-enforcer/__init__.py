@@ -279,6 +279,7 @@ def _git_read(cwd: str, *args: str) -> str | None:
         out = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True, text=True, timeout=8,
+            check=False,
         )
     except Exception:
         return None

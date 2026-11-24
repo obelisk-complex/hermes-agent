@@ -26,7 +26,7 @@ _PY_VERSIONED = re.compile(r"^python3\.\d+$")
 
 # stack -> kind -> list of argv lists. A kind may have zero commands (a stack
 # with no typecheck simply has no entry, which the tier layer treats as "skip").
-DEFAULT_GATES: Dict[str, Dict[str, List[List[str]]]] = {
+DEFAULT_GATES: dict[str, dict[str, list[list[str]]]] = {
     "python": {
         "lint": [["ruff", "check", "."]],
         "test": [["pytest", "-q"]],
@@ -54,12 +54,12 @@ DEFAULT_GATES: Dict[str, Dict[str, List[List[str]]]] = {
 }
 
 
-def gates_for(stack: str) -> Dict[str, List[List[str]]]:
+def gates_for(stack: str) -> dict[str, list[list[str]]]:
     """Return the gate map for *stack* (empty dict if unknown)."""
     return DEFAULT_GATES.get(stack, {})
 
 
-def is_allowed(cmd: List[str]) -> bool:
+def is_allowed(cmd: list[str]) -> bool:
     """True iff *cmd* is non-empty and its executable is allow-listed.
 
     Accepts an exact basename match, OR a version-suffixed Python interpreter

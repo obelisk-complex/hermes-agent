@@ -52,6 +52,7 @@ def test_critical_files_covers_customised_files():
         out = subprocess.run(
             ["git", "diff", "--name-only", "upstream/main", "--", "*.py"],
             cwd=root, capture_output=True, text=True, timeout=30,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):  # pragma: no cover
         pytest.skip("git unavailable; cannot derive the fork-edited file set")
@@ -121,7 +122,7 @@ if __name__ == "__main__":
         except AssertionError as e:
             _failed += 1
             print(f"  ✗ {_t.__name__} — {e}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _failed += 1
             print(f"  ✗ {_t.__name__} — ERROR: {e!r}")
     print(f"\n=== {_passed} passed, {_failed} failed ===")

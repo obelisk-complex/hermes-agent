@@ -320,7 +320,7 @@ jobs:
         # Same extras as tests.yml — several fork-local tests exercise the
         # lazy-install provider SDKs directly, and the hermetic test env
         # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1).
-        run: uv sync --locked --python 3.11 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra keychain
+        run: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra keychain
 
       - name: Run fork-local tests against the merged tree
         if: steps.check.outputs.upstream_ahead != '0' && steps.fork-tests.outputs.count != '0'

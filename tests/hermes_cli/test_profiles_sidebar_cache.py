@@ -188,7 +188,6 @@ class SidebarCacheTests(unittest.TestCase):
                 scans += 1
             entered.set()
             self.assertTrue(release.wait(timeout=2))
-            return None
 
         with mock.patch.object(profiles, "_profile_targets", return_value=[("default", Path("/nonexistent"))]), \
                 mock.patch.object(profiles, "_read_profile_db", side_effect=fake_read), \

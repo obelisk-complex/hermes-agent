@@ -12,12 +12,12 @@ import pytest
 
 pytest.importorskip("mcp.types")
 
-from tools.mcp_tool import MCPServerTask, mcp_tool_read_only_hint  # noqa: E402
-from tools.mcp_tool_registration import (  # noqa: E402
+from tools.mcp_tool import MCPServerTask, mcp_tool_read_only_hint
+from tools.mcp_tool_registration import (
     _annotation_read_only_hint,
     _register_server_tools,
 )
-from tools.registry import ToolRegistry  # noqa: E402
+from tools.registry import ToolRegistry
 
 
 def _tool(name, annotations=None):
@@ -106,10 +106,10 @@ class TestCaptureThroughRegistration:
         assert mcp_tool_read_only_hint("scoped_srv", "absent") is None
 
 
-import asyncio  # noqa: E402  -- top-level imports above are importorskip-gated
+import asyncio
 
-from mcp.types import ElicitResult  # noqa: E402
-from tools.mcp_tool import ElicitationHandler  # noqa: E402
+from mcp.types import ElicitResult
+from tools.mcp_tool import ElicitationHandler
 
 
 def _form_params(message="please confirm"):
@@ -121,8 +121,8 @@ class TestReadOnlyHintCannotAutoApprove:
     reach auto_approved=True, including through the elicitation gate."""
 
     def test_hint_true_does_not_change_the_elicitation_outcome(self, monkeypatch):
-        import tools.approval_context as approval_context
-        import tools.approval_prompt as approval_prompt
+        from tools import approval_context
+        from tools import approval_prompt
         from tools.action_tags import CONFIGURABLE_TAGS
 
         server = MCPServerTask("ro_srv")
@@ -150,8 +150,8 @@ class TestReadOnlyHintCannotAutoApprove:
         ) == "decline"
 
     def test_elicitation_never_calls_the_dual_signal_gate(self, monkeypatch):
-        import tools.approval_context as approval_context
-        import tools.approval_prompt as approval_prompt
+        from tools import approval_context
+        from tools import approval_prompt
         import tools.auto_approval as auto_approval_module
 
         def _boom(**kwargs):
@@ -219,8 +219,8 @@ class TestHintReachesTheElicitationGate:
         assert seen["read_only_hint"] is None
 
     def test_audit_line_records_the_hint(self, monkeypatch, caplog):
-        import tools.approval_context as approval_context
-        import tools.approval_prompt as approval_prompt
+        from tools import approval_context
+        from tools import approval_prompt
         monkeypatch.setattr(approval_context, "_is_gateway_approval_context",
                             lambda: False)
         monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval",
@@ -257,6 +257,7 @@ class TestPendingCallToolNameLifecycle:
     if either line goes missing."""
 
     def test_tool_name_is_set_during_the_call_and_cleared_after(self):
+        import tools.mcp_tool as core
         from tools.mcp_tool import _servers
         from tools.mcp_tool_handlers import _make_tool_handler
 
@@ -277,6 +278,8 @@ class TestPendingCallToolNameLifecycle:
         mock_session.call_tool = AsyncMock(side_effect=_capture)
         server.session = mock_session
         _servers["call_lifecycle_srv"] = server
+        # Upstream's trust gate refuses an unregistered write-capable tool before the call is made.
+        core._tool_read_only_hints.setdefault("call_lifecycle_srv", {})["reader"] = True
 
         try:
             assert server._pending_call_tool_name is None  # sanity: pre-call
@@ -285,6 +288,7 @@ class TestPendingCallToolNameLifecycle:
                 handler({})
         finally:
             _servers.pop("call_lifecycle_srv", None)
+            core._tool_read_only_hints.pop("call_lifecycle_srv", None)
 
         assert seen_during_call["tool_name"] == "reader"
         # The more important half: if the finally-clear is deleted, this
@@ -311,8 +315,8 @@ class TestEndToEndCaptureThroughDecision:
     ):
         from tools.mcp_tool import ElicitationHandler, _servers
         from tools.mcp_tool_handlers import _make_tool_handler
-        import tools.approval_context as approval_context
-        import tools.approval_prompt as approval_prompt
+        from tools import approval_context
+        from tools import approval_prompt
 
         server = MCPServerTask("e2e_full_srv")
         # Stage 1 (Task 5): the server's own tool listing declares

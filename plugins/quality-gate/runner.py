@@ -30,7 +30,7 @@ DEFAULT_TIMEOUT_S = 600
 
 @dataclass(frozen=True)
 class GateRun:
-    cmd: List[str]
+    cmd: list[str]
     cwd: str
     rc: int
     stdout: str
@@ -41,7 +41,7 @@ class GateRun:
     reason: str = ""
 
 
-def _classify(cmd: List[str], rc: int) -> bool:
+def _classify(cmd: list[str], rc: int) -> bool:
     """Return True if *rc* counts as a pass for *cmd*."""
     if rc == 0:
         return True
@@ -52,8 +52,8 @@ def _classify(cmd: List[str], rc: int) -> bool:
 
 
 def run_gate(
-    cmd: List[str],
-    cwd: Union[str, Path],
+    cmd: list[str],
+    cwd: str | Path,
     *,
     timeout_s: int = DEFAULT_TIMEOUT_S,
 ) -> GateRun:
@@ -73,6 +73,7 @@ def run_gate(
             encoding="utf-8",
             errors="replace",
             timeout=timeout_s,
+            check=False,
         )
     except (FileNotFoundError, PermissionError) as exc:
         # PermissionError covers WSL paths that resolve to a Windows executable

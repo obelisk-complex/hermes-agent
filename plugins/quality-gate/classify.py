@@ -40,11 +40,11 @@ _PROMPT = (
 )
 
 
-def tier_sidecar_path(workspace: Union[str, Path]) -> Path:
+def tier_sidecar_path(workspace: str | Path) -> Path:
     return Path(workspace) / ".hermes" / "quality-gate" / "tier"
 
 
-def write_tier(workspace: Union[str, Path], tier: str) -> Path:
+def write_tier(workspace: str | Path, tier: str) -> Path:
     p = tier_sidecar_path(workspace)
     p.parent.mkdir(parents=True, exist_ok=True)
     # Self-gitignore the sidecar dir (mirrors evidence.py). On a worktree
@@ -59,7 +59,7 @@ def write_tier(workspace: Union[str, Path], tier: str) -> Path:
     return p
 
 
-def read_tier(workspace: Union[str, Path]) -> Optional[str]:
+def read_tier(workspace: str | Path) -> Optional[str]:
     p = tier_sidecar_path(workspace)
     if not p.exists():
         return None

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-TIERS: Tuple[str, ...] = ("quick", "standard", "thorough")
+TIERS: tuple[str, ...] = ("quick", "standard", "thorough")
 DEFAULT_TIER = "standard"
 
 _TIER_KINDS = {
@@ -26,6 +26,6 @@ def normalise_tier(value: Optional[str]) -> str:
     return v if v in _TIER_KINDS else DEFAULT_TIER
 
 
-def kinds_for_tier(tier: str) -> Tuple[str, ...]:
+def kinds_for_tier(tier: str) -> tuple[str, ...]:
     """Return the gate kinds that run at *tier* (fallback: DEFAULT_TIER)."""
     return _TIER_KINDS[normalise_tier(tier)]
