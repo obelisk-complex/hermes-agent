@@ -105,17 +105,31 @@ fix (search their commit history / the linked file for the same symptom).
   `tests/tools/test_mcp_read_only_hint.py`. Drop with that test if upstream adds its own.
 - **`docker.yml` `merge` job** keeps the fork's `workflow_dispatch` gate and
   `ubuntu-latest` runner (upstream: `push`, Blacksmith); the fork has no `push` trigger.
-- **`sync-upstream.yml` Python version.** Upstream's `uv.lock` now supports Python
-  3.14 only (`environments = ["python_version >= '3.14'"]`); the workflow's
-  `uv sync --python 3.11` fails against it. Needs `--python 3.14`.
-- **Fork-owned debt the sync gate trips on** (both pre-date 2026-11-11 and are
-  identical on `origin/main` `b277306cb0`). `ruff check .` reports 92 findings, all in
-  fork files (`plugins/quality-gate`, fork tests, `tools/action_tags.py`, ...), so
-  `sync-upstream.yml`'s ruff step fails; upstream's own tree is clean.
-  `tests/gateway/test_kanban_recovery.py` (`custom`, `restart`) fails on the fork but
-  passes on upstream: the mandatory quality-gate plugin's tier classification times
-  out and a `pre_kanban_spawn` model override applies inside upstream's recovery
-  probe. Neither is in the fork-local test set the gate runs.
+- **`tests/gateway/test_kanban_recovery.py` (`custom`, `restart`) fails on the fork
+  but passes on upstream.** The mandatory quality-gate plugin's tier classification
+  times out and a `pre_kanban_spawn` model override applies inside upstream's recovery
+  probe. Accepted and left red on 2026-11-24; the file is not in the fork-local test
+  set the gate runs.
+- **Dropped: the fork's `write hermes config via CLI` pattern**
+  (`tools/approval_detection.py`). Upstream's anchored `hermes config set approval
+  settings` rule (`tools/approval_config_set.py`) gates `config set|unset` of an
+  approval-policy key and leaves reads of the text alone; the fork's unanchored
+  `config set|unset|edit` pattern also fired on the commands
+  `tests/tools/test_approval_hermes_config_set.py` requires to stay ungated. Fork
+  fallout: `tools/action_tags.py` now tags upstream's description as `CONFIG_WRITE`,
+  and `tests/tools/test_action_tags.py` (T2a, negative control 20) is written against
+  upstream's rule. Behaviour change: `hermes config edit` and `hermes config set` of a
+  non-policy key are no longer gated.
+- **`tests/tools/test_approval_applescript_documents.py`** stubs `_smart_verdict` with
+  the fork's `(verdict, decision)` return shape (upstream returns a bare verdict).
+
+### Resolved 2026-11-24 (kept for history)
+
+- **`sync-upstream.yml` Python version**: `uv sync --python 3.11` failed against
+  upstream's 3.14-only `uv.lock`; now `--python 3.14`.
+- **Fork-owned `ruff check .` debt** (93 findings in fork files; upstream tip clean):
+  cleared under the pinned `ruff==0.15.22`. The workflow's pre-push step installs
+  unpinned `ruff` (`uv tool install ruff`), so a newer release can still add findings.
 
 ### Resolved 2026-11-11 (kept for history)
 
