@@ -243,8 +243,8 @@ DANGEROUS_PATTERN_TAGS: dict[str, ActionTag] = {
     "in-place edit of Hermes config/env": ActionTag.CONFIG_WRITE,
     "in-place edit of Hermes config/env (long flag)": ActionTag.CONFIG_WRITE,
     "in-place edit of Hermes config/env (perl/ruby)": ActionTag.CONFIG_WRITE,
-    # T2a (D19): hermes config CLI write verbs — tagged statically
-    "write hermes config via CLI (approval policy lives here)": ActionTag.CONFIG_WRITE,
+    # T2a (D19): `hermes config set|unset` of an approval-policy key (upstream's anchored rule), tagged statically
+    "hermes config set approval settings": ActionTag.CONFIG_WRITE,
     # interpreters / heredoc shell
     "shell execution via heredoc": ActionTag.COMMAND_INTERPRETER,
     # vcs

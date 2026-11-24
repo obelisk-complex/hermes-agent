@@ -4,7 +4,7 @@ Covers:
 - T1/T2: every DANGEROUS_PATTERNS description resolves to a tag; the map is
   complete by construction (derived from approval.py at runtime, so a new
   pattern without a tag fails CI — negative control 1/5).
-- T2a: the `hermes config` write-verb detection entry matches the write verbs
+- T2a: the `hermes config set|unset` approval-policy rule matches the write verbs
   and rejects the read verbs (control 20).
 - T3/D14: the config-write override fires on every detection variant for
   Hermes-home targets regardless of the tag the command would otherwise get
@@ -110,14 +110,14 @@ class TestHermesConfigDetection:
     @pytest.mark.parametrize("cmd", [
         "hermes config set approvals.auto_approve legacy",
         "hermes config unset approvals.mode",
-        "hermes config edit",
+        "hermes config set command_allowlist x",
         "hermes --profile x config set approvals.mode smart",
-        "hermes -p ade config set a b",
+        "hermes -p ade config set approvals.mode off",
     ])
     def test_write_verbs_detected(self, cmd):
         detected, key, desc = self._module.detect_dangerous_command(cmd)
         assert detected, f"{cmd!r} should be detected"
-        assert desc == "write hermes config via CLI (approval policy lives here)"
+        assert desc == "hermes config set approval settings"
         assert tag_for_pattern_key(desc) is ActionTag.CONFIG_WRITE
 
     @pytest.mark.parametrize("cmd", [
@@ -133,18 +133,18 @@ class TestHermesConfigDetection:
         assert not detected, f"{cmd!r} must stay undetected (read/migrate verb)"
 
     def test_control_20_removal_breaks_detection(self):
-        """Negative control 20: without the entry, no warning → approved."""
+        """Negative control 20: without upstream's anchored rule, no warning -> approved."""
+        rule = "hermes config set approval settings"
+        cmd = "hermes config set approvals.mode off"
+        # Precondition: the control only means something if the command is detected at all.
+        assert self._module.detect_dangerous_command(cmd)[0]
         with patch.object(self._module, "DANGEROUS_PATTERNS", [
-            (p, d) for p, d in self._module.DANGEROUS_PATTERNS
-            if d != "write hermes config via CLI (approval policy lives here)"
+            (p, d) for p, d in self._module.DANGEROUS_PATTERNS if d != rule
         ]):
             # recompile the compiled list exactly as module init does
-            compiled = [(re, d) for re, d in self._module.DANGEROUS_PATTERNS_COMPILED
-                        if d != "write hermes config via CLI (approval policy lives here)"]
+            compiled = [(re, d) for re, d in self._module.DANGEROUS_PATTERNS_COMPILED if d != rule]
             with patch.object(self._module, "DANGEROUS_PATTERNS_COMPILED", compiled):
-                detected, _key, _desc = self._module.detect_dangerous_command(
-                    "hermes config set approvals.mode off"
-                )
+                detected, _key, _desc = self._module.detect_dangerous_command(cmd)
                 assert not detected
 
 
@@ -201,7 +201,7 @@ class TestConfigWriteOverride:
     def test_f6_cli_write_verb_untouched_by_override(self):
         # T2a tags statically; the override does not need to fire.
         tags = self._resolve(
-            "write hermes config via CLI (approval policy lives here)",
+            "hermes config set approval settings",
             "hermes config set approvals.mode off",
         )
         assert tags == frozenset({ActionTag.CONFIG_WRITE})

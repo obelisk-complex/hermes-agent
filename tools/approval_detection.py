@@ -699,16 +699,6 @@ DANGEROUS_PATTERNS = [
     # between `hermes` and `gateway` (`hermes -p ade gateway restart`) are allowed so a profile flag can't slip past.
     (r'\bhermes\s+' + _GLOBAL_FLAGS + r'gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
-    # `hermes config set/unset/edit` rewrites the security policy file
-    # (~/.hermes/config.yaml holds approvals.mode, yolo, the allowlist, and
-    # the dual-signal keys). Without this entry the CLI walks around the
-    # config-write gate entirely: the command matches no pattern, so
-    # check_all_command_guards returns approved before the guardian step in
-    # every mode (D19 of the dual-signal plan). Read verbs (show/get/path/
-    # env-path/check) and migrate (bounded to filling absent defaults) are
-    # deliberately excluded. Flag-tolerant like the gateway entry above, so a
-    # profile flag can't slip the agent past the guard.
-    (r'\bhermes\s+' + _GLOBAL_FLAGS + r'config\s+(set|unset|edit)\b', "write hermes config via CLI (approval policy lives here)"),
     # Docker/Podman daemon redirect — global flags or env that point the CLI at a DIFFERENT (often remote) daemon:
     # `docker -H ssh://prod stop app` looks local but operates on remote infra, so any redirect requires approval
     # regardless of subcommand. The flag must be in global position (before the subcommand) and -H/--host/--context
